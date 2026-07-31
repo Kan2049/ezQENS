@@ -80,6 +80,42 @@ implemented unless already approved.
 **Dependencies:** milestone 0 and scientific-owner approval of the initial
 DAVE group-block grammar.
 
+### 3.1 Milestone 1.1 — high-confidence boundary-padding masks
+
+This focused feature completes the scientific import baseline before the
+Milestone 1 commit.
+
+**Deliverables**
+
+- GUI-independent, versioned edge-padding detector outside importer code.
+- Independent left/right boundary-connected plateau detection using explicit
+  equality and transition tolerances.
+- Dataset-level matching of plateau signatures across spectra.
+- Exact read-only default-on mask for high-confidence points and a separate
+  confirmation-gated suggestion mask for medium-confidence points.
+- Typed per-boundary evidence, transition metrics, confidence, diagnostics, and
+  privacy-safe summaries.
+- Local private-validation reporting of counts, derived ranges, confidence,
+  and evidence without arrays or plateau values.
+- Independent public synthetic tests, including short-run promotion and
+  negative/interior non-padding controls.
+
+**Acceptance**
+
+- Every plateau point, including the point adjacent to retained interior data,
+  is represented exactly in the high-confidence boolean mask.
+- High-confidence masks are reversible; medium-confidence suggestions are not
+  default-on; low/unsupported cases mask nothing.
+- Invalid masks, padding masks, future manual/range/Q masks, and Bragg warnings
+  remain distinct.
+- Imported energy, intensity, uncertainty, and invalid masks remain unchanged;
+  no baseline addition or subtraction occurs.
+- No sentinel value or private benchmark value appears in production defaults
+  or public tests.
+
+**Dependencies:** milestone 1 and scientific-owner approval of the
+`edge-padding-v1.0.0` tolerances and confidence policy.
+
 ## 4. Milestone 2 — generic ASCII, Q mapping, and analysis masks
 
 **Deliverables**
@@ -126,8 +162,8 @@ invalid-uncertainty policy are already approved.
   validation, and uniform-grid interpolation.
 - Exact group and explicitly selected nearest-Q association.
 - Minimal traceable processing decisions.
-- Optional advisory repeated-padding detection/range suggestion, never
-  automatically applied.
+- Integration of the milestone-1.1 auto-padding result while preserving
+  mandatory manual resolution valid-range selection.
 
 **Acceptance**
 
@@ -136,7 +172,9 @@ invalid-uncertainty policy are already approved.
 - Every selected processed array is reproducible from recorded decisions.
 - Invalid normalization/grid/range states fail with actionable diagnostics.
 - Normalization fails without a finite positive integral.
-- Advisory padding/range flags do not mutate arrays or select a range.
+- High-confidence auto-padding is reversible; medium-confidence suggestions
+  remain confirmation-gated; neither mutates arrays or selects the mandatory
+  manual resolution range.
 - Synthetic resolution tests and relevant Gate B prerequisites pass.
 
 **Dependencies:** milestones 1–2; approval of baseline, normalization,

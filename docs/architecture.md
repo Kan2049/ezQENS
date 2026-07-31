@@ -119,13 +119,22 @@ exclusions, and motion-fit exclusions. Sigma is valid only when finite and
 strictly positive; every other sigma is automatically invalid-masked without
 changing original arrays.
 
+Boundary-padding detection is a separate preprocessing service, not importer
+logic. It examines boundary-connected repeated intensity/uncertainty pairs per
+spectrum, compares signatures across the dataset, and returns immutable typed
+evidence plus point-level masks. High-confidence points form a reversible
+default-on mask; medium-confidence points form a confirmation-gated suggestion
+mask. Both remain distinct from invalid/manual/range/Q masks. The service never
+shifts intensity values or treats an internal constant segment as edge padding.
+
 `resolution` retains originals and makes manual valid-range selection
 mandatory and authoritative in the first implementation. It applies explicit
 optional baseline correction and validated unit-area normalization, validates
 grids, builds uniform processed grids, and associates sample and resolution
 groups. Exact versus user-selected nearest-Q association is explicit.
-Padding detection and range suggestion are optional advisory services whose
-outputs require confirmation and never mutate originals.
+High-confidence auto-padding may be default-on but reversible; medium-confidence
+range suggestions require confirmation. Neither mutates originals or replaces
+manual resolution valid-range selection.
 
 ### 3.4 Spectral models and convolution
 

@@ -157,16 +157,25 @@ is associated group by group, validate its count too. A mismatch reports sample
 count, applicable resolution count, Q count, and mapping mode. Never silently
 truncate, pad, discard, or combine Q values or spectra.
 
-### 4.5 Boundary-padding diagnostics
+### 4.5 Boundary-padding detection
 
-Sample and resolution imports preserve all original values. They may
-advisorially flag long repeated `(intensity, uncertainty)` pairs, repeated
-constant boundary segments, nonfinite points, and suspiciously identical
-padding across rows or groups. No numerical padding value is hard-coded.
+Sample and resolution imports preserve all original values. A separate
+preprocessing service inspects only boundary-connected repeated
+`(intensity, uncertainty)` plateaus and may use matching signatures across
+groups as supporting evidence. It never identifies padding solely from zero or
+negative intensity and never hard-codes a sentinel value.
 
-Suggested boundaries or valid ranges require explicit recorded confirmation.
-Padding diagnostics remain distinct from invalid uncertainty, manual masks,
-general fit range, resolution valid range, and Bragg warnings.
+High-confidence padding produces a point-level, reversible auto-padding mask
+recommended default-on. Medium-confidence padding produces a suggestion that
+requires explicit confirmation. Low-confidence evidence does not mask points.
+Every result records boundary run lengths, exact mask membership, transition
+evidence, confidence, algorithm version, and diagnostics.
+
+No padding operation shifts, subtracts, or adds an intensity baseline. Original
+arrays remain immutable, internal constant segments are not edge padding, and
+physical negative or near-zero interior values remain valid. Auto-padding masks
+and suggestions remain distinct from invalid uncertainty, manual masks, general
+fit range, resolution valid range, and Bragg warnings.
 
 ## 5. Spectral analysis capabilities
 
@@ -228,6 +237,11 @@ may trigger a warning but never silent deletion. Every exclusion is recorded
 in the analysis state; the complete persistent project history is a
 milestone-8 responsibility.
 
+Automatic edge-padding masks are a further distinct point-level mask. A
+high-confidence mask may be default-on but must be reversible and auditable;
+medium-confidence suggestions remain confirmation-gated. Padding is not
+background subtraction and does not modify intensity values.
+
 A statistically valid uncertainty is finite and strictly greater than zero.
 NaN, positive/negative infinity, zero, and negative sigma values are flagged
 and excluded from weighted fitting by an automatic invalid-data mask. They are
@@ -247,11 +261,13 @@ association, exact or explicitly selected nearest-Q matching, numerical
 convolution protected against circular FFT wrap-around, and recorded processing
 decisions.
 
-Repeated-boundary detection and automatic valid-range suggestions are optional
-advisory enhancements. A suggestion is never applied without explicit user
-confirmation. The processing preview should show original range, any suggested
-range, selected range, invalid points, baseline setting, normalization result,
-and warnings. Normalization fails when no finite positive integral exists.
+High-confidence edge-padding masks from the preprocessing service may be
+default-on and remain reversible. Medium-confidence range suggestions are never
+applied without explicit user confirmation. Neither replaces mandatory,
+authoritative manual resolution valid-range selection. The processing preview
+should show original range, auto-padding mask, any suggested range, selected
+range, invalid points, baseline setting, normalization result, and warnings.
+Normalization fails when no finite positive integral exists.
 
 The complete imported energy range must never be assumed physically valid.
 

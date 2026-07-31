@@ -46,6 +46,13 @@ validated.
 - A valid statistical uncertainty is finite and strictly greater than zero.
   Automatically mask every point with NaN, infinite, zero, or negative sigma
   for weighted fitting while preserving the original arrays unchanged.
+- Detect padding only as boundary-connected repeated `(intensity, uncertainty)`
+  plateaus; never infer padding solely from zero or negative intensity and
+  never hard-code a sentinel value.
+- High-confidence edge padding may be placed in a separate reversible
+  default-on auto-padding mask. Medium-confidence detections remain suggestions
+  requiring confirmation. Neither case changes imported arrays or performs an
+  intensity baseline shift.
 - Unweighted and logarithmic relative losses are not defaults.
 - Evaluate the elastic term directly as `A_elastic * R_Q(E - E0)` using the
   selected, optionally baseline-corrected, unit-area measured resolution.
@@ -75,8 +82,9 @@ validated.
   optimization only when grids truly match; import must never interpolate.
 - Preserve recognized DAVE fit-result columns as metadata but exclude them
   from energy, measured intensity, and uncertainty.
-- Keep invalid uncertainty, fitting range, manual masks, spectral-Q exclusion,
-  motion-Q exclusion, padding warnings, and Bragg warnings distinct.
+- Keep invalid uncertainty, automatic edge-padding masks, medium-confidence
+  padding suggestions, fitting range, manual masks, spectral-Q exclusion,
+  motion-Q exclusion, and Bragg warnings distinct.
 - Q mapping resolves to an ordered explicit list in `Å^-1` and requires one Q
   per sample spectrum. Never sort, deduplicate, pad, truncate, extrapolate, or
   otherwise repair a mismatch silently.

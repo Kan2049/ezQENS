@@ -9,4 +9,7 @@ dist/
 *.egg-info/
 private_data/
 private_results/
+# Ignore local validation artifacts while keeping the generic inspector visible.
+scripts/private_validation/*
+!scripts/private_validation/inspect_reduced_data.py
 .DS_Store

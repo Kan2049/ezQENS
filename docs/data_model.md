@@ -131,15 +131,17 @@ structure but cannot be mistaken for a sample dataset.
   resolution spectra; source provenance; import units/summary; mandatory
   manually selected valid range for each processed group; processed spectra;
   baseline setting; normalization result; grid status; processing warnings.
-- **Optional fields:** advisory padding diagnostics/suggested ranges;
-  interpolation settings; source temperature/unit; association mapping; notes.
+- **Optional fields:** automatic padding-mask results and advisory suggested
+  ranges; interpolation settings; source temperature/unit; association
+  mapping; notes.
 - **Units:** energy meV; resolution intensity in declared source units before
   processing and unit-area semantics after normalization; Q `Å^-1` when known.
 - **Validation:** originals cannot be replaced by processed arrays; every
   processed form links its minimal ordered processing decisions; selected range
   is explicit; normalization requires a finite positive integral; grid validity
-  and source type are retained; advisory suggestions cannot become selected
-  without confirmation.
+  and source type are retained; medium-confidence suggestions cannot become
+  selected without confirmation; high-confidence auto-padding remains
+  reversible and does not replace the mandatory manually selected range.
 - **Serialization and links:** links original/processed `Spectrum` records,
   `ProcessingStep`, `QMapping`, sample-resolution associations, and provenance.
 
@@ -191,18 +193,42 @@ One auditable transformation or user decision.
 Explicit analysis-level inclusion/exclusion state.
 
 - **Required scientific fields:** target dataset/spectrum references;
-  invalid-point mask reference; manual-point mask reference; spectral-fit
-  inclusion; EISF-model-fit inclusion; origin; reason/history references.
+  invalid-point mask reference; auto-padding mask reference; manual-point mask
+  reference; spectral-fit inclusion; EISF-model-fit inclusion; origin;
+  reason/history references.
 - **Optional fields:** fitting-energy minimum/maximum; suggested range;
   override reason; Bragg-warning annotations; restoration link.
 - **Units:** energy limits in meV; Q annotations in `Å^-1`.
 - **Validation:** point masks match the target length; range min is below max;
-  invalid and manual masks remain separately recoverable; exclusion scopes are
-  distinct; invalid sigma feeds only the invalid mask; padding and Bragg flags
-  are warnings, not masks; every manual change is minimally traceable.
+  invalid, auto-padding, and manual masks remain separately recoverable;
+  exclusion scopes are distinct; invalid sigma feeds only the invalid mask;
+  medium-confidence padding suggestions and Bragg flags do not silently become
+  masks; every automatic/manual change is minimally traceable.
 - **Serialization and links:** links `Spectrum`, `ProcessingStep`,
   `FitConfiguration`, and history. Prefer bit/boolean array references over
   ambiguous lists of dropped values.
+
+### 9.1 EdgePaddingDetectionResult
+
+Minimal milestone-1.1 in-memory result produced outside importers.
+
+- **Required scientific fields:** algorithm version and explicit tolerance
+  configuration; ordered per-spectrum group identity; exact read-only
+  high-confidence padding mask; separate medium/high suggestion mask; left and
+  right run lengths and energy bounds; plateau intensity/uncertainty values;
+  adjacent interior index; quantified intensity/uncertainty transitions;
+  per-boundary and aggregate confidence; evidence codes; default-on status; and
+  structured diagnostics.
+- **Units:** energy bounds retain spectrum energy units; plateau values retain
+  spectrum intensity and uncertainty units; masks and confidence are
+  dimensionless.
+- **Validation:** masks match spectrum length; default-on points are a subset of
+  suggestions; only boundary-connected plateaus are eligible; high-confidence
+  masks are reversible; medium-confidence points remain confirmation-gated;
+  invalid-data masks remain separate; originals are immutable.
+- **Serialization and links:** early results hold immutable boolean arrays
+  directly and link by ordered group identity. Full persistence and audit
+  history remain milestone-8 work.
 
 ## 10. SpectralModelDefinition
 
@@ -481,6 +507,8 @@ AnalysisProject
 - Every derived result can trace back to source arrays and settings.
 - Missing uncertainty/covariance is distinct from zero.
 - Masks and Q exclusions retain scope and history.
+- High-confidence edge-padding masks are exact, reversible, separately
+  recoverable, and never imply an intensity baseline shift.
 - At milestone 8, project serialization contains data only, validates all
   references, and migrates scientific meaning or fails visibly.
 

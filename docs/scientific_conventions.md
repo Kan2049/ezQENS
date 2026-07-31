@@ -214,6 +214,8 @@ EISF-model fitting are distinct states with recorded reasons.
 The following concepts remain distinct:
 
 - automatically detected invalid values, including invalid sigma;
+- high-confidence automatic boundary-padding masks;
+- medium-confidence boundary-padding suggestions;
 - the fitting-energy range;
 - manually masked energy points;
 - Q spectra excluded from spectral fitting; and
@@ -223,10 +225,38 @@ Possible Bragg contamination, including contamination near the elastic line at
 specific Q, may generate a warning. qensfit must not silently delete the Q
 spectrum or affected points. The detection heuristic is unresolved.
 
-Repeated boundary/padding warnings and possible Bragg-contamination warnings
-are also distinct from all mask types. The importer preserves repeated values.
-Detection is advisory and may not apply a range or mask without explicit
-recorded user confirmation. No numerical value is hard-coded as padding.
+The importer preserves every repeated value. Edge-padding detection runs
+separately and examines boundary-connected constant `(intensity, uncertainty)`
+runs only. It does not mask an identical plateau occurring solely inside the
+spectrum, infer padding from intensity sign alone, or hard-code a sentinel.
+
+The approved `edge-padding-v1.0.0` defaults are:
+
+- plateau equality: relative tolerance `1e-7`, absolute tolerance `1e-12`;
+- cross-spectrum signature equality: relative tolerance `1e-6`, absolute
+  tolerance `1e-10`;
+- numerically clear transition: absolute intensity or uncertainty jump greater
+  than `1e-12 + 0.05 * max(abs(plateau), abs(interior))`;
+- statistically clear intensity transition: at least `5.0` times
+  `hypot(plateau_uncertainty, interior_uncertainty)`;
+- candidate, regular, and long runs: at least 2, 3, and 5 points respectively;
+- long relative run: at least 10% of spectrum points; and
+- a two-point run requires matching clear long runs in at least two other
+  spectra for high-confidence promotion.
+
+A high-confidence decision requires a boundary-connected repeated pair, an
+adjacent interior point, a clear numerical or statistical transition, and the
+approved combination of run length, relative length, nonpositive-intensity
+support, or cross-group signature support. Nonpositive intensity is supporting
+evidence only. High-confidence points enter an exact, reversible default-on
+boolean mask. Medium-confidence runs enter a separate suggestion mask and
+require confirmation. Low/unsupported evidence masks nothing.
+
+Padding masks never modify or baseline-shift intensity arrays. All plateau
+points are included exactly, including the point immediately adjacent to the
+first retained interior point. Invalid-data masks, manual masks, ranges, Q
+exclusions, Bragg warnings, and padding masks remain independently recoverable.
+Constant or linear backgrounds remain future spectral-model components.
 
 Every automatic flag, user mask, range change, Q exclusion, restoration, and
 reason remains traceable in the analysis state; the complete append-only
@@ -254,16 +284,17 @@ order, parameters, array references, warnings, and user choices are auditable.
 Normalization must fail clearly when a finite positive normalization area
 cannot be established.
 
-Repeated-boundary detection and suggested valid ranges are optional advisory
-enhancements. If present, they preserve original values and show their
-rationale; no suggestion is applied without recorded confirmation. The
-processing preview exposes original range, optional suggestion, selected
-range, invalid points, baseline setting, normalization result, and warnings.
+High-confidence boundary-padding masks may be default-on while remaining
+reversible and fully evidenced. Medium-confidence suggested ranges still
+require recorded confirmation. Neither changes original values nor replaces
+mandatory manual resolution valid-range selection. The processing preview
+exposes original range, auto-padding mask, optional suggestion, selected range,
+invalid points, baseline setting, normalization result, and warnings.
 
 Uniform-grid spacing, interpolation method, baseline-estimation method,
-padding length, boundary treatment, kernel centering, and normalization
-integration rule remain unresolved. These must be validated independently
-before single-spectrum fitting is accepted.
+convolution boundary treatment, kernel centering, and normalization integration
+rule remain unresolved. These must be validated independently before
+single-spectrum fitting is accepted.
 
 ## 10. Molecular coordinates
 

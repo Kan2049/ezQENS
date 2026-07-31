@@ -1,0 +1,5 @@
+# Group malformed
+# x y yerr
+-1.0 2.0 0.1
+0.0 not-a-number 0.2
+1.0 2.5 0.2

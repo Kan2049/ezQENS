@@ -1,0 +1,6 @@
+# Synthetic DAVE-style reduced spectrum
+# Group first
+# x y yerr
+-1.0e+00 2.0e+00 1.0e-01
+0.0e+00 3.0e+00 1.5e-01
+1.0e+00 2.5e+00 2.0e-01

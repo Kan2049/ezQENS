@@ -105,13 +105,27 @@ Public synthetic text fixtures cover the following contracts.
 - DAVE Q-bin parsing only after its field semantics are approved; until then,
   production parsing is rejected with an actionable unresolved diagnostic.
 
-#### 3.2.5 Padding diagnostics and custom input
+#### 3.2.5 Edge-padding detection and custom input
 
-- Repeated values at left and right boundaries.
+- Long repeated pairs at left, right, and both boundaries.
 - Different padding lengths by Q group.
+- Matching sentinel signatures across multiple groups.
+- Two-point boundary runs promoted only by strong long-run cross-group
+  evidence.
+- Near-equal plateau values exercise the declared tolerances.
+- Finite positive padding uncertainty is accepted.
+- Invalid uncertainty remains solely in its invalid-data mask.
+- Isolated negative interior points and noisy negative physical tails remain
+  unmasked.
 - Repeated values inside a physical region are not automatically removed.
+- Weak transitions are medium-confidence suggestions, not default-on masks.
 - Detection has no hard-coded padding value.
-- An advisory flag does not mutate data or apply a range.
+- Exact boundary plateau membership includes the point adjacent to the first
+  retained interior point.
+- Default and suggestion masks match spectrum length and are read-only.
+- Detection does not mutate or baseline-shift imported arrays.
+- Privacy-safe summaries contain counts, ranges, confidence, and evidence
+  codes, not arrays or plateau values.
 - Padding, invalid sigma, manual masks, fit range, resolution range, and Bragg
   warnings remain distinct.
 - Generic custom mappings identify energy, intensity, uncertainty, optional
@@ -259,6 +273,8 @@ nonfinite values, constant offsets, nonuniform grids, and repeated boundary
 padding. Validate:
 
 - detection versus mutation separation;
+- high-confidence default-on padding is reversible and exactly point-masked;
+- medium-confidence padding remains confirmation-gated;
 - mandatory manual valid-range selection and its authoritative use;
 - original and selected ranges are both inspectable;
 - optional suggested-range rationale and explicit confirmation;
@@ -269,10 +285,9 @@ padding. Validate:
 - exact and user-selected nearest-Q association; and
 - full processing audit history.
 
-No fixed trimming threshold or padding value is approved by this plan.
-Automatic padding/range suggestion is optional and advisory. Detection and
-interpolation algorithms require scientific-owner review before their
-acceptance tolerances are frozen.
+No fixed padding value is approved. The `edge-padding-v1.0.0` detector uses the
+explicit tolerances in `scientific_conventions.md`; changes require versioned
+tests and scientific-owner review. Interpolation algorithms remain unresolved.
 
 ## 6. Fit diagnostics validation
 
@@ -419,10 +434,11 @@ fits, Arrhenius analysis, or non-version-1 motion features.
 ## 14. Unresolved decisions, risks, and milestone dependencies
 
 Unresolved items include detailed parser grammar, DAVE Q-bin field semantics,
-explicit-list comment policy, advisory padding/range algorithms, convolution
-grid details, fit-quality thresholds, AIC/AICc/covariance conventions, approved
-motion equations, numeric tolerances, and supported Windows versions.
-Inclusive linear Q endpoints and invalid-sigma handling are approved.
+explicit-list comment policy, future edge-padding refinements, convolution grid
+details, fit-quality thresholds, AIC/AICc/covariance conventions, approved
+motion equations, and supported Windows versions. Inclusive linear Q endpoints,
+invalid-sigma handling, and the versioned Milestone-1.1 padding defaults are
+approved.
 
 Risks include circular tests, overfitting tolerances to one benchmark,
 platform-specific false failures, leaking private data through artifacts, and
