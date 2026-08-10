@@ -4,4 +4,3 @@ from qensfit.io.importers.detection import detect_reduced_data_format
 from qensfit.io.importers.reduced_data import import_reduced_data
 
 __all__ = ["detect_reduced_data_format", "import_reduced_data"]
-

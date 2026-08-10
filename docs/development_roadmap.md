@@ -1,396 +1,592 @@
-# Development roadmap
-
-## 1. Scope and sequencing rule
-
-This roadmap incrementally delivers version 1 while placing scientific
-validation before interface breadth. Each milestone produces typed,
-GUI-independent core behavior, synthetic tests, documentation updates, and
-explicit diagnostics.
-
-The first implementation milestone after this documentation is the
-content-based detector plus DAVE group-block, wide-table, and single-spectrum
-import path with synthetic tests. GUI implementation cannot start before the
-core importer, resolution processing, convolution, and single-spectrum fitting
-pass their scientific validation gates.
-
-Milestones 1–6 use only minimal typed in-memory models. They do not implement
-the final `.qensfit` ZIP64 container, UUIDs for every temporary object,
-entity-level migrations, hash-addressed array registries, append-only project
-history, attachments, complete security/migration infrastructure, or atomic
-project saves. Simple identifiers and immutable values may improve
-traceability, but persistence cannot delay scientific validation. Milestone 8
-reviews and implements the complete persistence contract.
-
-## 2. Milestone 0 — requirements and architecture baseline
-
-**Deliverables**
-
-- Product, scientific, architecture, data-model, validation, and roadmap
-  documents.
-- Project instructions and privacy boundaries.
-- Initial package/tooling skeleton.
-- Register of unresolved scientific decisions.
-
-**Acceptance**
-
-- Required workflow and non-goals are traceable.
-- FWHM, relaxation-time, EISF, fitting, batch, masking, and privacy conventions
-  are explicit.
-- C2/C4 formulas remain marked unresolved.
-- No production scientific or GUI code is introduced.
-
-**Dependencies:** none.
-
-## 3. Milestone 1 — core reduced-data detection and import
-
-This is the first implementation milestone.
-
-**Deliverables**
-
-- Content-based format-detector interface returning proposal, confidence,
-  evidence, counts, required/extra columns, warnings, and alternatives.
-- DAVE group-block importer.
-- Wide QENS `x/yN/yerrN` table importer.
-- Single-spectrum `x/y/yerr` table importer.
-- Minimal shared scientific spectrum representation with explicit sample or
-  resolution role and support for shared or per-spectrum energy grids.
-- Recognition of DAVE fitting columns such as `ModelFit`, `Func1`, and `Func2`
-  as ignored source metadata rather than measured data.
-- Structural summaries that do not print full arrays.
-- Independently generated synthetic fixtures and malformed-input tests.
-- Confirmation state for automatically proposed formats.
-
-**Acceptance**
-
-- Group-block, wide, and single-spectrum fixtures are correctly detected and
-  imported with order, grids, row counts, arrays, units, role, columns, and
-  diagnostics intact.
-- Wide shared-grid storage still exposes independent spectra; unequal
-  group-block grids are not interpolated.
-- Invalid sigma is masked without modifying original arrays.
-- Missing/ambiguous content fails clearly without partial silent import.
-- File extension alone cannot determine classification.
-- Public tests contain no private benchmark values/files.
-- Validation-plan Gate A passes for the milestone-1 subset.
-
-Generic arbitrary column mapping may wait for milestone 2, but milestone 1
-interfaces must leave room for it. DAVE Q-bin parameter semantics are not
-implemented unless already approved.
-
-**Dependencies:** milestone 0 and scientific-owner approval of the initial
-DAVE group-block grammar.
-
-### 3.1 Milestone 1.1 — high-confidence boundary-padding masks
-
-This focused feature completes the scientific import baseline before the
-Milestone 1 commit.
-
-**Deliverables**
-
-- GUI-independent, versioned edge-padding detector outside importer code.
-- Independent left/right boundary-connected plateau detection using explicit
-  equality and transition tolerances.
-- Dataset-level matching of plateau signatures across spectra.
-- Exact read-only default-on mask for high-confidence points and a separate
-  confirmation-gated suggestion mask for medium-confidence points.
-- Typed per-boundary evidence, transition metrics, confidence, diagnostics, and
-  privacy-safe summaries.
-- Local private-validation reporting of counts, derived ranges, confidence,
-  and evidence without arrays or plateau values.
-- Independent public synthetic tests, including short-run promotion and
-  negative/interior non-padding controls.
-
-**Acceptance**
-
-- Every plateau point, including the point adjacent to retained interior data,
-  is represented exactly in the high-confidence boolean mask.
-- High-confidence masks are reversible; medium-confidence suggestions are not
-  default-on; low/unsupported cases mask nothing.
-- Invalid masks, padding masks, future manual/range/Q masks, and Bragg warnings
-  remain distinct.
-- Imported energy, intensity, uncertainty, and invalid masks remain unchanged;
-  no baseline addition or subtraction occurs.
-- No sentinel value or private benchmark value appears in production defaults
-  or public tests.
-
-**Dependencies:** milestone 1 and scientific-owner approval of the
-`edge-padding-v1.0.0` tolerances and confidence policy.
-
-## 4. Milestone 2 — generic ASCII, Q mapping, and analysis masks
-
-**Deliverables**
-
-- Configurable ASCII/TXT/DAT/CSV column mapping.
-- Inclusive linear Q range using `numpy.linspace` semantics.
-- Manual ordered Q list with comma/newline input contract.
-- Explicit Q-list file with approved blank/comment policy.
-- DAVE Q-bin parameter-file parser only after field semantics are approved.
-- Imported-metadata mapping where explicitly supported.
-- Resolved explicit-list preview, confirmation, and exact sample/applicable
-  resolution group-count diagnostics.
-- Distinct invalid-point, fitting-range, manual-point, spectral-Q-exclusion,
-  and motion-Q-exclusion concepts.
-- Inspection-ready, GUI-neutral summaries/view models.
-
-**Acceptance**
-
-- Ambiguous generic inputs require explicit mapping.
-- Linear mapping uses finite inclusive endpoints, `N >= 2`, and one value per
-  sample group.
-- Manual/imported order is preserved without sort, deduplication, padding,
-  truncation, extrapolation, discard, or combination.
-- Every mapping is previewed/confirmed and every mask/exclusion has distinct
-  scope and minimal traceability.
-- Count mismatches report mapping mode and sample/Q/applicable-resolution
-  counts.
-- Possible contamination annotations never delete data.
-
-**Dependencies:** milestone 1; approval of explicit-list comment syntax and
-every DAVE Q-bin field supported by its parser. Linear endpoints and
-invalid-uncertainty policy are already approved.
-
-## 5. Milestone 3 — measured-resolution import and processing
-
-**Deliverables**
-
-- Resolution datasets from vanadium or low-temperature samples using the
-  validated ASCII path.
-- Original/processed separation.
-- Invalid/NaN/infinity handling.
-- Mandatory, authoritative manual valid-range selection.
-- Optional explicit constant baseline, validated unit-area normalization, grid
-  validation, and uniform-grid interpolation.
-- Exact group and explicitly selected nearest-Q association.
-- Minimal traceable processing decisions.
-- Integration of the milestone-1.1 auto-padding result while preserving
-  mandatory manual resolution valid-range selection.
-
-**Acceptance**
-
-- Original arrays remain unchanged.
-- Original and manually selected ranges are inspectable.
-- Every selected processed array is reproducible from recorded decisions.
-- Invalid normalization/grid/range states fail with actionable diagnostics.
-- Normalization fails without a finite positive integral.
-- High-confidence auto-padding is reversible; medium-confidence suggestions
-  remain confirmation-gated; neither mutates arrays or selects the mandatory
-  manual resolution range.
-- Synthetic resolution tests and relevant Gate B prerequisites pass.
-
-**Dependencies:** milestones 1–2; approval of baseline, normalization,
-interpolation, and association policies. Automatic suggestion algorithms are
-optional and do not block the mandatory manual path.
-
-## 6. Milestone 4 — numerical convolution
-
-**Deliverables**
-
-- GUI-independent linear numerical convolution on validated grids.
-- Direct elastic evaluation as `A_elastic * R_Q(E - E0)`, without a discrete
-  grid delta.
-- Unit-area Lorentzian convolution preserving integrated-area semantics within
-  reviewed finite-grid tolerance.
-- Explicit centering, interpolation, padding, and crop configuration.
-- Direct reference implementation for tests and optimized path as justified.
-- Protection against circular FFT wrap-around.
-
-**Acceptance**
-
-- Elastic-area, no-discrete-delta, Lorentzian-area, symmetry,
-  direct-versus-FFT, odd/even, boundary, normalization, and no-wrap tests pass
-  with reviewed tolerances.
-- No implicit grid or FWHM/HWHM conversion occurs.
-- Validation-plan Gate B passes.
-
-**Dependencies:** milestone 3 and approval of convolution-grid conventions.
-
-## 7. Milestone 5 — validated single-spectrum fitting
-
-**Deliverables**
-
-- Elastic, one/multiple Lorentzian, constant/linear background definitions
-  using integrated areas and FWHM.
-- Parameter initial values, bounds, and fixed/free state.
-- `scipy.optimize.least_squares` adapter with weighted standardized residuals.
-- Optimized values, residual arrays, chi-square/reduced chi-square,
-  covariance/standard errors where estimable, convergence, bound,
-  Jacobian/covariance, and scientific warnings.
-- AIC/AICc after their likelihood convention is approved; their absence does
-  not block the initial prototype.
-- Synthetic parameter-recovery and independent script/DAVE comparisons.
-
-**Acceptance**
-
-- One selected Q can be configured, fit, reviewed, and refit through a callable
-  core API.
-- Recovery and failure cases distinguish convergence from scientific quality.
-- Required diagnostics survive typed in-memory domain conversion.
-- Insufficient valid points fail clearly and at least prevent nonpositive
-  statistical degrees of freedom.
-- Validation-plan Gate C passes without requiring unresolved AIC/AICc.
-
-**Dependencies:** milestone 4; approved invalid-sigma policy (already fixed)
-and approval of covariance and quality-warning policies. AIC/AICc approval may
-follow without blocking the prototype.
-
-## 8. Milestone 6 — sequential batch fitting and derived QENS quantities
-
-**Deliverables**
-
-- Low-to-high and optional high-to-low independent per-Q fits.
-- Optional previous-successful-fit seeding.
-- Per-Q failure, warning, exclusion, manual-refit, and selected-result
-  traceability in memory.
-- FWHM linewidth tables, relaxation time, experimental EISF from integrated
-  component areas, and component retention.
-
-**Acceptance**
-
-- No parameter is globally shared or simultaneously optimized across Q.
-- A failed or excluded Q does not erase or invalidate unrelated results.
-- Manual refits are new linked results.
-- FWHM/tau/EISF and exclusion convention tests pass.
-- Validation-plan Gate D passes, except deferred covariance-propagated EISF
-  uncertainty if its policy is not yet approved.
-
-**Dependencies:** milestone 5; approved derived-uncertainty policy for any
-uncertainties claimed.
-
-## 9. Milestone 7 — XYZ geometry and candidate motion models
-
-**Deliverables**
-
-- XYZ import retaining all atoms.
-- Hydrogen selection, coordinates/distances, fixed origin, and x/y/z axis.
-- Stable motion-model interface and independent candidate-fit orchestration.
-- Approved C2, C4, and isotropic implementations only after scientific-owner
-  equation/parameter review.
-- Weighted comparison using reduced chi-square, AICc, uncertainty, residual
-  structure, validity, and warnings.
-
-**Acceptance**
-
-- No combined candidate populations.
-- Candidate comparisons use identical included experimental points and
-  compatible statistics.
-- Report wording distinguishes best support from proof of mechanism.
-- Independent reference calculations and validation-plan Gate E pass.
-
-**Dependencies:** milestone 6, an approved AIC/AICc likelihood convention for
-candidate comparison, and a hard scientific gate approving each model's
-equation, parameters, limits, and reference cases. Interface work may precede
-formula approval; executable model claims may not.
-
-## 10. Milestone 8 — reproducible project persistence and exports
-
-This milestone reviews the long-term proposal against the now-validated
-scientific contracts, finalizes it, and implements persistence for the first
-time. Earlier milestones may inform the design but do not build partial archive
-or migration infrastructure.
-
-**Deliverables**
-
-- Reviewed/finalized data-only `.qensfit` project container and public file
-  contract.
-- Archive layout, attachment policy, hashes, atomic save, safe load, and
-  schema/entity versioning.
-- Explicit migrations and round-trip fixtures.
-- Project/reference source data, mappings, units, histories, masks, resolution
-  settings, fit configurations/results, exclusions, EISF, motion results,
-  software version, and schema version.
-- Machine-readable tables and scientific-review exports with units, FWHM
-  labels, warnings, and provenance.
-
-**Acceptance**
-
-- Complete synthetic project round trips without scientific-semantic loss.
-- Corrupt, malicious, oversized, and unsupported containers fail safely.
-- Export records identify contents and conventions.
-- Private paths/content obey redaction and no-upload rules.
-
-**Dependencies:** stable schemas from milestones 1–7 and approval of the
-container/redaction policy.
-
-## 11. Milestone 9 — PySide6 desktop workflow
-
-PySide6 is introduced here, not earlier.
-
-**Deliverables**
-
-- Import, Spectrum Fit, Batch Results, Motion Models, and Export/Project Summary
-  screens.
-- Thin controllers over application/core services.
-- Background long-running operations with progress and cancellation.
-- Clear units, masks, warnings, diagnostics, and manual-refit interactions.
-- macOS Apple Silicon packaging prototype.
-
-**Acceptance**
-
-- GUI imports no formulas or optimizer implementation.
-- Core tests run without PySide6.
-- A synthetic workflow completes import through save/export.
-- Cancellation leaves a valid project state.
-- Headless smoke and manual usability checks pass.
-
-**Dependencies:** milestones 1–5 scientifically validated; in practice
-milestones 6–8 provide the full five-screen version-1 workflow.
-
-## 12. Milestone 10 — Windows and public-release readiness
-
-**Deliverables**
-
-- Supported Windows build, installer, and clean-machine verification.
-- Cross-platform CI for supported Python/platform combinations.
-- Performance, accessibility, security, privacy, licensing, documentation, and
-  release review.
-- Public synthetic tutorials/examples only.
-
-**Acceptance**
-
-- Core and GUI validation gates pass on macOS Apple Silicon and supported
-  Windows.
-- Project files interoperate across platforms.
-- No private data or identifying artifacts enter packages, logs, docs, tests,
-  or release assets.
-- Known scientific limitations and unresolved items are user-visible.
-
-**Dependencies:** milestones 1–9 and product decisions on licensing, installer,
-support policy, and release criteria.
-
-## 13. Cross-cutting work
-
-At every milestone:
-
-- update typed contracts and documentation before changing scientific meaning;
-- add unit/type validation and synthetic tests;
-- preserve milestone-appropriate traceability and structured diagnostics;
-- keep logs privacy-safe;
-- run pytest, Ruff, and mypy;
-- assess Windows portability even before Windows packaging; and
-- record scientific-owner approvals for conventions and baselines.
-
-## 14. Assumptions and explicit non-goals
-
-The roadmap assumes incremental owner review and access to private comparison
-workflows locally. Dates and staffing are intentionally not estimated.
-
-No milestone adds raw reduction, INS/fixed-window analysis, Bayesian/MCMC or
-global fits, Arrhenius analysis, arbitrary model-code execution, web/multi-user
-features, or automatic publication figure editing.
-
-## 15. Unresolved decisions and risks
-
-Scientific gates remain for detailed DAVE grammar, DAVE Q-bin field semantics,
-explicit-list comment syntax, resolution/convolution numerical policy,
-covariance/AIC conventions, Bragg heuristics, fit-quality thresholds, and all
-candidate-motion equations and parameterizations. Inclusive linear Q mapping
-and invalid-sigma handling are approved.
-
-Product/engineering decisions remain for the project container, recovery,
-export formats, GUI worker model, macOS/Windows packaging, licensing, and
-support matrix.
-
-The critical-path risk is discovering a scientific convention problem after UI
-or persistence depends on it. The sequence mitigates that risk by validating
-import, resolution, convolution, and one-spectrum fitting before batch,
-derived, motion, or GUI expansion.
+# Development Roadmap
+
+## 1. Roadmap philosophy
+
+QENSfit is developed incrementally as a small, focused, scientifically transparent QENS analysis toolkit.
+
+The roadmap follows **rolling refinement**:
+
+* completed milestones retain a concise record of validated behavior;
+* the next active milestone is specified in enough detail to implement safely;
+* near-term milestones describe scientific goals and validation boundaries;
+* distant capabilities remain intentionally concise and provisional.
+
+Detailed implementation decisions belong in the milestone-specific specification written immediately before implementation, not in the long-term roadmap.
+
+The guiding principles are:
+
+1. Validate scientific behavior before adding interface breadth.
+2. Preserve original numerical data and make analysis decisions explicit.
+3. Keep the scientific core independent of GUI and source-specific infrastructure.
+4. Add abstractions only when required by real implementations.
+5. Prefer a small conceptual surface over speculative extensibility.
+6. Design extension seams, not extension scaffolding.
+7. Future data sources should converge on the common `ReducedDataset` / `Spectrum` boundary.
+8. Scientific visualization should evolve alongside the analysis core rather than being postponed until the final GUI.
+9. Desktop GUI development should begin only after a complete single-Q scientific fitting path has been validated.
+
+When a milestone is completed, it is scientifically validated and frozen before development proceeds. The roadmap is then reviewed and may be adjusted according to newly discovered research needs.
+
+---
+
+## 2. Milestone 0 — Scientific and architectural baseline ✅
+
+Established the initial:
+
+* product requirements;
+* scientific conventions;
+* architecture principles;
+* validation strategy;
+* privacy rules;
+* Python package and development tooling.
+
+Scientific conventions that remain unresolved stay explicitly unresolved rather than being guessed or encoded.
+
+---
+
+## 3. Milestone 1 — Reduced-data core ✅
+
+Completed and validated:
+
+* immutable reduced `Spectrum` representation;
+* source-independent `ReducedDataset` scientific boundary;
+* explicit sample/resolution roles;
+* DAVE group-block import;
+* wide `x/yN/yerrN` import;
+* single `x/y/yerr` import;
+* content-based format detection;
+* invalid-value classification without modifying originals;
+* privacy-safe structural summaries;
+* boundary-padding detection with `AUTO`, `REVIEW`, and `NONE`;
+* reversible point masks.
+
+### Milestone 1.2 — Core simplification ✅
+
+The initial implementation was simplified before further feature growth.
+
+The simplification:
+
+* removed duplicated and derivable state;
+* narrowed the public API;
+* removed premature confidence and confirmation machinery;
+* simplified boundary-padding heuristics;
+* replaced confidence terminology with behavioral `AUTO`, `REVIEW`, and `NONE` states;
+* removed unsupported sigma-transition, intensity-sign, relative-run, and regular-run heuristics;
+* reduced runtime dependencies to those required by current production functionality;
+* preserved validated automatic padding masks on available private benchmark data;
+* retained a clean `ReducedDataset` / `Spectrum` boundary for future data sources and reduction workflows.
+
+Milestone 1 forms the stable reduced-data baseline for later analysis.
+
+---
+
+## 4. Milestone 2 — Q assignment and fitting-data selection
+
+This is the next implementation milestone.
+
+### Goal
+
+Convert an ordered `ReducedDataset` into analysis-ready QENS spectra with:
+
+* explicit Q identity;
+* explicit point-level fitting selection;
+* explicit whole-spectrum inclusion/exclusion.
+
+The conceptual workflow is:
+
+```text
+ReducedDataset
+    ↓
+Q assignment
+    ↓
+point-level fitting selection
+    ↓
+whole-Q inclusion/exclusion
+    ↓
+analysis-ready QENS data
+```
+
+### 4.1 Q assignment
+
+Initially support only the simplest validated Q assignment methods:
+
+* explicit ordered Q values;
+* inclusive linear Q generation equivalent to `numpy.linspace`.
+
+Each sample spectrum must resolve to exactly one finite Q value.
+
+Never silently:
+
+* sort;
+* deduplicate;
+* truncate;
+* pad;
+* extrapolate;
+* interpolate;
+* combine;
+* or otherwise repair a Q-count mismatch.
+
+Q assignment should remain logically separable from the numerical `Spectrum` representation so that future data sources or Q-rebin transformations can supply new Q mappings without redesigning the spectral core.
+
+Do not implement DAVE Q-parameter parsing, detector geometry, angle-to-Q conversion, imported-Q heuristics, or generalized Q-source frameworks unless a real supported input requires them.
+
+### 4.2 Point-level fitting selection
+
+Combine only the analysis decisions needed for later spectral fitting:
+
+* existing invalid-value masks;
+* existing automatic padding mask;
+* existing padding review mask;
+* manual point masks;
+* fitting-energy range.
+
+Each source of exclusion remains separately inspectable.
+
+An effective fitting mask may be derived from these states, but the original reasons must not be collapsed into one irreversible mask.
+
+Original numerical arrays remain unchanged.
+
+### 4.3 Whole-Q spectral-fit selection
+
+Support manual inclusion or exclusion of complete Q spectra from spectral fitting.
+
+This is required for real QENS situations where a particular Q may be unsuitable for quasielastic analysis, for example because of strong diffraction or Bragg-related elastic intensity.
+
+Whole-Q exclusion:
+
+* must not delete the spectrum;
+* must be reversible;
+* must remain distinct from point-level masks;
+* initially remains user-controlled rather than automatically inferred.
+
+Automatic Bragg/diffraction detection is not part of this milestone.
+
+### 4.4 Q rebinning
+
+Generic Q rebinning is not implemented in the initial reduced-text workflow.
+
+For final reduced `S(Q,E)` spectra, scientifically correct rebinning may require information that is no longer available, such as:
+
+* original detector contributions;
+* Q-bin boundaries;
+* detector coverage;
+* normalization weights;
+* geometry or event information.
+
+Future intermediate or raw-data workflows may retain enough information to construct new Q bins correctly.
+
+The architecture should therefore allow a future transformation conceptually like:
+
+```text
+source/intermediate/raw data
+        ↓
+Q grouping or Q rebinning
+        ↓
+ReducedDataset + Q assignment
+        ↓
+existing analysis core
+```
+
+Do not introduce `QRebinner`, detector-weight, Q-edge, registry, or instrument abstractions before a concrete supported use case exists.
+
+### 4.5 Scientific visualization
+
+Milestone 2 begins the reusable scientific visualization layer.
+
+Initial visualization should support inspection of:
+
+* spectra as a function of Q and energy;
+* individual Q spectra;
+* fitting-energy ranges;
+* invalid points;
+* automatic padding;
+* review padding;
+* manually excluded points;
+* whole-Q inclusion/exclusion.
+
+Where practical, an `S(Q,E)` overview or contour representation should make anomalous Q regions visually identifiable.
+
+Visualization must remain usable from Python/Jupyter and must not depend on a desktop GUI.
+
+### Validation
+
+Validate:
+
+* exact Q/spectrum count matching;
+* Q-order preservation;
+* finite-Q requirements;
+* inclusive linear mapping;
+* independent mask sources;
+* effective fitting-point selection;
+* whole-Q reversible exclusion;
+* immutable original arrays;
+* compatibility with manually constructed/source-independent `ReducedDataset` values;
+* visualization consistency with the underlying analysis state.
+
+---
+
+## 5. Milestone 3 — Measured-resolution preparation
+
+### Goal
+
+Prepare measured resolution data for numerical convolution while preserving the original measurement.
+
+Expected capabilities include:
+
+* resolution valid-range selection;
+* integration with existing invalid and padding masks;
+* optional explicitly requested baseline handling;
+* unit-area normalization;
+* energy-grid validation;
+* association between sample and resolution spectra;
+* preparation of the resolution representation needed by convolution.
+
+Original and processed resolution data remain distinct.
+
+Exact normalization, interpolation, association, and valid-range policies will be specified and scientifically validated immediately before this milestone is implemented.
+
+Do not build speculative instrument-specific resolution frameworks.
+
+### Scientific visualization
+
+Add resolution-specific inspection including:
+
+* original measured resolution;
+* selected valid range;
+* invalid/padding regions;
+* optional baseline treatment;
+* normalized resolution;
+* sample-resolution association.
+
+These plots form part of scientific validation and must remain accessible outside the GUI.
+
+---
+
+## 6. Milestone 4 — Resolution convolution
+
+### Goal
+
+Provide a validated GUI-independent numerical convolution core suitable for QENS fitting.
+
+The convolution path must support:
+
+* measured resolution functions;
+* explicit treatment of sample/resolution grid differences;
+* appropriate internal numerical grids;
+* interpolation of the resolution and theoretical model where required;
+* protection against circular FFT wrap-around;
+* preservation of integrated-area semantics;
+* evaluation of the final model on the original sample measurement grid.
+
+The original sample data are never interpolated merely for residual evaluation.
+
+The elastic component follows the approved measured-resolution convention rather than using an artificial grid-dependent numerical delta spike.
+
+Detailed grid construction, interpolation, centering, padding, cropping, and numerical tolerances will be specified and independently validated at implementation time.
+
+### Scientific visualization
+
+Add numerical diagnostics capable of comparing:
+
+* measured resolution;
+* theoretical unconvolved model;
+* convolved model;
+* model evaluated on the original sample grid.
+
+Visualization should help detect grid, normalization, centering, or convolution-boundary problems.
+
+---
+
+## 7. Milestone 5 — Single-Q free fitting
+
+### Goal
+
+Fit one selected QENS spectrum reliably using the validated measured-resolution and convolution path.
+
+The first useful free-fit model should support:
+
+* elastic contribution;
+* one or more quasielastic Lorentzian components;
+* simple background;
+* explicit parameter initial values;
+* bounds;
+* fixed/free parameter state;
+* weighted fitting using valid uncertainties.
+
+The first accepted implementation prioritizes:
+
+* reliable parameter recovery;
+* residual inspection;
+* convergence information;
+* physically meaningful FWHM output;
+* transparent failure behavior.
+
+Additional statistical diagnostics such as advanced covariance treatment, information criteria, or model-quality heuristics are added only after their conventions are reviewed and a real workflow requires them.
+
+### Scientific visualization
+
+Provide reusable plots for:
+
+* measured spectrum;
+* total fitted model;
+* individual model components where useful;
+* measured resolution;
+* residuals;
+* fitted range and excluded points;
+* parameter/result summary.
+
+This milestone establishes the first complete scientific workflow:
+
+```text
+load reduced data
+    ↓
+assign Q
+    ↓
+select fitting data
+    ↓
+prepare resolution
+    ↓
+resolution convolution
+    ↓
+single-Q free fit
+    ↓
+inspect result
+```
+
+---
+
+## 8. Desktop GUI prototype begins after Milestone 5
+
+Once the single-Q fitting path passes scientific validation, development of the interactive desktop workflow may begin.
+
+The GUI must remain a thin interface over the validated scientific core.
+
+The first prototype should focus on the existing complete workflow rather than implementing future features.
+
+Expected interaction areas include:
+
+* sample and resolution loading;
+* spectrum/Q overview;
+* fitting-range and mask inspection;
+* whole-Q inclusion/exclusion;
+* resolution inspection;
+* single-Q model configuration;
+* parameter editing;
+* fit execution;
+* fitted-curve and residual visualization.
+
+Scientific formulas, numerical convolution, masking rules, fitting logic, and data transformations must remain outside GUI controllers.
+
+Core analysis must continue to function without the desktop GUI.
+
+---
+
+## 9. Milestone 6 — Multi-Q free fitting and derived QENS quantities
+
+### Goal
+
+Apply the validated single-Q free fit independently across Q.
+
+Expected outputs include:
+
+* per-Q spectral fits;
+* FWHM versus Q;
+* relaxation times derived from the approved linewidth convention;
+* experimental EISF from fitted integrated component areas;
+* transparent handling of failed, excluded, or manually refitted Q points.
+
+Batch fitting remains a sequence of independent free fits rather than an implicit global fit.
+
+Detailed fit seeding, refit state, exclusion state, fit-quality summaries, and derived-uncertainty policies will be specified when this milestone becomes active.
+
+### Scientific visualization
+
+Add analysis-level views such as:
+
+* Q-by-Q fit navigation;
+* fit-quality overview;
+* FWHM(Q);
+* relaxation-time trends;
+* EISF(Q);
+* residual overview;
+* included/excluded Q states.
+
+After Milestone 6, the desktop GUI may become the primary interactive workflow while Python/Jupyter usage remains fully supported.
+
+---
+
+## 10. Later scientific capabilities — provisional
+
+The following directions are expected but intentionally not fully specified.
+
+Their order may change according to scientific need.
+
+### Motion-model analysis
+
+Potential capabilities include:
+
+* XYZ molecular structure input;
+* hydrogen-coordinate handling;
+* scientifically approved rotational/reorientational models;
+* fitting theoretical EISF models against experimental EISF;
+* comparison of candidate motion models.
+
+Candidate models such as C2, C4, isotropic reorientation, or later alternatives are implemented only after their equations, parameter meanings, and reference cases are scientifically reviewed.
+
+### Additional QENS analysis tools
+
+Possible future additions may include:
+
+* temperature-dependent analysis;
+* Arrhenius analysis;
+* additional linewidth/diffusion models;
+* additional EISF or dynamics models;
+* scientifically justified auxiliary QENS analysis.
+
+These capabilities are added only when concrete research use cases require them.
+
+---
+
+## 11. Future data-source and reduction capabilities — provisional
+
+QENSfit should remain capable of expanding upstream from reduced-data analysis toward raw-data workflows.
+
+Possible future sources include:
+
+* HDF5-based facility data;
+* NeXus;
+* Mantid workspaces;
+* intermediate reduced detector spectra;
+* instrument-specific raw or partially reduced formats.
+
+The architectural target is:
+
+```text
+raw/source-specific data
+        ↓
+source-specific reader / reduction
+        ↓
+optional detector grouping / Q rebinning
+        ↓
+ReducedDataset
+        ↓
+existing QENS analysis core
+```
+
+Raw HDF/HDF5 is not treated as one universal scientific format.
+
+Future support should be based on concrete documented schemas and instrument workflows rather than a speculative generic HDF importer.
+
+No raw-data adapter framework, instrument registry, plugin system, universal reduction abstraction, or Mantid abstraction is implemented before a real supported source requires it.
+
+The existing reduced-data workflow must remain usable independently of future raw-data capabilities.
+
+---
+
+## 12. Future application capabilities — provisional
+
+Possible later product work includes:
+
+* richer scientific plotting;
+* publication-oriented export;
+* project save/reload;
+* reproducible analysis records;
+* expanded desktop workflows;
+* macOS and Windows packaging;
+* public release and documentation.
+
+These capabilities consume the validated scientific core rather than redefine scientific behavior.
+
+Project-container, migration, packaging, security, and long-term persistence architecture are designed only when those capabilities become active.
+
+They are not current scientific-core requirements.
+
+---
+
+## 13. Cross-cutting requirements
+
+At every active milestone:
+
+* preserve original imported or reduced numerical values;
+* make scientific transformations explicit;
+* keep invalid data distinct from analysis exclusions;
+* avoid silent repair or unsupported inference;
+* maintain explicit units and scientific conventions;
+* use synthetic tests for public validation;
+* keep private experimental data out of committed tests and logs;
+* run pytest, Ruff, and strict mypy;
+* use coverage as a development-quality check where appropriate;
+* perform private scientific regression validation when relevant;
+* provide an owner-facing validation procedure for real data;
+* avoid adding dependencies before corresponding functionality exists.
+
+When a milestone reveals that an earlier architectural assumption is unnecessary or over-engineered, simplify before building additional layers on top of it.
+
+Scientific visualization should be treated as part of validation and usability, not merely final presentation.
+
+---
+
+## 14. Milestone completion and freeze procedure
+
+Every milestone follows the same completion cycle:
+
+```text
+implementation
+    ↓
+automated tests
+    ↓
+synthetic/numerical validation
+    ↓
+owner validation with real data
+    ↓
+scientific review
+    ↓
+freeze
+    ↓
+commit and push stable baseline
+    ↓
+roadmap review
+    ↓
+next milestone specification
+```
+
+Before a milestone is frozen:
+
+1. automated tests and static checks must pass;
+2. milestone-specific scientific tests must pass;
+3. relevant real/private data should be inspected when available;
+4. the owner receives explicit instructions for manual/Jupyter validation;
+5. unexpected scientific differences must be understood rather than silently accepted.
+
+After freezing a milestone, review this roadmap with the scientific owner before beginning the next milestone.
+
+Newly discovered research needs may:
+
+* change later milestone order;
+* add or remove planned capabilities;
+* split or merge future milestones;
+* promote a provisional capability into the near-term roadmap.
+
+A frozen milestone should not be reopened merely to anticipate distant functionality unless a genuine architectural or scientific blocker is discovered.
+
+---
+
+## 15. Roadmap maintenance
+
+This roadmap is intentionally not a complete version-1 implementation specification.
+
+When a milestone becomes the next active milestone:
+
+1. review current scientific requirements;
+2. inspect the actual validated code;
+3. collect relevant real workflow requirements;
+4. resolve only the scientific decisions needed immediately;
+5. write a short milestone-specific implementation specification;
+6. implement;
+7. test;
+8. validate with real data;
+9. simplify if necessary;
+10. freeze the milestone;
+11. review and update the roadmap.
+
+Distant milestone details are provisional and must not be treated as frozen API, dependency, file-format, or architecture contracts.

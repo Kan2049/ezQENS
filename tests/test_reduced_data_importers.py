@@ -36,7 +36,7 @@ def test_dave_one_group_preserves_values_and_order() -> None:
     spectrum = dataset.spectra[0]
     assert spectrum.group_index == 0
     assert spectrum.group_label == "first"
-    assert spectrum.source_row_numbers == (4, 5, 6)
+    assert dataset.source_columns[0].source_row_numbers == (4, 5, 6)
     np.testing.assert_array_equal(spectrum.energy, [-1.0, 0.0, 1.0])
     np.testing.assert_array_equal(spectrum.intensity, [2.0, 3.0, 2.5])
     np.testing.assert_array_equal(spectrum.uncertainty, [0.1, 0.15, 0.2])
@@ -57,15 +57,13 @@ def test_dave_multiple_groups_keep_unequal_grids_and_extra_columns() -> None:
     np.testing.assert_array_equal(dataset.spectra[0].energy, [-1.0, 0.0])
     np.testing.assert_array_equal(dataset.spectra[1].energy, [-2.0, 0.0, 2.0])
     assert not dataset.shared_energy_grid
-    assert dataset.shared_energy_axis is None
     assert dataset.detected_extra_columns == ("ModelFit", "Func1", "Func2")
-    assert dataset.spectra[0].source_columns.extra_columns == (
+    assert dataset.source_columns[0].extra_columns == (
         "ModelFit",
         "Func1",
     )
     assert any(
-        diagnostic.code == "extra_columns_ignored"
-        for diagnostic in dataset.diagnostics
+        diagnostic.code == "extra_columns_ignored" for diagnostic in dataset.diagnostics
     )
 
 
@@ -113,10 +111,7 @@ def test_wide_one_pair_imports_one_independent_spectrum() -> None:
     assert len(dataset.spectra) == 1
     assert dataset.spectra[0].group_label == "1"
     assert dataset.shared_energy_grid
-    np.testing.assert_array_equal(
-        dataset.shared_energy_axis,
-        dataset.spectra[0].energy,
-    )
+    assert not hasattr(dataset, "shared_energy_axis")
     assert not hasattr(dataset.spectra[0], "q")
 
 
@@ -145,7 +140,7 @@ def test_wide_reordered_nonsequential_pairs_use_suffix_order() -> None:
     assert tuple(spectrum.group_label for spectrum in dataset.spectra) == ("2", "05")
     np.testing.assert_array_equal(dataset.spectra[0].intensity, [2.0, 3.0, 2.5])
     np.testing.assert_array_equal(dataset.spectra[1].intensity, [5.0, 6.0, 5.5])
-    assert dataset.spectra[1].source_columns.uncertainty == "yerr05"
+    assert dataset.source_columns[1].uncertainty == "yerr05"
 
 
 @pytest.mark.parametrize(
@@ -196,9 +191,9 @@ def test_single_spectrum_import_preserves_layout_metadata() -> None:
     assert dataset.source_layout is ReducedDataFormat.SINGLE_SPECTRUM_TABLE
     assert len(dataset.spectra) == 1
     spectrum = dataset.spectra[0]
-    assert spectrum.source_columns.energy == "x"
+    assert dataset.source_columns[0].energy == "x"
     assert spectrum.energy_unit == "meV"
-    assert spectrum.source_row_numbers == (2, 3, 4)
+    assert dataset.source_columns[0].source_row_numbers == (2, 3, 4)
     assert not hasattr(spectrum, "q_value")
 
 
@@ -247,7 +242,7 @@ def test_inconsistent_explicit_override_fails_without_fallback() -> None:
             explicit_format=ReducedDataFormat.SINGLE_SPECTRUM_TABLE,
         )
 
-    assert "explicit_format_inconsistent" in diagnostic_codes(caught.value)
+    assert "single_required_columns_missing" in diagnostic_codes(caught.value)
 
 
 def test_privacy_safe_summary_contains_only_structural_information() -> None:

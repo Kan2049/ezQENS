@@ -65,9 +65,10 @@ Public synthetic text fixtures cover the following contracts.
 - Ambiguous input returns plausible alternatives instead of guessing.
 - Identical contents with different extensions classify identically.
 - Malformed headers return structural diagnostics.
-- Detection results include proposal, confidence, evidence, counts, required
-  and extra columns, warnings, and alternatives.
-- An automatic proposal remains unconfirmed until explicit user confirmation.
+- Detection results include proposal, concise evidence, counts, required and
+  extra columns, diagnostics, and alternatives.
+- Detection contains no confidence, extension, override-history, or GUI
+  confirmation state; explicit override still validates without fallback.
 
 #### 3.2.2 Wide-table parsing
 
@@ -109,7 +110,7 @@ Public synthetic text fixtures cover the following contracts.
 
 - Long repeated pairs at left, right, and both boundaries.
 - Different padding lengths by Q group.
-- Matching sentinel signatures across multiple groups.
+- Matching boundary signatures across multiple groups.
 - Two-point boundary runs promoted only by strong long-run cross-group
   evidence.
 - Near-equal plateau values exercise the declared tolerances.
@@ -118,14 +119,19 @@ Public synthetic text fixtures cover the following contracts.
 - Isolated negative interior points and noisy negative physical tails remain
   unmasked.
 - Repeated values inside a physical region are not automatically removed.
-- Weak transitions are medium-confidence suggestions, not default-on masks.
+- Weak transitions are `REVIEW`, not default-on masks.
+- Otherwise identical positive, zero, and negative plateaus receive equivalent
+  status and mask behavior.
+- No sigma-jump, nonpositive-intensity, or relative-run heuristic affects the
+  decision.
 - Detection has no hard-coded padding value.
 - Exact boundary plateau membership includes the point adjacent to the first
   retained interior point.
-- Default and suggestion masks match spectrum length and are read-only.
+- `AUTO` and `REVIEW` masks match spectrum length, are read-only, and are
+  mutually exclusive.
 - Detection does not mutate or baseline-shift imported arrays.
-- Privacy-safe summaries contain counts, ranges, confidence, and evidence
-  codes, not arrays or plateau values.
+- Privacy-safe summaries contain group identities, statuses, counts, and
+  retained energy bounds, not arrays or plateau values.
 - Padding, invalid sigma, manual masks, fit range, resolution range, and Bragg
   warnings remain distinct.
 - Generic custom mappings identify energy, intensity, uncertainty, optional
@@ -266,6 +272,11 @@ extra DAVE fitting columns, and separate C2/C4/isotropic comparison—are
 validation assertions only where the owner supplies them explicitly. They are
 not code defaults or public fixtures.
 
+Milestone 1.2 private validation compares the prior and v2 automatic masks by
+source basename, group identity, left/right counts, and retained energy bounds.
+Any difference requires an explicit structural explanation and scientific-owner
+review; no private arrays or absolute paths appear in the comparison.
+
 ## 5. Resolution validation
 
 Create independent synthetic resolution inputs with valid central peaks,
@@ -273,8 +284,8 @@ nonfinite values, constant offsets, nonuniform grids, and repeated boundary
 padding. Validate:
 
 - detection versus mutation separation;
-- high-confidence default-on padding is reversible and exactly point-masked;
-- medium-confidence padding remains confirmation-gated;
+- `AUTO` padding is reversible and exactly point-masked;
+- `REVIEW` padding remains decision-gated;
 - mandatory manual valid-range selection and its authoritative use;
 - original and selected ranges are both inspectable;
 - optional suggested-range rationale and explicit confirmation;
@@ -285,8 +296,8 @@ padding. Validate:
 - exact and user-selected nearest-Q association; and
 - full processing audit history.
 
-No fixed padding value is approved. The `edge-padding-v1.0.0` detector uses the
-explicit tolerances in `scientific_conventions.md`; changes require versioned
+No fixed padding value is approved. The `edge-padding-v2.0.0` detector uses the
+small explicit rule in `scientific_conventions.md`; changes require versioned
 tests and scientific-owner review. Interpolation algorithms remain unresolved.
 
 ## 6. Fit diagnostics validation
@@ -388,8 +399,9 @@ keyboard navigation, high-DPI scaling, and Windows/macOS behavior.
 
 ### Gate A: import
 
-Content-based detection and confirmation; DAVE group-block, wide-table, and
-single-spectrum parsing; explicit sample/resolution roles; preserved shared or
+Content-based detection and strict explicit override; DAVE group-block,
+wide-table, and single-spectrum parsing; explicit sample/resolution roles;
+preserved shared or
 per-spectrum grids; structural diagnostics; privacy-safe summaries; and correct
 group identity. Generic custom mapping and the complete Q-mapping suite finish
 in milestone 2. DAVE Q-bin parsing remains gated on approved semantics.
@@ -437,8 +449,7 @@ Unresolved items include detailed parser grammar, DAVE Q-bin field semantics,
 explicit-list comment policy, future edge-padding refinements, convolution grid
 details, fit-quality thresholds, AIC/AICc/covariance conventions, approved
 motion equations, and supported Windows versions. Inclusive linear Q endpoints,
-invalid-sigma handling, and the versioned Milestone-1.1 padding defaults are
-approved.
+invalid-sigma handling, and the versioned padding-v2 behavior are approved.
 
 Risks include circular tests, overfitting tolerances to one benchmark,
 platform-specific false failures, leaking private data through artifacts, and

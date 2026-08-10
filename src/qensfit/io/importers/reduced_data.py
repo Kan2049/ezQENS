@@ -1,4 +1,4 @@
-"""Import supported Milestone 1 reduced-data text layouts."""
+"""Import supported reduced QENS text layouts."""
 
 from __future__ import annotations
 
@@ -10,13 +10,13 @@ from qensfit.domain import (
     DiagnosticSeverity,
     FormatDetectionResult,
     ImportDiagnostic,
-    ImportedDataset,
     ImportValidationError,
     ReducedDataFormat,
-    SourceColumnMetadata,
+    ReducedDataset,
     Spectrum,
     SpectrumRole,
 )
+from qensfit.domain.models import SourceColumnMetadata
 from qensfit.io.importers._text import (
     TextHeader,
     analyze_wide_columns,
@@ -40,8 +40,7 @@ def _coerce_role(role: SpectrumRole | str) -> SpectrumRole:
 
 def _raise_on_errors(diagnostics: tuple[ImportDiagnostic, ...]) -> None:
     if any(
-        diagnostic.severity is DiagnosticSeverity.ERROR
-        for diagnostic in diagnostics
+        diagnostic.severity is DiagnosticSeverity.ERROR for diagnostic in diagnostics
     ):
         raise ImportValidationError(diagnostics)
 
@@ -148,23 +147,22 @@ def _parse_numeric_rows(
     return matrix, tuple(row_numbers), tuple(diagnostics)
 
 
-def _invalid_value_diagnostics(spectrum: Spectrum) -> tuple[ImportDiagnostic, ...]:
+def _invalid_value_diagnostics(
+    spectrum: Spectrum,
+    columns: SourceColumnMetadata,
+) -> tuple[ImportDiagnostic, ...]:
     diagnostics: list[ImportDiagnostic] = []
     invalid_fields = (
-        (
-            "invalid_energy_values",
-            spectrum.invalid_energy_mask,
-            spectrum.source_columns.energy,
-        ),
+        ("invalid_energy_values", spectrum.invalid_energy_mask, columns.energy),
         (
             "invalid_intensity_values",
             spectrum.invalid_intensity_mask,
-            spectrum.source_columns.intensity,
+            columns.intensity,
         ),
         (
             "invalid_uncertainty_values",
             spectrum.invalid_uncertainty_mask,
-            spectrum.source_columns.uncertainty,
+            columns.uncertainty,
         ),
     )
     for code, mask, column in invalid_fields:
@@ -182,17 +180,6 @@ def _invalid_value_diagnostics(spectrum: Spectrum) -> tuple[ImportDiagnostic, ..
     return tuple(diagnostics)
 
 
-def _shared_axis(
-    spectra: tuple[Spectrum, ...],
-) -> tuple[bool, np.ndarray | None]:
-    first = spectra[0].energy
-    shared = all(
-        np.array_equal(spectrum.energy, first, equal_nan=True)
-        for spectrum in spectra[1:]
-    )
-    return (True, first) if shared else (False, None)
-
-
 def _extra_columns_diagnostic(
     extra_columns: tuple[str, ...],
 ) -> tuple[ImportDiagnostic, ...]:
@@ -204,9 +191,34 @@ def _extra_columns_diagnostic(
             severity=DiagnosticSeverity.INFO,
             message=(
                 f"Recorded {len(extra_columns)} additional source column(s) "
-                "outside the primary x/y/yerr mapping"
+                "outside the primary energy/intensity/uncertainty mapping"
             ),
         ),
+    )
+
+
+def _make_spectrum(
+    *,
+    role: SpectrumRole,
+    group_index: int,
+    group_label: str,
+    energy: np.ndarray,
+    intensity: np.ndarray,
+    uncertainty: np.ndarray,
+    energy_unit: str,
+    intensity_unit: str,
+    uncertainty_unit: str,
+) -> Spectrum:
+    return Spectrum(
+        role=role,
+        group_index=group_index,
+        group_label=group_label,
+        energy=energy,
+        intensity=intensity,
+        uncertainty=uncertainty,
+        energy_unit=energy_unit,
+        intensity_unit=intensity_unit,
+        uncertainty_unit=uncertainty_unit,
     )
 
 
@@ -219,22 +231,14 @@ def _import_dave_groups(
     energy_unit: str,
     intensity_unit: str,
     uncertainty_unit: str,
-) -> ImportedDataset:
+) -> ReducedDataset:
     markers = find_group_markers(lines)
     if not markers:
-        raise ImportValidationError(
-            (
-                ImportDiagnostic(
-                    code="dave_group_markers_missing",
-                    severity=DiagnosticSeverity.ERROR,
-                    message="No DAVE group markers were found",
-                ),
-            )
-        )
+        raise ImportValidationError(detection.diagnostics)
 
     spectra: list[Spectrum] = []
+    source_columns: list[SourceColumnMetadata] = []
     diagnostics: list[ImportDiagnostic] = list(detection.diagnostics)
-    extra_columns: list[str] = []
     for group_index, marker in enumerate(markers):
         end_index = (
             markers[group_index + 1].line_index
@@ -257,35 +261,35 @@ def _import_dave_groups(
                 )
             )
             continue
-        positions, header_diagnostics = _required_positions(
-            header,
-            group=marker.label,
-        )
-        diagnostics.extend(header_diagnostics)
+        positions, header_diagnostics = _required_positions(header, group=marker.label)
         matrix, row_numbers, row_diagnostics = _parse_numeric_rows(
             lines,
             header=header,
             end_index=end_index,
             group=marker.label,
         )
+        diagnostics.extend(header_diagnostics)
         diagnostics.extend(row_diagnostics)
         if header_diagnostics or row_diagnostics:
             continue
 
         normalized = normalized_columns(header.columns)
-        group_extra_columns = tuple(
+        extras = tuple(
             column
             for column, normalized_column in zip(
-                header.columns,
-                normalized,
-                strict=True,
+                header.columns, normalized, strict=True
             )
             if normalized_column not in _REQUIRED_COLUMNS
         )
-        for column in group_extra_columns:
-            if column not in extra_columns:
-                extra_columns.append(column)
-        spectrum = Spectrum.from_imported_arrays(
+        columns = SourceColumnMetadata(
+            group_identity=marker.label,
+            energy=header.columns[positions["x"]],
+            intensity=header.columns[positions["y"]],
+            uncertainty=header.columns[positions["yerr"]],
+            extra_columns=extras,
+            source_row_numbers=row_numbers,
+        )
+        spectrum = _make_spectrum(
             role=role,
             group_index=group_index,
             group_label=marker.label,
@@ -295,37 +299,25 @@ def _import_dave_groups(
             energy_unit=energy_unit,
             intensity_unit=intensity_unit,
             uncertainty_unit=uncertainty_unit,
-            source_row_numbers=row_numbers,
-            source_columns=SourceColumnMetadata(
-                energy=header.columns[positions["x"]],
-                intensity=header.columns[positions["y"]],
-                uncertainty=header.columns[positions["yerr"]],
-                extra_columns=group_extra_columns,
-            ),
-            source_layout=ReducedDataFormat.DAVE_GROUP_BLOCKS,
-            source_layout_metadata=(
-                ("group_marker_line", str(marker.line_number)),
-                ("header_line", str(header.line_number)),
-            ),
         )
         spectra.append(spectrum)
-        diagnostics.extend(_invalid_value_diagnostics(spectrum))
+        source_columns.append(columns)
+        diagnostics.extend(_invalid_value_diagnostics(spectrum, columns))
 
     _raise_on_errors(tuple(diagnostics))
-    ordered_spectra = tuple(spectra)
-    shared, shared_axis = _shared_axis(ordered_spectra)
-    extras = tuple(extra_columns)
+    extras = tuple(
+        dict.fromkeys(
+            column for metadata in source_columns for column in metadata.extra_columns
+        )
+    )
     diagnostics.extend(_extra_columns_diagnostic(extras))
-    return ImportedDataset(
+    return ReducedDataset(
         role=role,
-        source_layout=ReducedDataFormat.DAVE_GROUP_BLOCKS,
-        spectra=ordered_spectra,
+        spectra=tuple(spectra),
         source_reference=source.name,
+        source_layout=ReducedDataFormat.DAVE_GROUP_BLOCKS,
         diagnostics=tuple(diagnostics),
-        detected_extra_columns=extras,
-        shared_energy_grid=shared,
-        shared_energy_axis=shared_axis,
-        format_detection=detection,
+        source_columns=tuple(source_columns),
     )
 
 
@@ -338,7 +330,7 @@ def _import_wide_table(
     energy_unit: str,
     intensity_unit: str,
     uncertainty_unit: str,
-) -> ImportedDataset:
+) -> ReducedDataset:
     header = find_table_header(lines)
     if header is None:
         raise ImportValidationError(detection.diagnostics)
@@ -355,11 +347,20 @@ def _import_wide_table(
     energy_position = analysis.energy_positions[0]
     extras = tuple(header.columns[index] for index in analysis.extra_positions)
     spectra: list[Spectrum] = []
+    source_columns: list[SourceColumnMetadata] = []
     for group_index, suffix in enumerate(analysis.complete_suffixes):
         intensity_position = analysis.intensity_positions[suffix][0]
         uncertainty_position = analysis.uncertainty_positions[suffix][0]
         source_suffix = header.columns[intensity_position][1:]
-        spectrum = Spectrum.from_imported_arrays(
+        columns = SourceColumnMetadata(
+            group_identity=source_suffix,
+            energy=header.columns[energy_position],
+            intensity=header.columns[intensity_position],
+            uncertainty=header.columns[uncertainty_position],
+            extra_columns=extras,
+            source_row_numbers=row_numbers,
+        )
+        spectrum = _make_spectrum(
             role=role,
             group_index=group_index,
             group_label=source_suffix,
@@ -369,34 +370,19 @@ def _import_wide_table(
             energy_unit=energy_unit,
             intensity_unit=intensity_unit,
             uncertainty_unit=uncertainty_unit,
-            source_row_numbers=row_numbers,
-            source_columns=SourceColumnMetadata(
-                energy=header.columns[energy_position],
-                intensity=header.columns[intensity_position],
-                uncertainty=header.columns[uncertainty_position],
-                extra_columns=extras,
-            ),
-            source_layout=ReducedDataFormat.WIDE_QENS_TABLE,
-            source_layout_metadata=(
-                ("header_line", str(header.line_number)),
-                ("column_suffix", source_suffix),
-            ),
         )
         spectra.append(spectrum)
-        diagnostics.extend(_invalid_value_diagnostics(spectrum))
+        source_columns.append(columns)
+        diagnostics.extend(_invalid_value_diagnostics(spectrum, columns))
     diagnostics.extend(_extra_columns_diagnostic(extras))
 
-    ordered_spectra = tuple(spectra)
-    return ImportedDataset(
+    return ReducedDataset(
         role=role,
-        source_layout=ReducedDataFormat.WIDE_QENS_TABLE,
-        spectra=ordered_spectra,
+        spectra=tuple(spectra),
         source_reference=source.name,
+        source_layout=ReducedDataFormat.WIDE_QENS_TABLE,
         diagnostics=tuple(diagnostics),
-        detected_extra_columns=extras,
-        shared_energy_grid=True,
-        shared_energy_axis=matrix[:, energy_position],
-        format_detection=detection,
+        source_columns=tuple(source_columns),
     )
 
 
@@ -409,7 +395,7 @@ def _import_single_table(
     energy_unit: str,
     intensity_unit: str,
     uncertainty_unit: str,
-) -> ImportedDataset:
+) -> ReducedDataset:
     header = find_table_header(lines)
     if header is None:
         raise ImportValidationError(detection.diagnostics)
@@ -421,23 +407,25 @@ def _import_single_table(
         group=None,
     )
     diagnostics = (
-        list(detection.diagnostics)
-        + list(header_diagnostics)
-        + list(row_diagnostics)
+        list(detection.diagnostics) + list(header_diagnostics) + list(row_diagnostics)
     )
     _raise_on_errors(tuple(diagnostics))
 
     normalized = normalized_columns(header.columns)
     extras = tuple(
         column
-        for column, normalized_column in zip(
-            header.columns,
-            normalized,
-            strict=True,
-        )
+        for column, normalized_column in zip(header.columns, normalized, strict=True)
         if normalized_column not in _REQUIRED_COLUMNS
     )
-    spectrum = Spectrum.from_imported_arrays(
+    columns = SourceColumnMetadata(
+        group_identity="spectrum",
+        energy=header.columns[positions["x"]],
+        intensity=header.columns[positions["y"]],
+        uncertainty=header.columns[positions["yerr"]],
+        extra_columns=extras,
+        source_row_numbers=row_numbers,
+    )
+    spectrum = _make_spectrum(
         role=role,
         group_index=0,
         group_label="spectrum",
@@ -447,28 +435,16 @@ def _import_single_table(
         energy_unit=energy_unit,
         intensity_unit=intensity_unit,
         uncertainty_unit=uncertainty_unit,
-        source_row_numbers=row_numbers,
-        source_columns=SourceColumnMetadata(
-            energy=header.columns[positions["x"]],
-            intensity=header.columns[positions["y"]],
-            uncertainty=header.columns[positions["yerr"]],
-            extra_columns=extras,
-        ),
-        source_layout=ReducedDataFormat.SINGLE_SPECTRUM_TABLE,
-        source_layout_metadata=(("header_line", str(header.line_number)),),
     )
-    diagnostics.extend(_invalid_value_diagnostics(spectrum))
+    diagnostics.extend(_invalid_value_diagnostics(spectrum, columns))
     diagnostics.extend(_extra_columns_diagnostic(extras))
-    return ImportedDataset(
+    return ReducedDataset(
         role=role,
-        source_layout=ReducedDataFormat.SINGLE_SPECTRUM_TABLE,
         spectra=(spectrum,),
         source_reference=source.name,
+        source_layout=ReducedDataFormat.SINGLE_SPECTRUM_TABLE,
         diagnostics=tuple(diagnostics),
-        detected_extra_columns=extras,
-        shared_energy_grid=True,
-        shared_energy_axis=spectrum.energy,
-        format_detection=detection,
+        source_columns=(columns,),
     )
 
 
@@ -480,12 +456,8 @@ def import_reduced_data(
     energy_unit: str = "unknown",
     intensity_unit: str = "unknown",
     uncertainty_unit: str = "unknown",
-) -> ImportedDataset:
-    """Detect and import one supported reduced-data text source.
-
-    The importer preserves source order and numerical values, classifies invalid
-    values, and never creates physical Q values.
-    """
+) -> ReducedDataset:
+    """Import supported reduced text data without changing values or inferring Q."""
 
     source = Path(path)
     selected_role = _coerce_role(role)
@@ -498,27 +470,12 @@ def import_reduced_data(
     _raise_on_errors(detection.diagnostics)
     lines = read_text_lines(source)
 
-    if detection.proposed_format is ReducedDataFormat.DAVE_GROUP_BLOCKS:
-        return _import_dave_groups(
-            lines=lines,
-            role=selected_role,
-            detection=detection,
-            source=source,
-            energy_unit=energy_unit,
-            intensity_unit=intensity_unit,
-            uncertainty_unit=uncertainty_unit,
-        )
-    if detection.proposed_format is ReducedDataFormat.WIDE_QENS_TABLE:
-        return _import_wide_table(
-            lines=lines,
-            role=selected_role,
-            detection=detection,
-            source=source,
-            energy_unit=energy_unit,
-            intensity_unit=intensity_unit,
-            uncertainty_unit=uncertainty_unit,
-        )
-    return _import_single_table(
+    importers = {
+        ReducedDataFormat.DAVE_GROUP_BLOCKS: _import_dave_groups,
+        ReducedDataFormat.WIDE_QENS_TABLE: _import_wide_table,
+        ReducedDataFormat.SINGLE_SPECTRUM_TABLE: _import_single_table,
+    }
+    return importers[detection.proposed_format](
         lines=lines,
         role=selected_role,
         detection=detection,

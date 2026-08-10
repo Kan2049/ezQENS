@@ -67,12 +67,17 @@ HDF5 input may follow only after the ASCII path is validated.
 
 ### 4.1 Shared spectrum representation and roles
 
-All reduced-data layouts convert to one scientific interface exposing ordered
-spectra, explicit Q mapping, original energy/intensity/uncertainty arrays,
+All reduced-data layouts convert to `ReducedDataset`, an ordered collection of
+`Spectrum` values exposing original energy/intensity/uncertainty arrays,
 invalid-data masks, source metadata, and format provenance. Each spectrum is
 unambiguously a sample or measured-resolution spectrum, either through a
 required role or a validated role-specific wrapper around a shared numerical
 structure. Role-specific validation and processing remain separate.
+
+Downstream analysis depends on `ReducedDataset` / `Spectrum`, not the source
+file layout. A future raw-data reducer or interoperability adapter may produce
+the same boundary, but no raw HDF/NeXus, instrument, Mantid, registry, factory,
+or plugin framework is part of the current milestone.
 
 A shared-grid wide table may use energy shape `(n_energy,)` and intensity and
 uncertainty shapes `(n_q, n_energy)` internally, while still exposing every
@@ -113,10 +118,12 @@ Detection precedence is:
 4. recognized single-spectrum `x`/`y`/`yerr`;
 5. custom mapping.
 
-File extensions are hints only. The detector returns proposed format,
-confidence, evidence, group/column count, required and extra columns,
-structural warnings, and plausible alternatives. An automatic proposal
-requires user review and confirmation. Ambiguity must not be resolved silently.
+File extensions do not determine layout. The low-level detector returns the
+proposed format, concise evidence, group/column count, required and extra
+columns, structural diagnostics, and plausible alternatives. It has no
+confidence score or confirmation state. The later application/GUI workflow
+shows an automatic proposal for review and owns confirmation. Ambiguity must
+not be resolved silently.
 
 ### 4.4 Q-mapping modes
 
@@ -165,11 +172,11 @@ preprocessing service inspects only boundary-connected repeated
 groups as supporting evidence. It never identifies padding solely from zero or
 negative intensity and never hard-codes a sentinel value.
 
-High-confidence padding produces a point-level, reversible auto-padding mask
-recommended default-on. Medium-confidence padding produces a suggestion that
-requires explicit confirmation. Low-confidence evidence does not mask points.
-Every result records boundary run lengths, exact mask membership, transition
-evidence, confidence, algorithm version, and diagnostics.
+Padding status is behavioral rather than statistical. `AUTO` produces a
+point-level reversible default-on mask, `REVIEW` produces a separate review
+mask that is not default-on, and `NONE` produces no mask. A boundary result
+retains only its side, run length, energy bounds, status, and compact reason.
+The dataset-level result records the algorithm version once.
 
 No padding operation shifts, subtracts, or adds an intensity baseline. Original
 arrays remain immutable, internal constant segments are not edge padding, and
@@ -237,10 +244,10 @@ may trigger a warning but never silent deletion. Every exclusion is recorded
 in the analysis state; the complete persistent project history is a
 milestone-8 responsibility.
 
-Automatic edge-padding masks are a further distinct point-level mask. A
-high-confidence mask may be default-on but must be reversible and auditable;
-medium-confidence suggestions remain confirmation-gated. Padding is not
-background subtraction and does not modify intensity values.
+Automatic edge-padding masks are a further distinct point-level mask. `AUTO`
+may be default-on but remains reversible; `REVIEW` remains separate and
+requires a later user decision. Padding is not background subtraction and does
+not modify intensity values.
 
 A statistically valid uncertainty is finite and strictly greater than zero.
 NaN, positive/negative infinity, zero, and negative sigma values are flagged
@@ -261,12 +268,12 @@ association, exact or explicitly selected nearest-Q matching, numerical
 convolution protected against circular FFT wrap-around, and recorded processing
 decisions.
 
-High-confidence edge-padding masks from the preprocessing service may be
-default-on and remain reversible. Medium-confidence range suggestions are never
-applied without explicit user confirmation. Neither replaces mandatory,
-authoritative manual resolution valid-range selection. The processing preview
-should show original range, auto-padding mask, any suggested range, selected
-range, invalid points, baseline setting, normalization result, and warnings.
+`AUTO` edge-padding masks from the preprocessing service may be default-on and
+remain reversible. `REVIEW` masks are never applied without an explicit later
+user decision. Neither replaces mandatory, authoritative manual resolution
+valid-range selection. The processing preview should show original range,
+automatic and review masks, selected range, invalid points, baseline setting,
+normalization result, and warnings.
 Normalization fails when no finite positive integral exists.
 
 The complete imported energy range must never be assumed physically valid.
@@ -317,9 +324,9 @@ It must be small, elegant, scientific, free of formulas and optimizer logic,
 and responsive during cancellable long-running fits executed outside the GUI
 thread.
 
-The planned Import screen includes a data-format section showing automatic
-detection, confidence, warnings, manual override, group/pair count, and a
-preview of energy/intensity/uncertainty mapping. Its Q-mapping section offers
+The planned Import screen includes a data-format section showing the automatic
+proposal, evidence, warnings, manual override, group/pair count, and a preview
+of energy/intensity/uncertainty mapping. Its Q-mapping section offers
 linear range, manual list, explicit-list file, DAVE Q-bin parameter file, and
 supported imported metadata. It shows the resolved explicit Q list and compares
 its count with sample and applicable resolution spectra. Automatically

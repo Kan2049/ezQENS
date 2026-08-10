@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 
 from qensfit.domain import (
-    DetectionConfidence,
     DiagnosticSeverity,
     FormatDetectionResult,
     ImportDiagnostic,
@@ -40,12 +39,7 @@ def _coerce_explicit_format(
     return selected if selected in _IMPORTABLE_FORMATS else ReducedDataFormat.UNKNOWN
 
 
-def _dave_detection(
-    lines: tuple[str, ...],
-    *,
-    extension_hint: str | None,
-    explicit_override: bool,
-) -> FormatDetectionResult:
+def _dave_detection(lines: tuple[str, ...]) -> FormatDetectionResult:
     markers = find_group_markers(lines)
     diagnostics: list[ImportDiagnostic] = []
     extra_columns: list[str] = []
@@ -55,7 +49,7 @@ def _dave_detection(
             ImportDiagnostic(
                 code="dave_group_markers_missing",
                 severity=DiagnosticSeverity.ERROR,
-                message="Explicit DAVE format requires at least one group marker",
+                message="DAVE format requires at least one group marker",
             )
         )
     for marker_index, marker in enumerate(markers):
@@ -97,47 +91,25 @@ def _dave_detection(
             )
             continue
         compatible_headers += 1
-        for column, normalized_column in zip(
-            header.columns,
-            normalized,
-            strict=True,
-        ):
-            if (
-                normalized_column not in _REQUIRED_COLUMNS
-                and column not in extra_columns
-            ):
-                extra_columns.append(column)
+        for column, normalized_column in zip(header.columns, normalized, strict=True):
+            if normalized_column not in _REQUIRED_COLUMNS:
+                if column not in extra_columns:
+                    extra_columns.append(column)
 
-    has_errors = any(
-        diagnostic.severity is DiagnosticSeverity.ERROR
-        for diagnostic in diagnostics
-    )
-    confidence = (
-        DetectionConfidence.HIGH
-        if markers and compatible_headers == len(markers) and not has_errors
-        else DetectionConfidence.LOW
-    )
     return FormatDetectionResult(
         proposed_format=ReducedDataFormat.DAVE_GROUP_BLOCKS,
-        confidence=confidence,
         evidence=(f"Found {len(markers)} DAVE group marker(s)",),
         detected_required_columns=_REQUIRED_COLUMNS,
         detected_extra_columns=tuple(extra_columns),
         detected_count=len(markers),
         diagnostics=tuple(diagnostics),
-        explicit_override=explicit_override,
-        requires_confirmation=not explicit_override,
-        extension_hint=extension_hint,
     )
 
 
-def _single_detection(
-    header: TextHeader | None,
-    *,
-    extension_hint: str | None,
-    explicit_override: bool,
-) -> FormatDetectionResult:
+def _single_detection(header: TextHeader | None) -> FormatDetectionResult:
     diagnostics: list[ImportDiagnostic] = []
+    normalized: tuple[str, ...] = ()
+    extra_columns: tuple[str, ...] = ()
     if header is None:
         diagnostics.append(
             ImportDiagnostic(
@@ -146,8 +118,6 @@ def _single_detection(
                 message="No table header was detected",
             )
         )
-        normalized: tuple[str, ...] = ()
-        extra_columns: tuple[str, ...] = ()
     else:
         normalized = normalized_columns(header.columns)
         missing = tuple(
@@ -177,42 +147,29 @@ def _single_detection(
         extra_columns = tuple(
             column
             for column, normalized_column in zip(
-                header.columns,
-                normalized,
-                strict=True,
+                header.columns, normalized, strict=True
             )
             if normalized_column not in _REQUIRED_COLUMNS
         )
 
     has_errors = any(
-        diagnostic.severity is DiagnosticSeverity.ERROR
-        for diagnostic in diagnostics
+        diagnostic.severity is DiagnosticSeverity.ERROR for diagnostic in diagnostics
     )
     return FormatDetectionResult(
         proposed_format=ReducedDataFormat.SINGLE_SPECTRUM_TABLE,
-        confidence=(
-            DetectionConfidence.LOW if has_errors else DetectionConfidence.HIGH
-        ),
-        evidence=("Detected an x/y/yerr single-spectrum header",),
+        evidence=("Found an x/y/yerr table header",),
         detected_required_columns=tuple(
             column for column in _REQUIRED_COLUMNS if column in normalized
         ),
         detected_extra_columns=extra_columns,
         detected_count=0 if has_errors else 1,
         diagnostics=tuple(diagnostics),
-        explicit_override=explicit_override,
-        requires_confirmation=not explicit_override,
-        extension_hint=extension_hint,
     )
 
 
-def _wide_detection(
-    header: TextHeader | None,
-    *,
-    extension_hint: str | None,
-    explicit_override: bool,
-) -> FormatDetectionResult:
+def _wide_detection(header: TextHeader | None) -> FormatDetectionResult:
     diagnostics: list[ImportDiagnostic] = []
+    columns = () if header is None else header.columns
     if header is None:
         diagnostics.append(
             ImportDiagnostic(
@@ -221,9 +178,6 @@ def _wide_detection(
                 message="No table header was detected",
             )
         )
-        columns: tuple[str, ...] = ()
-    else:
-        columns = header.columns
     analysis = analyze_wide_columns(columns)
 
     if len(analysis.energy_positions) != 1:
@@ -289,11 +243,6 @@ def _wide_detection(
             )
         )
 
-    has_errors = any(
-        diagnostic.severity is DiagnosticSeverity.ERROR
-        for diagnostic in diagnostics
-    )
-    extra_columns = tuple(columns[index] for index in analysis.extra_positions)
     required_columns: list[str] = []
     if len(analysis.energy_positions) == 1:
         required_columns.append(columns[analysis.energy_positions[0]])
@@ -302,40 +251,26 @@ def _wide_detection(
         required_columns.append(columns[analysis.uncertainty_positions[suffix][0]])
     return FormatDetectionResult(
         proposed_format=ReducedDataFormat.WIDE_QENS_TABLE,
-        confidence=(
-            DetectionConfidence.LOW if has_errors else DetectionConfidence.HIGH
-        ),
         evidence=(
-            f"Detected {len(analysis.complete_suffixes)} complete yN/yerrN pair(s)",
+            f"Found {len(analysis.complete_suffixes)} complete yN/yerrN pair(s)",
         ),
         detected_required_columns=tuple(required_columns),
-        detected_extra_columns=extra_columns,
+        detected_extra_columns=tuple(
+            columns[index] for index in analysis.extra_positions
+        ),
         detected_count=len(analysis.complete_suffixes),
         diagnostics=tuple(diagnostics),
-        explicit_override=explicit_override,
-        requires_confirmation=not explicit_override,
-        extension_hint=extension_hint,
     )
 
 
-def _auto_detect(
-    lines: tuple[str, ...],
-    *,
-    extension_hint: str | None,
-) -> FormatDetectionResult:
-    markers = find_group_markers(lines)
-    if markers:
-        return _dave_detection(
-            lines,
-            extension_hint=extension_hint,
-            explicit_override=False,
-        )
+def _auto_detect(lines: tuple[str, ...]) -> FormatDetectionResult:
+    if find_group_markers(lines):
+        return _dave_detection(lines)
 
     header = find_table_header(lines)
     if header is None:
         return FormatDetectionResult(
             proposed_format=ReducedDataFormat.UNKNOWN,
-            confidence=DetectionConfidence.NONE,
             evidence=("No recognizable reduced-data header was found",),
             detected_required_columns=(),
             detected_extra_columns=(),
@@ -347,7 +282,6 @@ def _auto_detect(
                     message="Reduced-data format could not be determined safely",
                 ),
             ),
-            extension_hint=extension_hint,
         )
 
     normalized = normalized_columns(header.columns)
@@ -357,10 +291,7 @@ def _auto_detect(
     if has_single and has_wide:
         return FormatDetectionResult(
             proposed_format=ReducedDataFormat.AMBIGUOUS,
-            confidence=DetectionConfidence.LOW,
-            evidence=(
-                "Header contains both x/y/yerr and suffixed yN/yerrN columns",
-            ),
+            evidence=("Header matches both single and wide table layouts",),
             detected_required_columns=_REQUIRED_COLUMNS,
             detected_extra_columns=tuple(
                 column
@@ -380,27 +311,16 @@ def _auto_detect(
                 ReducedDataFormat.WIDE_QENS_TABLE,
                 ReducedDataFormat.SINGLE_SPECTRUM_TABLE,
             ),
-            extension_hint=extension_hint,
         )
     if has_wide:
-        return _wide_detection(
-            header,
-            extension_hint=extension_hint,
-            explicit_override=False,
-        )
+        return _wide_detection(header)
     if has_single:
-        return _single_detection(
-            header,
-            extension_hint=extension_hint,
-            explicit_override=False,
-        )
+        return _single_detection(header)
 
     detected_partial = tuple(
         column for column in _REQUIRED_COLUMNS if column in normalized
     )
-    missing = tuple(
-        column for column in _REQUIRED_COLUMNS if column not in normalized
-    )
+    missing = tuple(column for column in _REQUIRED_COLUMNS if column not in normalized)
     diagnostic = (
         ImportDiagnostic(
             code="single_required_columns_missing",
@@ -419,30 +339,57 @@ def _auto_detect(
     )
     return FormatDetectionResult(
         proposed_format=ReducedDataFormat.UNKNOWN,
-        confidence=DetectionConfidence.NONE,
         evidence=("Header does not satisfy a supported reduced-data layout",),
         detected_required_columns=detected_partial,
         detected_extra_columns=tuple(header.columns),
         detected_count=0,
         diagnostics=(diagnostic,),
-        extension_hint=extension_hint,
     )
+
+
+def _explicit_detection(
+    lines: tuple[str, ...], selected: ReducedDataFormat
+) -> FormatDetectionResult:
+    if selected is ReducedDataFormat.DAVE_GROUP_BLOCKS:
+        return _dave_detection(lines)
+
+    header = find_table_header(lines)
+    result = (
+        _wide_detection(header)
+        if selected is ReducedDataFormat.WIDE_QENS_TABLE
+        else _single_detection(header)
+    )
+    if find_group_markers(lines):
+        mismatch = ImportDiagnostic(
+            code="explicit_format_inconsistent",
+            severity=DiagnosticSeverity.ERROR,
+            message=(
+                "DAVE group markers are incompatible with the selected table layout"
+            ),
+        )
+        return FormatDetectionResult(
+            proposed_format=result.proposed_format,
+            evidence=result.evidence,
+            detected_required_columns=result.detected_required_columns,
+            detected_extra_columns=result.detected_extra_columns,
+            detected_count=result.detected_count,
+            diagnostics=result.diagnostics + (mismatch,),
+            alternative_formats=(ReducedDataFormat.DAVE_GROUP_BLOCKS,),
+        )
+    return result
 
 
 def detect_reduced_data_format(
     path: str | Path,
     explicit_format: ReducedDataFormat | str | None = None,
 ) -> FormatDetectionResult:
-    """Detect a supported reduced-data layout from file contents."""
+    """Detect or validate a supported reduced-data layout from file contents."""
 
-    source = Path(path)
-    lines = read_text_lines(source)
-    extension_hint = source.suffix.casefold() or None
+    lines = read_text_lines(Path(path))
     selected = _coerce_explicit_format(explicit_format)
     if explicit_format is not None and selected is ReducedDataFormat.UNKNOWN:
         return FormatDetectionResult(
             proposed_format=ReducedDataFormat.UNKNOWN,
-            confidence=DetectionConfidence.NONE,
             evidence=("Explicit format override is unsupported",),
             detected_required_columns=(),
             detected_extra_columns=(),
@@ -451,62 +398,12 @@ def detect_reduced_data_format(
                 ImportDiagnostic(
                     code="explicit_format_unsupported",
                     severity=DiagnosticSeverity.ERROR,
-                    message="Explicit format must select a Milestone 1 layout",
+                    message="Explicit format must select a supported reduced layout",
                 ),
             ),
-            explicit_override=True,
-            requires_confirmation=False,
-            extension_hint=extension_hint,
         )
-    if selected is None:
-        return _auto_detect(lines, extension_hint=extension_hint)
-
-    automatic = _auto_detect(lines, extension_hint=extension_hint)
-    if selected is ReducedDataFormat.DAVE_GROUP_BLOCKS:
-        result = _dave_detection(
-            lines,
-            extension_hint=extension_hint,
-            explicit_override=True,
-        )
-    else:
-        header = find_table_header(lines)
-        if selected is ReducedDataFormat.WIDE_QENS_TABLE:
-            result = _wide_detection(
-                header,
-                extension_hint=extension_hint,
-                explicit_override=True,
-            )
-        else:
-            result = _single_detection(
-                header,
-                extension_hint=extension_hint,
-                explicit_override=True,
-            )
-
-    if automatic.proposed_format not in {
-        selected,
-        ReducedDataFormat.UNKNOWN,
-        ReducedDataFormat.AMBIGUOUS,
-    }:
-        mismatch = ImportDiagnostic(
-            code="explicit_format_inconsistent",
-            severity=DiagnosticSeverity.ERROR,
-            message=(
-                "Content does not satisfy the explicitly selected format; "
-                f"automatic evidence favors {automatic.proposed_format.value}"
-            ),
-        )
-        return FormatDetectionResult(
-            proposed_format=result.proposed_format,
-            confidence=DetectionConfidence.LOW,
-            evidence=result.evidence + ("Explicit format override was applied",),
-            detected_required_columns=result.detected_required_columns,
-            detected_extra_columns=result.detected_extra_columns,
-            detected_count=result.detected_count,
-            diagnostics=result.diagnostics + (mismatch,),
-            alternative_formats=(automatic.proposed_format,),
-            explicit_override=True,
-            requires_confirmation=False,
-            extension_hint=extension_hint,
-        )
-    return result
+    return (
+        _auto_detect(lines)
+        if selected is None
+        else _explicit_detection(lines, selected)
+    )

@@ -214,8 +214,8 @@ EISF-model fitting are distinct states with recorded reasons.
 The following concepts remain distinct:
 
 - automatically detected invalid values, including invalid sigma;
-- high-confidence automatic boundary-padding masks;
-- medium-confidence boundary-padding suggestions;
+- `AUTO` boundary-padding masks;
+- `REVIEW` boundary-padding masks;
 - the fitting-energy range;
 - manually masked energy points;
 - Q spectra excluded from spectral fitting; and
@@ -230,27 +230,27 @@ separately and examines boundary-connected constant `(intensity, uncertainty)`
 runs only. It does not mask an identical plateau occurring solely inside the
 spectrum, infer padding from intensity sign alone, or hard-code a sentinel.
 
-The approved `edge-padding-v1.0.0` defaults are:
+The approved `edge-padding-v2.0.0` rule is deliberately behavior-oriented:
 
-- plateau equality: relative tolerance `1e-7`, absolute tolerance `1e-12`;
-- cross-spectrum signature equality: relative tolerance `1e-6`, absolute
-  tolerance `1e-10`;
-- numerically clear transition: absolute intensity or uncertainty jump greater
-  than `1e-12 + 0.05 * max(abs(plateau), abs(interior))`;
-- statistically clear intensity transition: at least `5.0` times
-  `hypot(plateau_uncertainty, interior_uncertainty)`;
-- candidate, regular, and long runs: at least 2, 3, and 5 points respectively;
-- long relative run: at least 10% of spectrum points; and
-- a two-point run requires matching clear long runs in at least two other
-  spectra for high-confidence promotion.
+- repeated-pair equality uses relative tolerance `1e-7` and absolute tolerance
+  `1e-12` for intensity and uncertainty;
+- a candidate requires at least two boundary-connected repeated pairs;
+- `AUTO` requires a finite adjacent interior point with strictly positive
+  uncertainty and an intensity or uncertainty transition greater than
+  `1e-12 + 0.05 * max(abs(plateau), abs(interior))`;
+- a clear run of at least five points is `AUTO`;
+- a shorter clear run is `AUTO` only when the same boundary signature is
+  corroborated by clear runs of at least five points in at least two other
+  spectra;
+- other usable repeated boundary runs are `REVIEW`; and
+- a boundary without a usable repeated-pair candidate is `NONE`.
 
-A high-confidence decision requires a boundary-connected repeated pair, an
-adjacent interior point, a clear numerical or statistical transition, and the
-approved combination of run length, relative length, nonpositive-intensity
-support, or cross-group signature support. Nonpositive intensity is supporting
-evidence only. High-confidence points enter an exact, reversible default-on
-boolean mask. Medium-confidence runs enter a separate suggestion mask and
-require confirmation. Low/unsupported evidence masks nothing.
+These labels are actions, not statistical confidence. `AUTO` points enter an
+exact reversible default-on mask; `REVIEW` points enter a mutually exclusive
+review mask; `NONE` masks nothing. The rule has no sigma-jump test,
+nonpositive-intensity support, relative-length criterion, or hard-coded
+sentinel. Otherwise identical positive, zero, and negative plateau values are
+classified by the same run and transition rules.
 
 Padding masks never modify or baseline-shift intensity arrays. All plateau
 points are included exactly, including the point immediately adjacent to the
@@ -284,9 +284,9 @@ order, parameters, array references, warnings, and user choices are auditable.
 Normalization must fail clearly when a finite positive normalization area
 cannot be established.
 
-High-confidence boundary-padding masks may be default-on while remaining
-reversible and fully evidenced. Medium-confidence suggested ranges still
-require recorded confirmation. Neither changes original values nor replaces
+`AUTO` boundary-padding masks may be default-on while remaining reversible.
+`REVIEW` masks still require a recorded later decision. Neither changes
+original values nor replaces
 mandatory manual resolution valid-range selection. The processing preview
 exposes original range, auto-padding mask, optional suggestion, selected range,
 invalid points, baseline setting, normalization result, and warnings.

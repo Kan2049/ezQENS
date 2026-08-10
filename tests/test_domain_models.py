@@ -1,51 +1,38 @@
-"""Tests for minimal Milestone 1 scientific domain models."""
+"""Tests for the reduced scientific domain boundary."""
 
-from dataclasses import replace
 from typing import cast
 
 import numpy as np
 import pytest
 
-from qensfit.domain import (
-    DetectionConfidence,
-    FormatDetectionResult,
-    ImportedDataset,
-    ReducedDataFormat,
-    SourceColumnMetadata,
-    Spectrum,
-    SpectrumRole,
-)
+from qensfit.domain import ReducedDataset, Spectrum, SpectrumRole
 
 
 def make_spectrum(
     *,
     role: SpectrumRole = SpectrumRole.SAMPLE,
+    group_index: int = 0,
     energy: np.ndarray | None = None,
     intensity: np.ndarray | None = None,
     uncertainty: np.ndarray | None = None,
 ) -> Spectrum:
-    """Build a compact spectrum for validation tests."""
+    """Build a compact source-independent spectrum."""
 
     energy_values = np.array([-1.0, 0.0, 1.0]) if energy is None else energy
-    intensity_values = (
-        np.array([2.0, 3.0, 2.5]) if intensity is None else intensity
-    )
+    intensity_values = np.array([2.0, 3.0, 2.5]) if intensity is None else intensity
     uncertainty_values = (
         np.array([0.1, 0.2, 0.1]) if uncertainty is None else uncertainty
     )
-    return Spectrum.from_imported_arrays(
+    return Spectrum(
         role=role,
-        group_index=0,
-        group_label="test",
+        group_index=group_index,
+        group_label=f"group-{group_index}",
         energy=energy_values,
         intensity=intensity_values,
         uncertainty=uncertainty_values,
         energy_unit="meV",
         intensity_unit="counts",
         uncertainty_unit="counts",
-        source_row_numbers=tuple(range(2, 2 + len(energy_values))),
-        source_columns=SourceColumnMetadata("x", "y", "yerr"),
-        source_layout=ReducedDataFormat.SINGLE_SPECTRUM_TABLE,
     )
 
 
@@ -61,11 +48,9 @@ def test_nonempty_arrays_are_required() -> None:
         make_spectrum(energy=empty, intensity=empty, uncertainty=empty)
 
 
-def test_invalid_mask_shape_is_validated() -> None:
-    spectrum = make_spectrum()
-
+def test_arrays_must_be_one_dimensional() -> None:
     with pytest.raises(ValueError, match="one-dimensional"):
-        replace(spectrum, invalid_energy_mask=np.zeros((1, 3), dtype=np.bool_))
+        make_spectrum(energy=np.zeros((1, 3)))
 
 
 def test_role_is_validated_at_runtime() -> None:
@@ -101,36 +86,51 @@ def test_invalid_values_are_retained_and_classified() -> None:
     )
 
 
-def test_imported_arrays_are_read_only() -> None:
+def test_values_and_masks_are_read_only() -> None:
     spectrum = make_spectrum()
 
-    with pytest.raises(ValueError):
-        spectrum.energy[0] = 99.0
+    for array in (
+        spectrum.energy,
+        spectrum.intensity,
+        spectrum.uncertainty,
+        spectrum.invalid_energy_mask,
+        spectrum.invalid_intensity_mask,
+        spectrum.invalid_uncertainty_mask,
+    ):
+        assert not array.flags.writeable
+        with pytest.raises(ValueError):
+            array[0] = 0
 
 
 def test_dataset_role_must_match_spectrum_role() -> None:
     spectrum = make_spectrum(role=SpectrumRole.SAMPLE)
-    detection = FormatDetectionResult(
-        proposed_format=ReducedDataFormat.SINGLE_SPECTRUM_TABLE,
-        confidence=DetectionConfidence.HIGH,
-        evidence=("test",),
-        detected_required_columns=("x", "y", "yerr"),
-        detected_extra_columns=(),
-        detected_count=1,
-    )
 
     with pytest.raises(ValueError, match="roles must match"):
-        ImportedDataset(
+        ReducedDataset(
             role=SpectrumRole.RESOLUTION,
-            source_layout=ReducedDataFormat.SINGLE_SPECTRUM_TABLE,
             spectra=(spectrum,),
-            source_reference="synthetic.txt",
-            diagnostics=(),
-            detected_extra_columns=(),
-            shared_energy_grid=True,
-            shared_energy_axis=spectrum.energy,
-            format_detection=detection,
         )
+
+
+def test_dataset_grid_identity_is_derived() -> None:
+    first = make_spectrum(group_index=0)
+    matching = make_spectrum(group_index=1)
+    unequal = make_spectrum(group_index=1, energy=np.array([-2.0, 0.0, 2.0]))
+
+    assert ReducedDataset(
+        role=SpectrumRole.SAMPLE, spectra=(first, matching)
+    ).shared_energy_grid
+    assert not ReducedDataset(
+        role=SpectrumRole.SAMPLE, spectra=(first, unequal)
+    ).shared_energy_grid
+
+
+def test_spectrum_is_independent_of_text_import_metadata() -> None:
+    spectrum = make_spectrum()
+
+    assert not hasattr(spectrum, "source_columns")
+    assert not hasattr(spectrum, "source_row_numbers")
+    assert not hasattr(spectrum, "source_layout")
 
 
 def test_spectrum_repr_does_not_include_arrays() -> None:
@@ -138,5 +138,3 @@ def test_spectrum_repr_does_not_include_arrays() -> None:
 
     assert "array(" not in representation
     assert "2.5" not in representation
-    assert "source_row_numbers" not in representation
-

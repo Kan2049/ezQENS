@@ -76,8 +76,7 @@ def read_text_lines(path: Path) -> tuple[str, ...]:
                     code="source_read_failed",
                     severity=DiagnosticSeverity.ERROR,
                     message=(
-                        "Could not read reduced-data source: "
-                        f"{type(error).__name__}"
+                        f"Could not read reduced-data source: {type(error).__name__}"
                     ),
                 ),
             )

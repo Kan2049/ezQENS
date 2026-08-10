@@ -1,29 +1,19 @@
 """GUI-independent preprocessing services."""
 
 from qensfit.preprocessing.edge_padding import (
-    ALGORITHM_VERSION,
-    BoundaryPaddingDetection,
+    BoundaryPaddingResult,
     BoundarySide,
-    EdgePaddingConfig,
     EdgePaddingDetectionResult,
-    EdgePaddingSummary,
-    PaddingConfidence,
-    PaddingDiagnostic,
-    SpectrumPaddingMask,
-    SpectrumPaddingSummary,
+    PaddingStatus,
+    SpectrumPaddingResult,
     detect_edge_padding,
 )
 
 __all__ = [
-    "ALGORITHM_VERSION",
-    "BoundaryPaddingDetection",
+    "BoundaryPaddingResult",
     "BoundarySide",
-    "EdgePaddingConfig",
     "EdgePaddingDetectionResult",
-    "EdgePaddingSummary",
-    "PaddingConfidence",
-    "PaddingDiagnostic",
-    "SpectrumPaddingMask",
-    "SpectrumPaddingSummary",
+    "PaddingStatus",
+    "SpectrumPaddingResult",
     "detect_edge_padding",
 ]

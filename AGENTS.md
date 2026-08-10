@@ -49,10 +49,10 @@ validated.
 - Detect padding only as boundary-connected repeated `(intensity, uncertainty)`
   plateaus; never infer padding solely from zero or negative intensity and
   never hard-code a sentinel value.
-- High-confidence edge padding may be placed in a separate reversible
-  default-on auto-padding mask. Medium-confidence detections remain suggestions
-  requiring confirmation. Neither case changes imported arrays or performs an
-  intensity baseline shift.
+- Edge-padding status is behavioral, not statistical: `AUTO` points enter a
+  reversible default-on mask, `REVIEW` points enter a distinct review mask,
+  and `NONE` masks nothing. Neither mask changes imported arrays or performs
+  an intensity baseline shift.
 - Unweighted and logarithmic relative losses are not defaults.
 - Evaluate the elastic term directly as `A_elastic * R_Q(E - E0)` using the
   selected, optionally baseline-corrected, unit-area measured resolution.
@@ -72,8 +72,9 @@ validated.
 
 ## Import and Q-mapping rules
 
-- Detect reduced-data layouts from content, not file extension alone, and
-  require confirmation of an automatically proposed format.
+- Detect reduced-data layouts from content, not file extension. The low-level
+  detector returns a proposed layout and diagnostics; later application/GUI
+  workflow owns user confirmation.
 - Support DAVE group blocks, wide `x/yN/yerrN` tables, and single
   `x/y/yerr` tables through one scientific spectrum interface.
 - Give every spectrum an explicit sample or resolution role, or use validated
@@ -82,9 +83,9 @@ validated.
   optimization only when grids truly match; import must never interpolate.
 - Preserve recognized DAVE fit-result columns as metadata but exclude them
   from energy, measured intensity, and uncertainty.
-- Keep invalid uncertainty, automatic edge-padding masks, medium-confidence
-  padding suggestions, fitting range, manual masks, spectral-Q exclusion,
-  motion-Q exclusion, and Bragg warnings distinct.
+- Keep invalid uncertainty, automatic edge-padding masks, review-only padding
+  masks, fitting range, manual masks, spectral-Q exclusion, motion-Q
+  exclusion, and Bragg warnings distinct.
 - Q mapping resolves to an ordered explicit list in `Å^-1` and requires one Q
   per sample spectrum. Never sort, deduplicate, pad, truncate, extrapolate, or
   otherwise repair a mismatch silently.
@@ -113,6 +114,12 @@ fixture or a source of defaults.
 
 - Keep the `src/qensfit` layout and typed Python.
 - Keep the scientific core callable and independent of PySide6.
+- Keep `ReducedDataset` / `Spectrum` as the stable scientific boundary between
+  source-specific import or reduction and downstream analysis. Source formats
+  must not leak into future fitting interfaces.
+- Design extension seams, not extension scaffolding. Do not add abstract HDF,
+  NeXus, instrument, Mantid, registry, factory, adapter, or plugin frameworks
+  before at least two real implementations require a shared abstraction.
 - Separate domain models, import/export, preprocessing, resolution handling,
   spectral components, convolution, fitting, diagnostics, batch execution,
   derived quantities, molecular geometry, motion models, comparison,
@@ -121,6 +128,9 @@ fixture or a source of defaults.
 - Avoid global mutable state and hidden unit conversions.
 - Use dataclasses or similarly typed immutable objects for early computation
   and Pydantic where boundary validation is useful.
+- Retain runtime dependencies only when current production functionality uses
+  them; add future numerical, plotting, HDF, persistence, or GUI dependencies
+  in the milestone that needs them.
 - During milestones 1–6, implement only the minimal typed in-memory models
   required by the scientific workflow. Do not require UUIDs on every temporary
   object, entity migrations, hash-addressed arrays, append-only project
@@ -148,6 +158,12 @@ roles, structural diagnostics, and public synthetic tests. Generic arbitrary
 column mapping may wait for milestone 2. Do not implement DAVE Q-bin semantics
 before scientific approval.
 
+Milestone 1.2 simplifies this validated core: `ReducedDataset` replaces
+`ImportedDataset`, derivable state becomes properties, format confidence and
+GUI confirmation state leave the core, and edge padding uses
+`AUTO`/`REVIEW`/`NONE`. Preserve numerical arrays, invalid masks, import
+behavior, and validated automatic padding masks while narrowing the API.
+
 Do not begin GUI implementation before the importer, resolution processing,
 numerical convolution, and single-spectrum fitting are validated. Full project
 persistence begins in milestone 8, not milestones 1–6. AIC/AICc remain planned
@@ -164,3 +180,17 @@ to make a test pass.
 Run the existing pytest suite, Ruff, and mypy before handoff. Document
 assumptions and unresolved decisions; do not resolve scientific ambiguity by
 guessing.
+
+## Validation Notebook Maintenance
+
+The project maintains one persistent Jupyter validation notebook as a human-readable integration test of the current production API.
+
+After any milestone that changes public APIs, data models, preprocessing, import behavior, fitting interfaces, diagnostics, or scientific outputs, read and follow:
+
+`docs/test_notebook_maintenance.md`
+
+The current production implementation under `src/qensfit/` is the source of truth.
+
+Do not preserve obsolete production APIs solely for notebook compatibility.
+
+At milestone completion, audit the entire notebook for stale API usage, update it to the current API, integrate a minimal realistic demonstration of the new functionality, and validate it from a clean kernel when validation data are available.

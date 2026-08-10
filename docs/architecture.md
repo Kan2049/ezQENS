@@ -2,10 +2,10 @@
 
 ## 1. Scope and goals
 
-This document defines a proposed version-1 architecture, not implementation.
-It keeps scientific computation independent of PySide6, makes transformations
-auditable, supports reproducible persistence, and permits a future internal
-Python API without committing to a public API in version 1.
+This document defines the current architectural boundary and near-term
+direction. It keeps scientific computation independent of PySide6 and permits
+a future internal Python API without committing to a stable public API in
+version 1.
 
 The package remains under `src/qensfit`, uses typed Python, avoids global
 mutable state, and passes explicit immutable or validated values between
@@ -36,6 +36,22 @@ file contract are reviewed and implemented in milestone 8.
    validated declarative data, never pickle, Python code, or executable plugins.
 8. **Private data stays local.** Core code has no external-upload behavior, and
    logs summarize rather than dump numerical arrays.
+9. **Design seams, not scaffolding.** Extract a general abstraction only after
+   at least two real implementations need it. Future raw HDF/NeXus, instrument,
+   or Mantid sources may produce the same reduced domain, but no framework for
+   them exists now.
+
+The stable scientific flow is:
+
+```text
+source-specific import or reduction
+  -> ReducedDataset -> ordered Spectrum values
+  -> preprocessing / Q mapping / resolution / fitting
+```
+
+Downstream science depends on `ReducedDataset` / `Spectrum`, never the original
+file type. The current producer is reduced text import. Future producers are
+added from real schemas without changing this boundary.
 
 ## 3. Proposed package boundaries
 
@@ -77,22 +93,23 @@ in-memory objects; UUIDs, entity schema versions, hash-addressed registries,
 and migration machinery are not mandatory. Pydantic persistence schemas and
 external array references are reviewed in milestone 8.
 
-The common numerical spectrum interface exposes energy, intensity,
-uncertainty, invalid-data mask, group identity, and source metadata. It must
-also distinguish sample from measured-resolution role, either directly or
-through validated wrappers. A shared-grid matrix view is permitted for true
-wide-table grids, while a spectrum list supports unequal grids and lengths.
-Storage choice is hidden behind the interface and never causes interpolation.
+`Spectrum` contains only its scientific role, ordered group identity, immutable
+energy/intensity/uncertainty arrays, units, and invalid-value masks.
+`ReducedDataset` holds ordered spectra plus minimal source/import traceability.
+Whether spectra share an energy grid and which extra columns were ignored are
+derived rather than redundantly stored. Text row/column concepts stay at the
+import boundary and do not burden future non-text producers.
 
 ### 3.2 Import and export
 
-Importers translate untrusted files into an import report plus domain data.
+Importers translate untrusted files into reduced domain data plus diagnostics.
 They do not preprocess, fit, or infer unspecified scientific meaning. The
-detector examines content and returns proposed layout, confidence, evidence,
-counts, required/extra columns, warnings, and plausible alternatives. Detection
-precedence is explicit user choice, DAVE group blocks, wide `x/yN/yerrN`,
-single `x/y/yerr`, then custom mapping. Extensions are hints only, and an
-automatic proposal requires confirmation.
+detector examines content and returns proposed layout, concise evidence,
+counts, required/extra columns, diagnostics, and plausible alternatives. It
+stores no confidence, extension hint, explicit-override flag, or GUI
+confirmation state. Detection precedence is explicit user choice, DAVE group
+blocks, wide `x/yN/yerrN`, single `x/y/yerr`, then custom mapping. Extensions
+do not determine layout; later application workflow owns confirmation.
 
 DAVE group blocks, wide shared-grid tables, and single-spectrum tables convert
 to the common spectrum interface. Recognized DAVE fit-result columns are
@@ -121,19 +138,20 @@ changing original arrays.
 
 Boundary-padding detection is a separate preprocessing service, not importer
 logic. It examines boundary-connected repeated intensity/uncertainty pairs per
-spectrum, compares signatures across the dataset, and returns immutable typed
-evidence plus point-level masks. High-confidence points form a reversible
-default-on mask; medium-confidence points form a confirmation-gated suggestion
-mask. Both remain distinct from invalid/manual/range/Q masks. The service never
-shifts intensity values or treats an internal constant segment as edge padding.
+spectrum and compares signatures across the dataset. `AUTO` and `REVIEW`
+produce distinct, mutually exclusive immutable point masks; `NONE` masks
+nothing. Boundary results retain only side, run length, energy bounds, status,
+and a compact reason. Internal candidates and calculations are not public
+domain state. The service never shifts intensity values or treats an internal
+constant segment as edge padding.
 
 `resolution` retains originals and makes manual valid-range selection
 mandatory and authoritative in the first implementation. It applies explicit
 optional baseline correction and validated unit-area normalization, validates
 grids, builds uniform processed grids, and associates sample and resolution
 groups. Exact versus user-selected nearest-Q association is explicit.
-High-confidence auto-padding may be default-on but reversible; medium-confidence
-range suggestions require confirmation. Neither mutates originals or replaces
+`AUTO` padding may be default-on but reversible; `REVIEW` requires a later user
+decision. Neither mutates originals or replaces
 manual resolution valid-range selection.
 
 ### 3.4 Spectral models and convolution
@@ -206,7 +224,7 @@ infrastructure, receive progress/result messages, and support cancellation.
 They never contain formulas, residual construction, convolution, or optimizer
 logic.
 
-The Import screen eventually presents format detection/confidence/warnings,
+The Import screen eventually presents format proposal/evidence/warnings,
 manual override, group or paired-column count, and array mapping preview. It
 offers linear range, manual Q list, explicit-list file, DAVE Q-bin parameter
 file, and supported imported-metadata modes; shows the resolved list and count
@@ -232,8 +250,9 @@ Disallowed dependencies include:
 - persistence importing executable user code; and
 - Mantid types appearing in core signatures.
 
-Optional interoperability adapters, including Mantid, sit outside the core and
-translate into qensfit domain values.
+If a concrete interoperability source is implemented later, it stays outside
+the core and produces qensfit domain values. No adapter base class, registry,
+factory, or plugin protocol is predeclared now.
 
 ## 5. Core callable interfaces
 
@@ -244,8 +263,8 @@ I/O; expected scientific/data problems are validation issues in results.
 Conceptual use cases include:
 
 ```text
-detect_reduced_format(source, optional_override) -> FormatDetectionResult
-import_reduced_data(source, import_configuration) -> ImportOutcome[Dataset]
+detect_reduced_data_format(source, optional_override) -> FormatDetectionResult
+import_reduced_data(source, role, units) -> ReducedDataset
 resolve_q_mapping(source_definition, sample_count, resolution_count) -> QMapping
 process_resolution(original, configuration) -> ResolutionProcessingOutcome
 fit_spectrum(spectrum, resolution, configuration) -> FitResult
@@ -264,8 +283,8 @@ types can evolve before the internal API stabilizes.
 ## 6. Data flow and auditability
 
 ```text
-source files
-  -> immutable imported datasets + provenance
+source-specific import or reduction
+  -> immutable ReducedDataset + minimal source traceability
   -> Q mapping + analysis masks
   -> processed sample/resolution views + processing steps
   -> per-Q spectral fit configurations/results
@@ -285,73 +304,15 @@ milestone 8.
 
 ## 7. Project-file format
 
-This entire section is a long-term version-1 proposal. It is not an
-implementation requirement for milestones 1–6 and must not delay their
-scientific validation. Milestone 8 reviews the proposal and then implements the
-approved persistence format, safety policy, hashes, migrations, archive layout,
-attachment rules, atomic saving, and public project-file contract.
+Persistence is deferred, non-binding design work until milestone 8. Milestones
+1–6 do not build container, archive, migration, attachment, hash-registry, or
+atomic-save infrastructure. Milestone 8 first reviews the stable scientific
+contracts, then chooses and documents a safe data-only `.qensfit` format.
 
-### 7.1 Proposed container
-
-Use a versioned `.qensfit` ZIP64 container with:
-
-```text
-manifest.json
-models/project.json
-arrays/<content-hash>.npy
-attachments/<approved-data-only-files>
-checksums.json
-```
-
-- `manifest.json` identifies the format, project-schema version, software
-  version, creation metadata, entry inventory, and content hashes.
-- `project.json` contains validated JSON-compatible domain records and
-  references arrays by content hash.
-- `.npy` files store numeric arrays with `allow_pickle=False`.
-- Attachments are restricted to explicitly supported data-only media types.
-- `checksums.json` enables corruption detection.
-
-Imported numerical data are embedded for reproducibility while original source
-paths remain references and are optional on reload. Source-file hashes are
-stored where practical. Private source paths and user-identifying path segments
-must not appear in public exports unless the user explicitly requests them.
-
-This format is a proposal requiring review before implementation. HDF5 remains
-an alternative for array storage, but HDF5 input support is not a prerequisite
-for the initial ASCII milestone.
-
-### 7.2 Safety
-
-Loaders treat projects as untrusted:
-
-- reject absolute paths, `..`, links, duplicate entries, and archive traversal;
-- impose configurable total, entry-count, and decompressed-size limits;
-- validate file magic, schema, dimensions, dtypes, finite/invalid masks, and
-  identifier references;
-- never use pickle, `eval`, dynamic imports, macros, or embedded Python;
-- verify hashes before constructing domain objects;
-- do not automatically follow external paths or URLs; and
-- report unsupported versions without partially mutating active state.
-
-Saves use a temporary sibling file, flush and validate it, then atomically
-replace the destination where the platform permits. Backups and recovery
-behavior remain a product decision.
-
-### 7.3 Versioning and migration
-
-The container has a format version; the root project and every persistent
-entity have schema/model versions. Migrations are explicit, ordered, pure
-transformations:
-
-```text
-old bytes -> validated old schema -> migration copy -> validated current schema
-```
-
-Never modify the source project in place. Preserve unknown fields only through
-a documented extension mechanism; otherwise fail clearly to avoid silent
-semantic loss. Each migration records source/target versions, software version,
-time, warnings, and a pre-migration hash. Round-trip and fixture tests cover
-every supported migration. Downgrade is not assumed.
+That review must address schema/version migration, integrity hashes, private
+path redaction, archive traversal and size limits, non-executable array storage,
+and atomic save behavior. No current domain object or dependency is retained
+solely to anticipate that design.
 
 ## 8. Reporting and logging
 
@@ -402,11 +363,10 @@ plugin execution, a public stable Python API, or a final GUI visual design.
 
 ## 11. Unresolved decisions and risks
 
-Unresolved engineering choices include concrete module names, error/result
-types, DAVE Q-bin parsing after scientific approval, array chunking, archive
-limits, autosave/recovery, worker process versus thread execution, stable
-report formats, and whether HDF5 should replace NPY inside the project
-container.
+Unresolved engineering choices include later result types, DAVE Q-bin parsing
+after scientific approval, persistence format and limits, worker process versus
+thread execution, stable report formats, and concrete raw HDF/NeXus schemas if
+raw reduction is ever added.
 
 Risks include archive abuse, schema drift, large-memory use, cancellation that
 leaves partial state, Windows path/process differences, dependency leakage into

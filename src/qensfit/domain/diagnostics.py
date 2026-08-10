@@ -43,8 +43,6 @@ class ImportValidationError(ValueError):
         )
         if not summary:
             summary = "; ".join(
-                f"{diagnostic.code}: {diagnostic.message}"
-                for diagnostic in diagnostics
+                f"{diagnostic.code}: {diagnostic.message}" for diagnostic in diagnostics
             )
         super().__init__(summary)
-

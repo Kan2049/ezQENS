@@ -35,6 +35,7 @@ def _empty_dataset_fields() -> dict[str, object]:
         "edge_padding_algorithm_version": None,
         "edge_padding_by_spectrum": [],
         "total_auto_padding_mask_count": None,
+        "total_review_padding_mask_count": None,
     }
 
 
@@ -50,13 +51,10 @@ def _inspect_file(path: Path, *, role: str) -> tuple[dict[str, object], bool]:
         report.update(
             {
                 "proposed_detected_format": "unavailable",
-                "detection_confidence": "none",
                 "detection_evidence": [],
                 "detected_required_columns": [],
                 **_empty_dataset_fields(),
-                "diagnostic_counts_by_severity": _diagnostic_counts(
-                    error.diagnostics
-                ),
+                "diagnostic_counts_by_severity": _diagnostic_counts(error.diagnostics),
                 "inspection_status": "failed",
             }
         )
@@ -65,11 +63,8 @@ def _inspect_file(path: Path, *, role: str) -> tuple[dict[str, object], bool]:
     report.update(
         {
             "proposed_detected_format": detection.proposed_format.value,
-            "detection_confidence": detection.confidence.value,
             "detection_evidence": list(detection.evidence),
-            "detected_required_columns": list(
-                detection.detected_required_columns
-            ),
+            "detected_required_columns": list(detection.detected_required_columns),
         }
     )
 
@@ -82,9 +77,7 @@ def _inspect_file(path: Path, *, role: str) -> tuple[dict[str, object], bool]:
                 "detected_ignored_extra_columns": list(
                     detection.detected_extra_columns
                 ),
-                "diagnostic_counts_by_severity": _diagnostic_counts(
-                    error.diagnostics
-                ),
+                "diagnostic_counts_by_severity": _diagnostic_counts(error.diagnostics),
                 "inspection_status": "failed",
             }
         )
@@ -112,14 +105,10 @@ def _inspect_file(path: Path, *, role: str) -> tuple[dict[str, object], bool]:
     report.update(
         {
             "number_of_spectra": summary.spectrum_count,
-            "group_identities": [
-                spectrum.group_label for spectrum in dataset.spectra
-            ],
+            "group_identities": [spectrum.group_label for spectrum in dataset.spectra],
             "row_counts": list(summary.row_counts),
             "shared_energy_grid": summary.shared_energy_grid,
-            "detected_ignored_extra_columns": list(
-                summary.detected_extra_columns
-            ),
+            "detected_ignored_extra_columns": list(summary.detected_extra_columns),
             "finite_energy_ranges": [
                 {
                     "group_identity": spectrum.group_label,
@@ -145,35 +134,27 @@ def _inspect_file(path: Path, *, role: str) -> tuple[dict[str, object], bool]:
                     strict=True,
                 )
             ],
-            "diagnostic_counts_by_severity": _diagnostic_counts(
-                dataset.diagnostics
-            ),
-            "edge_padding_algorithm_version": (
-                padding_summary.algorithm_version
-            ),
+            "diagnostic_counts_by_severity": _diagnostic_counts(dataset.diagnostics),
+            "edge_padding_algorithm_version": (padding_summary.algorithm_version),
             "edge_padding_by_spectrum": [
                 {
                     "group_identity": item.group_identity,
-                    "left_auto_masked_point_count": (
-                        item.left_auto_masked_point_count
-                    ),
-                    "right_auto_masked_point_count": (
-                        item.right_auto_masked_point_count
-                    ),
+                    "left_auto_masked_point_count": (item.left_auto_mask_count),
+                    "right_auto_masked_point_count": (item.right_auto_mask_count),
                     "derived_valid_energy_range": {
-                        "minimum": item.derived_valid_energy_range[0],
-                        "maximum": item.derived_valid_energy_range[1],
+                        "minimum": item.retained_energy_bounds[0],
+                        "maximum": item.retained_energy_bounds[1],
                     },
-                    "confidence": item.confidence.value,
-                    "evidence_codes": list(item.evidence_codes),
-                    "total_auto_padding_mask_count": (
-                        item.total_auto_padding_mask_count
-                    ),
+                    "status": item.status.value,
+                    "needs_review": item.needs_review,
+                    "total_auto_padding_mask_count": (item.total_auto_mask_count),
+                    "total_review_padding_mask_count": (item.total_review_mask_count),
                 }
                 for item in padding_summary.spectra
             ],
-            "total_auto_padding_mask_count": (
-                padding_summary.total_auto_padding_mask_count
+            "total_auto_padding_mask_count": (padding_summary.total_auto_mask_count),
+            "total_review_padding_mask_count": (
+                padding_summary.total_review_mask_count
             ),
             "inspection_status": "ok",
         }

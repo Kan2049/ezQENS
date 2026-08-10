@@ -9,12 +9,7 @@ description = "Standardized analysis of reduced quasielastic neutron scattering 
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
 dependencies = [
-    "h5py",
-    "matplotlib",
     "numpy",
-    "pandas",
-    "pydantic",
-    "scipy",
 ]
 
 [dependency-groups]
