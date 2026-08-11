@@ -157,26 +157,42 @@ default-on flags into every spectrum result. Its privacy-safe summary reports
 only group identity, side counts, total automatic/review counts, statuses, and
 retained finite energy bounds.
 
-## 4. Near-term scientific values
+## 4. Current and near-term scientific values
 
-These concepts are introduced only in their roadmap milestones and remain
-minimal immutable in-memory values through milestone 7.
+These values remain minimal immutable in-memory objects through milestone 7.
 
-### 4.1 QMapping — milestone 2
+### 4.1 QBins — milestone 2
 
-Retain source strategy and source definition separately from the resolved,
-ordered explicit Q list in `Å^-1`. Strategies are `linear_range`,
-`manual_list`, `explicit_list_file`, approved `dave_q_parameter_file`, and
-supported `imported_metadata`. Preserve order, parser/source information where
-applicable, warnings, and application-level confirmation. Q count must match
-sample spectra and applicable groupwise resolution spectra exactly.
+`QBins` belongs to `ReducedDataset`, not `Spectrum`. It contains an ordered
+read-only `q_values` array in `Å^-1` and an optional read-only `edges` array.
+There is exactly one representative value per spectrum. Known edges contain
+one additional value and are finite and strictly increasing.
 
-### 4.2 MaskDefinition — milestone 2
+`QBins.from_edges(...)` derives Milestone-2 midpoint representatives while the
+base value permits a future reducer to supply a scientifically justified
+weighted/effective representative with known edges. `QBins.from_q_values(...)`
+preserves explicit nonlinear order and leaves edges unknown. Count-driven
+`uniform_q_bins(...)` uses authoritative inclusive outer edges and group count
+and covers the range exactly. No Q state is copied onto `Spectrum`, and no
+mapping provenance or GUI confirmation state is stored in the scientific value.
 
-Keep invalid-data, edge-padding automatic, edge-padding review, fitting range,
-manual point, spectral-Q exclusion, motion-Q exclusion, and Bragg-warning state
-distinct. Every point mask matches its spectrum length. Review status and
-warnings never silently become exclusions.
+`DAVEQBinsResult` keeps DAVE source metadata outside `QBins`: lower limit,
+upper limit, step, reported group count, and diagnostics. The parser rebuilds
+all complete fixed-width bins from the limits and step. The upper limit need not
+equal the final actual bin edge, and disagreement between the reported and
+reconstructed group counts is a warning rather than a parse failure.
+
+### 4.2 FittingRange and FittingSelection — milestone 2
+
+Each ordered group has its own finite inclusive `FittingRange`.
+`FittingSelection` associates the unchanged `ReducedDataset`, padding result,
+and ordered range tuple. It derives rather than stores invalid, in-range,
+excluded, and retained masks. Exclusion is invalid measurement OR `AUTO`
+padding OR outside the selected group range. `REVIEW` is not automatically
+excluded. A selection fails when a group retains no usable measured points.
+
+Manual point masks, whole-Q fitting exclusions, Bragg warnings, and motion-fit
+exclusions remain separate future concepts and are not Milestone-2 state.
 
 ### 4.3 ResolutionDataset and processing values — milestone 3
 
@@ -247,7 +263,7 @@ EdgePaddingDetectionResult -> ordered SpectrumPaddingResult
 SpectrumPaddingResult -> one Spectrum by group order/identity
 
 future milestone sequence:
-ReducedDataset -> QMapping + masks -> processed resolution
+ReducedDataset + QBins -> FittingSelection -> processed resolution
   -> FitConfiguration -> FitResult -> BatchFitResult
   -> DerivedQENSResult -> molecular/motion results -> comparison
   -> milestone-8 project/export/provenance schemas
@@ -265,7 +281,9 @@ ReducedDataset -> QMapping + masks -> processed resolution
 - Detection has no confidence or GUI workflow state.
 - `AUTO` and `REVIEW` masks are exact, read-only, mutually exclusive, and
   independent of invalid masks.
-- No Q value, interpolation, baseline shift, or silent repair occurs.
+- Q bins are dataset-level, count-aligned, immutable, and absent from `Spectrum`.
+- Per-group fitting ranges and derived masks preserve all original arrays.
+- No Q rebinning, interpolation, baseline shift, or silent repair occurs.
 - Future sources can produce `ReducedDataset` without a predeclared framework.
 
 ## 8. Explicit non-goals and unresolved decisions
@@ -274,8 +292,8 @@ This model does not define raw reduction, HDF/NeXus schemas, Mantid or
 instrument protocols, plugin systems, generic reduction factories, GUI state,
 or current persistence classes.
 
-Still unresolved are detailed DAVE grammar, DAVE Q-bin meanings, explicit-list
-comment syntax, resolution/convolution policies, covariance and AIC/AICc
+Still unresolved are detailed general DAVE grammar, explicit-list comment
+syntax, resolution/convolution policies, covariance and AIC/AICc
 conventions, Bragg heuristics, motion equations, and the milestone-8 project
 format. None may be resolved from private benchmark values or by adding
 premature abstraction.

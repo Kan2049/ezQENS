@@ -117,11 +117,15 @@ recorded and excluded from measured data. Generic ASCII uses explicit mapping
 when ambiguous. Import preserves order, per-group grids/lengths, original
 arrays, and source layout; it never interpolates.
 
-Q mapping is a separate boundary that retains source definition and resolved
-explicit values. It supports inclusive linear range, manual list, explicit-list
-file, approved DAVE Q-bin parameter file, and supported imported metadata.
-Every resolved list is previewed, confirmed, and checked exactly against sample
-and applicable resolution group counts.
+Q identity is dataset-level `QBins`: one ordered representative value per
+spectrum plus optional explicit edges. Count-driven `uniform_q_bins()` exactly
+covers its inclusive outer edges. The DAVE parser instead reconstructs complete
+fixed-width bins from the source lower limit, upper limit, and step, so its
+source upper limit may exceed the final actual edge. It retains the stored group
+count as source metadata and warns if it differs from the reconstructed count.
+Both edge-defined paths produce midpoint representatives; explicit values leave
+edges unknown. Source-specific metadata and diagnostics stay in `io`, while the
+scientific object contains no parser, confirmation, or GUI state.
 
 Exporters consume result/report models; they do not recompute fits. Every
 scientific export includes units, FWHM labels, exclusions, warnings, software
@@ -130,9 +134,10 @@ version, and sufficient project/result identifiers for traceability.
 ### 3.3 Preprocessing and resolution
 
 `preprocessing` expresses analysis-level masks and transformations as pure or
-side-effect-free operations returning new data plus minimal trace records. It
-distinguishes invalid values, fit ranges, manual point masks, spectral
-exclusions, and motion-fit exclusions. Sigma is valid only when finite and
+side-effect-free operations returning new data plus minimal trace records.
+Milestone 2 distinguishes invalid values, per-group fit ranges, `AUTO` padding,
+and `REVIEW` padding; later fitting workflows add manual point, spectral, and
+motion-fit exclusions as separate state. Sigma is valid only when finite and
 strictly positive; every other sigma is automatically invalid-masked without
 changing original arrays.
 
@@ -265,7 +270,11 @@ Conceptual use cases include:
 ```text
 detect_reduced_data_format(source, optional_override) -> FormatDetectionResult
 import_reduced_data(source, role, units) -> ReducedDataset
-resolve_q_mapping(source_definition, sample_count, resolution_count) -> QMapping
+QBins.from_edges(edges) / QBins.from_q_values(values) -> QBins
+uniform_q_bins(lower_q_edge, upper_q_edge, group_count) -> QBins
+parse_dave_q_bins(source) -> DAVEQBinsResult
+dataset.assign_q_bins(q_bins) -> ReducedDataset
+FittingSelection.uniform(dataset, padding, energy_bounds) -> FittingSelection
 process_resolution(original, configuration) -> ResolutionProcessingOutcome
 fit_spectrum(spectrum, resolution, configuration) -> FitResult
 fit_batch(spectra, resolution_map, configuration, cancellation) -> BatchFitResult
@@ -285,7 +294,7 @@ types can evolve before the internal API stabilizes.
 ```text
 source-specific import or reduction
   -> immutable ReducedDataset + minimal source traceability
-  -> Q mapping + analysis masks
+  -> dataset-level QBins + per-group FittingSelection
   -> processed sample/resolution views + processing steps
   -> per-Q spectral fit configurations/results
   -> derived FWHM/tau/EISF records
@@ -363,8 +372,8 @@ plugin execution, a public stable Python API, or a final GUI visual design.
 
 ## 11. Unresolved decisions and risks
 
-Unresolved engineering choices include later result types, DAVE Q-bin parsing
-after scientific approval, persistence format and limits, worker process versus
+Unresolved engineering choices include later result types, persistence format
+and limits, worker process versus
 thread execution, stable report formats, and concrete raw HDF/NeXus schemas if
 raw reduction is ever added.
 

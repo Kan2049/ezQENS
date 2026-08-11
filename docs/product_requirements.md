@@ -58,8 +58,9 @@ Version 1 must support:
 - single-spectrum `x`/`y`/`yerr` tables;
 - generic ASCII, TXT, DAT, and CSV files through explicit custom mapping;
 - measured resolution from vanadium or a low-temperature sample;
-- inclusive linear-range, manual-list, explicit-list-file, approved DAVE
-  Q-parameter-file, and imported-metadata Q mappings; and
+- uniform outer-edge bins, explicit representative values, approved DAVE
+  Q-parameter files, and later validated explicit-list/imported-metadata Q
+  mappings; and
 - XYZ files with element symbols and Cartesian coordinates in angstrom,
   compatible with common VESTA exports.
 
@@ -127,42 +128,36 @@ not be resolved silently.
 
 ### 4.4 Q-mapping modes
 
-Every mode resolves to an ordered explicit Q list in `Å^-1`, retained in the
-analysis state and confirmed before application.
+Every current mode produces dataset-level `QBins` with exactly one finite
+representative value per spectrum in `Å^-1`.
 
-**Linear range:** for finite `Q_start`, finite `Q_end`, and `N >= 2`, generate
-inclusive endpoints:
+**Uniform edge range:** finite lower/upper Q values are authoritative inclusive
+outer edges, the existing spectrum count `N` is authoritative, and the bins
+exactly cover the range:
 
 ```text
-Q_i = Q_start + i * (Q_end - Q_start) / (N - 1)
-for i = 0, ..., N - 1
+delta_Q = (upper_q_edge - lower_q_edge) / N
+q_value[i] = (edge[i] + edge[i + 1]) / 2
 ```
 
-This is equivalent to `numpy.linspace(Q_start, Q_end, N)`. Show the generated
-list for review. No private range or count is an application default.
+Generate `N + 1` contiguous edges and `N` midpoint representatives. The outer
+edges are not first/last group centers. No private range is an application
+default.
 
-**Manual list:** accept at least newline- and comma-separated numbers in the
-future GUI. Preserve supplied order; never sort, deduplicate, interpolate, pad,
+**Explicit representative values:** preserve arbitrary nonlinear supplied order
+and leave edges unknown. Never infer edges, sort, deduplicate, interpolate, pad,
 truncate, extrapolate, or replace entries.
 
-**Explicit-list file:** support one numerical value per entry under an approved
-blank-line/comment policy. Retain source format/reference, original parsed
-values, unit, resolved list, warnings, parser version, and confirmation.
+**DAVE Q-bin parameter file:** support the approved four numeric values only:
+lower limit, upper limit, reported group count, and step. Reconstruct all
+complete fixed-width bins from the limits and step without extending to the
+upper limit, merging the remainder, or creating a partial final bin. Retain the
+source upper limit even when it exceeds the final actual edge. A reported-count
+mismatch warns but does not replace the reconstructed bins.
 
-**DAVE Q-bin parameter file:** treat this as distinct from a value list. A
-documented, tested file definition and scientific-owner approval of every
-supported field are prerequisites for production parsing. Preview detected
-format, original parameters, interpreted names, generated list/count, warnings,
-and comparison with sample/resolution group counts. Until approval, the format
-is supported in principle but scientifically unresolved.
-
-**Imported metadata:** use only explicitly supported and validated Q metadata,
-showing the resolved list for confirmation.
-
-For every mode, final Q count must equal sample-spectrum count. When resolution
-is associated group by group, validate its count too. A mismatch reports sample
-count, applicable resolution count, Q count, and mapping mode. Never silently
-truncate, pad, discard, or combine Q values or spectra.
+For every mode, Q count must equal spectrum count. Explicit-list syntax,
+imported-Q metadata, resolution association, and application/GUI confirmation
+remain future workflow concerns.
 
 ### 4.5 Boundary-padding detection
 
@@ -383,7 +378,6 @@ Version 1 is acceptable when:
 - Exact authoritative C2 and C4 equations and parameter definitions.
 - Exact isotropic-reorientation equation and parameterization.
 - Detailed accepted syntax within DAVE and generic ASCII layout families.
-- Supported DAVE Q-bin parameter-file fields and their authoritative meanings.
 - Blank-line/comment policy for explicit Q-list files.
 - Default uniform convolution grid and interpolation method.
 - Exact AIC/AICc likelihood convention and covariance-estimation policy.

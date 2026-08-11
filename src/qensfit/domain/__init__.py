@@ -7,10 +7,12 @@ from qensfit.domain.diagnostics import (
 )
 from qensfit.domain.models import (
     FormatDetectionResult,
+    QBins,
     ReducedDataFormat,
     ReducedDataset,
     Spectrum,
     SpectrumRole,
+    uniform_q_bins,
 )
 
 __all__ = [
@@ -18,8 +20,10 @@ __all__ = [
     "FormatDetectionResult",
     "ImportDiagnostic",
     "ImportValidationError",
+    "QBins",
     "ReducedDataset",
     "ReducedDataFormat",
     "Spectrum",
     "SpectrumRole",
+    "uniform_q_bins",
 ]

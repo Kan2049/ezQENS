@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 
 import numpy as np
@@ -59,6 +59,90 @@ def _readonly_float_array(value: npt.ArrayLike, *, name: str) -> FloatArray:
         raise ValueError(f"{name} must be a one-dimensional array")
     array.setflags(write=False)
     return array
+
+
+@dataclass(frozen=True, slots=True)
+class QBins:
+    """Ordered representative Q values and optional bin edges in inverse angstrom."""
+
+    q_values: FloatArray = field(repr=False)
+    edges: FloatArray | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        q_values = _readonly_float_array(self.q_values, name="q_values")
+        if q_values.size == 0:
+            raise ValueError("q_values must contain at least one value")
+        if not np.all(np.isfinite(q_values)):
+            raise ValueError("q_values must be finite")
+
+        edges: FloatArray | None = None
+        if self.edges is not None:
+            edges = _readonly_float_array(self.edges, name="edges")
+            if edges.size < 2:
+                raise ValueError("edges must contain at least two values")
+            if not np.all(np.isfinite(edges)):
+                raise ValueError("edges must be finite")
+            if not np.all(np.diff(edges) > 0.0):
+                raise ValueError("edges must be strictly increasing")
+            if edges.size != q_values.size + 1:
+                raise ValueError(
+                    "edges must contain exactly one more value than q_values"
+                )
+
+        object.__setattr__(self, "q_values", q_values)
+        object.__setattr__(self, "edges", edges)
+
+    @classmethod
+    def from_edges(cls, q_bin_edges: npt.ArrayLike) -> QBins:
+        """Create bins whose Milestone-2 representatives are edge midpoints."""
+
+        edges = _readonly_float_array(q_bin_edges, name="q_bin_edges")
+        if edges.size < 2:
+            raise ValueError("q_bin_edges must contain at least two values")
+        if not np.all(np.isfinite(edges)):
+            raise ValueError("q_bin_edges must be finite")
+        if not np.all(np.diff(edges) > 0.0):
+            raise ValueError("q_bin_edges must be strictly increasing")
+        midpoint_values = edges[:-1] / 2.0 + edges[1:] / 2.0
+        return cls(q_values=midpoint_values, edges=edges)
+
+    @classmethod
+    def from_q_values(cls, representative_q_values: npt.ArrayLike) -> QBins:
+        """Create ordered representative Q values without inferring bin edges."""
+
+        q_values = _readonly_float_array(
+            representative_q_values, name="representative_q_values"
+        )
+        return cls(q_values=q_values)
+
+    @property
+    def group_count(self) -> int:
+        """Return the number of represented spectrum groups."""
+
+        return int(self.q_values.size)
+
+    @property
+    def unit(self) -> str:
+        """Return the fixed momentum-transfer unit."""
+
+        return "Å^-1"
+
+
+def uniform_q_bins(
+    *, lower_q_edge: float, upper_q_edge: float, group_count: int
+) -> QBins:
+    """Generate count-driven uniform bins that exactly cover both outer edges."""
+
+    if isinstance(group_count, bool) or not isinstance(group_count, int):
+        raise ValueError("group_count must be an integer")
+    if group_count < 1:
+        raise ValueError("group_count must be at least one")
+    if not np.isfinite(lower_q_edge) or not np.isfinite(upper_q_edge):
+        raise ValueError("Q-bin edges must be finite")
+    if lower_q_edge >= upper_q_edge:
+        raise ValueError("lower_q_edge must be less than upper_q_edge")
+    edges = np.linspace(lower_q_edge, upper_q_edge, group_count + 1)
+    return QBins.from_edges(edges)
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,6 +239,7 @@ class ReducedDataset:
     source_layout: ReducedDataFormat | None = None
     diagnostics: tuple[ImportDiagnostic, ...] = ()
     source_columns: tuple[SourceColumnMetadata, ...] = field(default=(), repr=False)
+    q_bins: QBins | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.role, SpectrumRole):
@@ -181,6 +266,13 @@ class ReducedDataset:
                 )
             ):
                 raise ValueError("source column metadata must match spectrum order")
+        if self.q_bins is not None and self.q_bins.group_count != len(self.spectra):
+            raise ValueError("Q-bin count must match spectrum count")
+
+    def assign_q_bins(self, q_bins: QBins) -> ReducedDataset:
+        """Return this dataset with validated dataset-level Q-bin identity."""
+
+        return replace(self, q_bins=q_bins)
 
     @property
     def shared_energy_grid(self) -> bool:

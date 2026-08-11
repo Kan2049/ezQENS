@@ -39,26 +39,43 @@ interpolates, changes row order, or discards values to force a representation.
 
 ### 2.2 Q mapping
 
-Every applied Q mapping resolves to an ordered explicit list in `Å^-1`, with
-exactly one value per sample spectrum. Manual-list order is authoritative and
-must not be sorted or repaired.
+Q identity is stored once at dataset/group level as `QBins`, never copied onto
+each `Spectrum`. It always contains one finite representative `q_value` in
+`Å^-1` per ordered spectrum. Explicit Q-value input preserves the supplied
+order exactly and does not imply known bin edges.
 
-Linear-range mapping has inclusive endpoints:
+Explicit ordered edges are the preferred unambiguous Q-bin definition. For
+`N` groups, edges are finite, strictly increasing, and satisfy:
 
 ```text
-Q_i = Q_start + i * (Q_end - Q_start) / (N - 1)
-i = 0, ..., N - 1
+len(edges) = N + 1
+q_value[i] = (edge[i] + edge[i + 1]) / 2
 ```
 
-Both endpoints are finite, `N >= 2`, and the generated values are equivalent to
-`numpy.linspace(Q_start, Q_end, N)`. The resolved list is reviewed and
-confirmed before use. Group-by-group resolution association also validates the
-applicable resolution count. No mismatch is fixed by truncation, padding,
-discarding, or combining values or spectra.
+The midpoint is the approved Milestone-2 convention for values generated from
+edges, not a permanent assertion about future weighted/effective Q values.
+Nonuniform edges are valid.
 
-Manual lists, explicit-list files, approved DAVE Q-bin parameter files, and
-supported imported metadata are additional sources of resolved lists. DAVE
-parameter semantics remain unresolved until every supported field is approved.
+Uniform manual bins are count-driven, use authoritative inclusive outer edges
+and group count, and exactly cover the specified range:
+
+```text
+delta_Q = (upper_q_edge - lower_q_edge) / N
+edges = lower_q_edge + i * delta_Q, i = 0, ..., N
+```
+
+The outer edges are not first/last group centers. The known four-value DAVE
+Q-bin parameter format has different semantics: lower limit, upper limit,
+reported group count, and actual step. Complete fixed-width bins start at the
+lower limit and are included only when their upper edge does not exceed the
+source upper limit within floating-point tolerance. No partial final bin is
+created, so the source upper limit may exceed the final actual edge. The
+reported group count is retained and compared with the reconstructed count;
+disagreement produces a warning and does not replace the step-derived bins.
+
+Q-bin/value count must equal spectrum count. No mismatch is repaired by sorting,
+deduplication, truncation, padding, extrapolation, interpolation, discarding, or
+combining values or spectra. Q rebinning is not defined for already-reduced data.
 
 ## 3. Lorentzian linewidth and relaxation time
 
@@ -211,15 +228,19 @@ EISF-model fitting are distinct states with recorded reasons.
 
 ## 8. Analysis-level masks and warnings
 
-The following concepts remain distinct:
+The following current Milestone-2 concepts remain distinct:
 
 - automatically detected invalid values, including invalid sigma;
 - `AUTO` boundary-padding masks;
 - `REVIEW` boundary-padding masks;
-- the fitting-energy range;
-- manually masked energy points;
-- Q spectra excluded from spectral fitting; and
-- fitted Q spectra excluded from EISF-model fitting.
+- the inclusive fitting-energy range selected independently for each group; and
+- the derived effective fitting-point mask.
+
+The derived Milestone-2 exclusion is exactly invalid measurement data OR
+`AUTO` padding OR points outside that group's inclusive fitting range. `REVIEW`
+padding remains retained unless excluded by another current rule. Manual
+single-point masks, whole-Q fitting exclusions, and motion-fit exclusions are
+deferred until later workflows require them.
 
 Possible Bragg contamination, including contamination near the elastic line at
 specific Q, may generate a warning. qensfit must not silently delete the Q
@@ -365,9 +386,9 @@ overinterpretation of candidate models. Explicit metadata, warnings, synthetic
 tests, and scientific review mitigate them.
 
 Unresolved items are the formulas and numerical policies identified above,
-DAVE Q-bin parameter semantics, explicit-list comment syntax, fit-quality
-thresholds, and Bragg-warning criteria. Inclusive linear Q mapping and
-invalid-uncertainty handling are now fixed conventions.
+explicit-list comment syntax, fit-quality thresholds, and Bragg-warning
+criteria. Q-bin edge/midpoint rules, the approved DAVE four-value semantics,
+and invalid-uncertainty handling are fixed conventions.
 
 ASCII parsing and Q identity must be validated before resolution association.
 Resolution processing and convolution must be validated before spectral fits.

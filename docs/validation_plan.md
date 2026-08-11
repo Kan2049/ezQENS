@@ -95,18 +95,34 @@ Public synthetic text fixtures cover the following contracts.
 
 #### 3.2.4 Q mapping
 
-- Inclusive linear-range mapping agrees with `numpy.linspace`.
-- Finite endpoint and `N >= 2` validation.
-- Manual-list order preservation for comma/newline input.
-- Explicit-list file parsing under the approved blank/comment policy.
-- Sample-count mismatch and applicable resolution-count mismatch.
+- Arbitrary finite strictly increasing edges, including nonuniform bins.
+- Edge midpoint representatives without a permanent midpoint invariant.
+- Count-driven uniform outer-edge generation preserves both endpoints and uses
+  `(upper_q_edge - lower_q_edge) / group_count`.
+- Explicit representative values preserve nonlinear order and infer no edges.
+- Q-bin/value count must match spectrum count.
 - No silent sort, deduplication, truncation, padding, extrapolation, discard,
-  or combination.
-- Preview, resolved-list display, and confirmation state.
-- DAVE Q-bin parsing only after its field semantics are approved; until then,
-  production parsing is rejected with an actionable unresolved diagnostic.
+  interpolation, or combination.
+- The supported DAVE four-value parser reconstructs complete bins from lower
+  limit, upper limit, and step; it retains an exact-fit final bin despite binary
+  rounding and excludes a genuinely incomplete final bin.
+- DAVE source upper limits may exceed final actual edges, and disagreement
+  between stored and reconstructed group counts warns without failing parsing.
+- Regression tests explicitly distinguish DAVE step-driven bins from
+  count-driven exact-coverage `uniform_q_bins()` results.
 
-#### 3.2.5 Edge-padding detection and custom input
+#### 3.2.5 Fitting selection and visualization
+
+- Independent finite inclusive ranges for every group.
+- One initial common range with immutable group overrides.
+- Effective exclusion combines invalid measurement, `AUTO` padding, and
+  outside-range points while retaining `REVIEW` where otherwise usable.
+- Empty usable selections fail clearly and no original array is modified.
+- Direct in-memory/source-independent datasets support the full milestone path.
+- Plot tests verify figures/axes, plotted scientific values, selected ranges,
+  and non-mutation without pixel-perfect comparisons.
+
+#### 3.2.6 Edge-padding detection and custom input
 
 - Long repeated pairs at left, right, and both boundaries.
 - Different padding lengths by Q group.
@@ -403,8 +419,9 @@ Content-based detection and strict explicit override; DAVE group-block,
 wide-table, and single-spectrum parsing; explicit sample/resolution roles;
 preserved shared or
 per-spectrum grids; structural diagnostics; privacy-safe summaries; and correct
-group identity. Generic custom mapping and the complete Q-mapping suite finish
-in milestone 2. DAVE Q-bin parsing remains gated on approved semantics.
+group identity. Milestone 2 adds count-aligned dataset-level Q bins, the approved
+DAVE parameter semantics, per-group fitting ranges, derived point selection,
+and scientific inspection plots. Generic custom mapping remains deferred.
 
 ### Gate B: resolution and convolution
 
@@ -445,11 +462,11 @@ fits, Arrhenius analysis, or non-version-1 motion features.
 
 ## 14. Unresolved decisions, risks, and milestone dependencies
 
-Unresolved items include detailed parser grammar, DAVE Q-bin field semantics,
-explicit-list comment policy, future edge-padding refinements, convolution grid
+Unresolved items include detailed general parser grammar, explicit-list comment
+policy, future edge-padding refinements, convolution grid
 details, fit-quality thresholds, AIC/AICc/covariance conventions, approved
-motion equations, and supported Windows versions. Inclusive linear Q endpoints,
-invalid-sigma handling, and the versioned padding-v2 behavior are approved.
+motion equations, and supported Windows versions. Q-bin edge/midpoint and DAVE
+four-value semantics, invalid-sigma handling, and padding-v2 are approved.
 
 Risks include circular tests, overfitting tolerances to one benchmark,
 platform-specific false failures, leaking private data through artifacts, and

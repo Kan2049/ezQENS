@@ -84,18 +84,21 @@ validated.
 - Preserve recognized DAVE fit-result columns as metadata but exclude them
   from energy, measured intensity, and uncertainty.
 - Keep invalid uncertainty, automatic edge-padding masks, review-only padding
-  masks, fitting range, manual masks, spectral-Q exclusion, motion-Q
-  exclusion, and Bragg warnings distinct.
-- Q mapping resolves to an ordered explicit list in `Å^-1` and requires one Q
-  per sample spectrum. Never sort, deduplicate, pad, truncate, extrapolate, or
-  otherwise repair a mismatch silently.
-- Linear Q mapping uses inclusive endpoints, equivalent to
-  `numpy.linspace(Q_start, Q_end, N)`, with finite endpoints and `N >= 2`.
-- Manual lists preserve supplied order. Explicit-list files retain parser and
-  source provenance. DAVE Q-bin parameter files remain unresolved for
-  production until every supported field has scientific-owner approval.
-- Generated or imported Q lists and automatically detected formats require
-  user review and confirmation before application.
+  masks, and per-group fitting ranges distinct. Manual point masks, whole-Q
+  exclusions, and Bragg warnings remain future analysis state.
+- Store Q identity once at dataset level as ordered representative values in
+  `Å^-1`, with optional explicit edges. Never duplicate Q onto `Spectrum`.
+- Edge-defined bins require finite strictly increasing edges. Milestone-2
+  representative Q values are edge midpoints; explicit Q-value input does not
+  imply or infer edges.
+- Uniform manual Q bins are count-driven and exactly cover their inclusive
+  outer edges: `delta_Q = (upper_q_edge - lower_q_edge) / group_count`.
+- Preserve explicit Q-value order and require exactly one value/bin per
+  spectrum. Never sort, deduplicate, pad, truncate, extrapolate, or interpolate.
+- The approved four-value DAVE Q-bin parser reconstructs complete fixed-width
+  bins from the lower limit, upper limit, and step. The stored group count is a
+  consistency field that warns on disagreement; the upper limit may exceed the
+  final actual bin edge.
 
 ## Data and privacy
 
@@ -155,14 +158,19 @@ The first implementation milestone after these documents covers a content-based
 format detector, DAVE group-block, wide-table, and single-spectrum importers,
 the minimal shared spectrum representation with explicit sample/resolution
 roles, structural diagnostics, and public synthetic tests. Generic arbitrary
-column mapping may wait for milestone 2. Do not implement DAVE Q-bin semantics
-before scientific approval.
+column mapping may wait for a concrete workflow. Do not generalize source formats
+or Q definitions into registries.
 
 Milestone 1.2 simplifies this validated core: `ReducedDataset` replaces
 `ImportedDataset`, derivable state becomes properties, format confidence and
 GUI confirmation state leave the core, and edge padding uses
 `AUTO`/`REVIEW`/`NONE`. Preserve numerical arrays, invalid masks, import
 behavior, and validated automatic padding masks while narrowing the API.
+
+Milestone 2 adds dataset-level `QBins`, approved uniform edge generation and
+DAVE Q-bin parsing, per-group inclusive fitting ranges, derived fitting-point
+selection, and small GUI-independent inspection plots. It does not add Q
+rebinning, manual single-point masks, whole-Q exclusions, fitting, or GUI state.
 
 Do not begin GUI implementation before the importer, resolution processing,
 numerical convolution, and single-spectrum fitting are validated. Full project

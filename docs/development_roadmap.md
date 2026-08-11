@@ -80,40 +80,46 @@ Milestone 1 forms the stable reduced-data baseline for later analysis.
 
 ---
 
-## 4. Milestone 2 — Q assignment and fitting-data selection
+## 4. Milestone 2 — Q-bin assignment and fitting-data selection ✅
 
-This is the next implementation milestone.
+Completed and validated:
 
-### Goal
-
-Convert an ordered `ReducedDataset` into analysis-ready QENS spectra with:
-
-* explicit Q identity;
-* explicit point-level fitting selection;
-* explicit whole-spectrum inclusion/exclusion.
+* immutable dataset-level `QBins` with optional explicit edges;
+* midpoint representative Q values for edge-created bins;
+* explicit ordered representative Q values without inferred edges;
+* uniform bins from inclusive outer edges and authoritative group count;
+* the approved four-value DAVE Q-bin parameter parser;
+* independent inclusive fitting-energy ranges for every spectrum;
+* derived invalid/`AUTO`/outside-range fitting-point exclusion;
+* reusable Q-bin and individual-spectrum inspection plots.
 
 The conceptual workflow is:
 
 ```text
-ReducedDataset
+ReducedDataset + QBins
     ↓
-Q assignment
+per-group FittingRange values
     ↓
-point-level fitting selection
+derived FittingSelection masks
     ↓
-whole-Q inclusion/exclusion
-    ↓
-analysis-ready QENS data
+scientific inspection
 ```
 
 ### 4.1 Q assignment
 
-Initially support only the simplest validated Q assignment methods:
+Q identity is stored once on `ReducedDataset`, never duplicated on each
+`Spectrum`. Edge-defined bins are preferred: `N` spectra require `N + 1`
+finite strictly increasing edges, and Milestone-2 representative values are
+the adjacent-edge midpoints. Explicit Q values preserve arbitrary nonlinear
+order and leave edges unknown.
 
-* explicit ordered Q values;
-* inclusive linear Q generation equivalent to `numpy.linspace`.
-
-Each sample spectrum must resolve to exactly one finite Q value.
+Count-driven uniform construction treats lower/upper inputs as inclusive outer
+edges and derives
+`delta_Q = (upper_q_edge - lower_q_edge) / group_count`, exactly covering the
+range. The DAVE four-value parser intentionally differs: it reconstructs
+complete fixed-width bins from lower limit, upper limit, and step, retains the
+stored group count for a warning-producing consistency check, and permits an
+unused remainder below the source upper limit.
 
 Never silently:
 
@@ -126,40 +132,24 @@ Never silently:
 * combine;
 * or otherwise repair a Q-count mismatch.
 
-Q assignment should remain logically separable from the numerical `Spectrum` representation so that future data sources or Q-rebin transformations can supply new Q mappings without redesigning the spectral core.
-
-Do not implement DAVE Q-parameter parsing, detector geometry, angle-to-Q conversion, imported-Q heuristics, or generalized Q-source frameworks unless a real supported input requires them.
+Q assignment remains logically separable from `Spectrum`, allowing future
+reduction workflows to produce the same `ReducedDataset + QBins` boundary.
 
 ### 4.2 Point-level fitting selection
 
-Combine only the analysis decisions needed for later spectral fitting:
-
-* existing invalid-value masks;
-* existing automatic padding mask;
-* existing padding review mask;
-* manual point masks;
-* fitting-energy range.
-
-Each source of exclusion remains separately inspectable.
-
-An effective fitting mask may be derived from these states, but the original reasons must not be collapsed into one irreversible mask.
+Each group has an independent inclusive fitting-energy range. One range may be
+used as the initial value for all groups and then overridden group by group.
+The effective exclusion is derived from invalid values, `AUTO` padding, and
+outside-range points. `REVIEW` remains visible but is not automatically
+excluded. Each reason remains separately inspectable.
 
 Original numerical arrays remain unchanged.
 
-### 4.3 Whole-Q spectral-fit selection
+### 4.3 Deferred masking
 
-Support manual inclusion or exclusion of complete Q spectra from spectral fitting.
-
-This is required for real QENS situations where a particular Q may be unsuitable for quasielastic analysis, for example because of strong diffraction or Bragg-related elastic intensity.
-
-Whole-Q exclusion:
-
-* must not delete the spectrum;
-* must be reversible;
-* must remain distinct from point-level masks;
-* initially remains user-controlled rather than automatically inferred.
-
-Automatic Bragg/diffraction detection is not part of this milestone.
+Manual single-point masking, whole-Q spectral exclusion, and automatic
+Bragg/diffraction detection are deferred until a concrete fitting or batch
+workflow requires them.
 
 ### 4.4 Q rebinning
 
@@ -187,24 +177,16 @@ ReducedDataset + Q assignment
 existing analysis core
 ```
 
-Do not introduce `QRebinner`, detector-weight, Q-edge, registry, or instrument abstractions before a concrete supported use case exists.
+Do not introduce `QRebinner`, detector-weight, geometry, registry, or instrument
+abstractions before a concrete supported use case exists.
 
 ### 4.5 Scientific visualization
 
 Milestone 2 begins the reusable scientific visualization layer.
 
-Initial visualization should support inspection of:
-
-* spectra as a function of Q and energy;
-* individual Q spectra;
-* fitting-energy ranges;
-* invalid points;
-* automatic padding;
-* review padding;
-* manually excluded points;
-* whole-Q inclusion/exclusion.
-
-Where practical, an `S(Q,E)` overview or contour representation should make anomalous Q regions visually identifiable.
+Initial visualization supports Q edges/intervals/representatives and individual
+spectra with uncertainties, fitting range, invalid points, `AUTO`/`REVIEW`
+padding, outside-range points, and retained points.
 
 Visualization must remain usable from Python/Jupyter and must not depend on a desktop GUI.
 
@@ -215,10 +197,9 @@ Validate:
 * exact Q/spectrum count matching;
 * Q-order preservation;
 * finite-Q requirements;
-* inclusive linear mapping;
+* uniform edge generation and midpoint representatives;
 * independent mask sources;
 * effective fitting-point selection;
-* whole-Q reversible exclusion;
 * immutable original arrays;
 * compatibility with manually constructed/source-independent `ReducedDataset` values;
 * visualization consistency with the underlying analysis state.
