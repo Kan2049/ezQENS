@@ -7,8 +7,8 @@ from dataclasses import dataclass, field, replace
 import numpy as np
 import numpy.typing as npt
 
-from qensfit.domain import ReducedDataset, Spectrum
-from qensfit.preprocessing.edge_padding import EdgePaddingDetectionResult
+from ezqens.domain import ReducedDataset, Spectrum
+from ezqens.preprocessing.edge_padding import EdgePaddingDetectionResult
 
 BoolArray = npt.NDArray[np.bool_]
 

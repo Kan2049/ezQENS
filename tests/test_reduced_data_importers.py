@@ -5,12 +5,12 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from qensfit.domain import (
+from ezqens.domain import (
     ImportValidationError,
     ReducedDataFormat,
     SpectrumRole,
 )
-from qensfit.io.importers import import_reduced_data
+from ezqens.io.importers import import_reduced_data
 
 FIXTURES = Path(__file__).parent / "fixtures" / "reduced_data"
 

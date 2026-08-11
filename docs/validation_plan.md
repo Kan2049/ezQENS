@@ -2,20 +2,25 @@
 
 ## 1. Purpose and scope
 
-qensfit requires both software verification and scientific validation. Passing
+ezQENS requires both software verification and scientific validation. Passing
 tests demonstrates behavior against approved references; it does not by itself
 establish scientific correctness. Scientific formulas and conventions must
 never be altered merely to make tests pass.
 
-This plan covers reduced-data import through project persistence and the later
-GUI. Raw detector reduction and all other version-1 non-goals are excluded.
+This plan covers the v1.0 reduced-data path through scientific export,
+lightweight reproducibility, the guided GUI, and macOS/Windows packaging. Raw
+detector reduction, automatic molecular/structure-driven inference, and other
+v1.0 non-goals are excluded. Validation for a selected temporal or spatial
+dynamics model becomes active only if the owner promotes that concrete model;
+no catalogue is assumed.
 
 ## 2. Validation principles
 
 - Use independently generated synthetic public fixtures.
 - Keep private benchmark data local, ignored, summarized, and absent from test
   output/artifacts.
-- Test scientific invariants at module boundaries and after serialization.
+- Test scientific invariants at module boundaries and across any implemented
+  lightweight export/reload boundary.
 - Compare against at least one independent implementation or analytic case for
   high-risk numerical operations.
 - Separate optimizer convergence from statistical and scientific validity.
@@ -24,6 +29,9 @@ GUI. Raw detector reduction and all other version-1 non-goals are excluded.
   on random luck.
 - Run platform-independent core tests on macOS and Windows.
 - Treat warnings and failure behavior as testable outputs.
+- Keep structured diagnostics testable across import, preprocessing,
+  resolution, fitting, parameter/covariance validity, derived quantities, and
+  any later dynamics fitting.
 
 ## 3. Test layers
 
@@ -31,9 +39,9 @@ GUI. Raw detector reduction and all other version-1 non-goals are excluded.
 
 Early unit tests cover validators, units, Q mappings, masks, spectrum roles,
 parameter bounds, minimal processing traceability, formula constants, and
-result diagnostics. Archive safety and migration functions are added with
-milestone 8; they are not milestones 1–6 prerequisites. Tests are fast,
-deterministic, and do not read private data.
+result diagnostics. Tests are fast, deterministic, and do not read private
+data. Complex archive and migration tests are added only if a post-v1.0
+persistence design actually requires them.
 
 Required convention cases include:
 
@@ -49,7 +57,7 @@ Required convention cases include:
 - the fit fails before nonpositive statistical degrees of freedom;
 - direct elastic evaluation scales unit-area measured resolution without a
   discrete delta;
-- batch exclusions and motion-fit exclusions remain distinct; and
+- batch and derived-result exclusions remain distinct; and
 - original and processed resolution references cannot alias semantically.
 
 ### 3.2 Importer contract tests
@@ -152,7 +160,6 @@ Public synthetic text fixtures cover the following contracts.
   warnings remain distinct.
 - Generic custom mappings identify energy, intensity, uncertainty, optional
   group identity, and optional embedded Q without silent inference.
-- XYZ files compatible with common VESTA exports retain all atoms.
 - Structural reports remain privacy-safe.
 
 Golden fixtures should be short, human-readable, independently generated, and
@@ -230,7 +237,7 @@ and machine-readable expected summaries for:
 - fit parameters and diagnostics with justified tolerances;
 - batch traversal/result selection;
 - derived values;
-- project save/reload; and
+- lightweight reproducibility/export records; and
 - report/export schemas.
 
 Update a scientific baseline only with documented cause, numerical diff,
@@ -242,7 +249,7 @@ reviewer approval, and confirmation that no convention changed inadvertently.
 
 Use public synthetic files that DAVE can read where practical. Compare group
 boundaries, columns, energy values, intensities, uncertainties, and Q identity.
-When DAVE produces additional `ModelFit`/`Func` columns, confirm qensfit detects
+When DAVE produces additional `ModelFit`/`Func` columns, confirm ezQENS detects
 but excludes them from primary imported data.
 
 For comparable spectral configurations, compare model curves, component-area
@@ -258,8 +265,7 @@ domains. Compare:
 - convolution alignment/normalization;
 - fitted parameters and model curves;
 - FWHM-to-tau values;
-- experimental EISF component bookkeeping; and
-- approved motion-model predictions/fits.
+- experimental EISF component bookkeeping.
 
 Freeze script version/hash, inputs, environment, settings, and conventions in a
 local validation record. Review discrepancies scientifically; neither
@@ -276,17 +282,20 @@ test discovery. A local-only validation command may report:
 - energy minima/maxima;
 - invalid-value and padded-boundary counts;
 - supplied Q mapping summary;
-- fit success/warning counts by Q without full arrays; and
-- aggregate candidate-model metrics without molecular coordinate dumps.
+- fit success/warning counts by Q without full arrays.
 
-It must not print full intensities, uncertainties, resolution arrays, molecular
-coordinates, or source content. Outputs go to ignored `private_results/`, are
+It must not print full intensities, uncertainties, resolution arrays, or source
+content. Outputs go to ignored `private_results/`, are
 never uploaded automatically, and are manually checked before sharing.
 
 The known benchmark expectations—14 groups, user Q range 0.46–2.02 `Å^-1`,
-extra DAVE fitting columns, and separate C2/C4/isotropic comparison—are
-validation assertions only where the owner supplies them explicitly. They are
-not code defaults or public fixtures.
+and extra DAVE fitting columns—are validation assertions only where the owner
+supplies them explicitly. They are not code defaults or public fixtures.
+
+Before the v1.0 release gate, validate representative DAVE- and
+Mantid-preprocessed real workflows, including PSI FOCUS and ILL IN5/IN16 where
+available. Compare structural and scientific results without embedding
+instrument-specific policy in the core.
 
 Milestone 1.2 private validation compares the prior and v2 automatic masks by
 source basename, group identity, left/right counts, and retained energy bounds.
@@ -341,21 +350,24 @@ seeding. Demonstrate that modifying one Q result does not mutate another.
 Failures must not discard successful neighbors. Manual refits create new linked
 results and selection history.
 
-Test the full matrix of:
+Test inclusion in spectral fitting, exclusion from spectral fitting, separate
+inclusion in scientifically validated derived quantities, manual refitting, and
+restoration after exclusion.
 
-- included in both spectral and motion fitting;
-- excluded from spectral fitting;
-- successfully fit but excluded from motion fitting; and
-- restored after exclusion.
+## 8. Later dynamics-model validation — provisional
 
-## 8. Motion-model validation
+The owner may schedule a concrete temporal or spatial dynamics model before or
+after v1.0. Its numerical validation is blocked until the scientific owner
+approves its equations, parameter definitions, applicability, diagnostics, and
+independent reference cases. Tests must cover analytic limits, recovery,
+parameter validity, uncertainty, residual structure, and cautious
+interpretation as appropriate to that model.
 
-Motion-model numerical validation is blocked until the scientific owner
-provides and approves authoritative equations and parameter definitions,
-explicitly including C2 and C4. The isotropic implementation also needs an
-approved equation/parameterization.
+Automatic coordinate/symmetry-driven candidate inference is a substantially
+later capability. If that specific workflow is promoted, C2, C4, and isotropic
+implementations still require approved equations and parameterizations.
 
-After approval:
+For that later structure-driven workflow:
 
 - test analytic limits and symmetry cases;
 - compare predictions against independent hand/reference calculations;
@@ -367,9 +379,15 @@ After approval:
 - test invalid parameter and weak-discrimination warnings; and
 - verify comparison language does not claim a unique mechanism.
 
-## 9. Project save/reload and migration
+## 9. Lightweight reproducibility and future persistence
 
-This validation begins with milestone 8 and does not gate milestones 1–6.
+Before v1.0 release, verify that exported reproducibility information identifies
+inputs, selections and masks, model and fit settings, results, warnings, and
+software version without requiring a complex container.
+
+The remaining validation is provisional post-v1.0 and begins only if a
+project-container design is approved. Its format and extension are unresolved;
+the former `.qensfit` proposal is not a contract.
 
 Round-trip tests compare scientific meaning, units, exact masks, IDs,
 provenance, configurations, diagnostics, warnings, exclusions, and array hashes
@@ -390,8 +408,10 @@ place.
 Continuous integration should eventually cover:
 
 - supported CPython 3.12 and 3.13;
-- macOS Apple Silicon as the initial primary platform;
-- supported 64-bit Windows before public release; and
+- supported macOS laptops;
+- supported 64-bit Windows laptops before public release;
+- best-effort Linux when it adds little complexity and does not delay release;
+  and
 - path, line-ending, locale, Unicode, archive, multiprocessing, and floating
   point behavior relevant to each platform.
 
@@ -402,14 +422,18 @@ verified on clean systems.
 ## 11. GUI smoke and workflow tests
 
 GUI tests begin only after core scientific gates pass. Headless/offscreen smoke
-tests cover application startup, each of the five screens, safe project
-open/save, validation-error presentation, task progress, cancellation, and
-results display.
+tests cover application startup, each planned screen, lightweight analysis
+restore where implemented, validation-error presentation, task progress,
+cancellation, and results display.
 
 A small number of end-to-end synthetic workflows cover import through export.
 GUI tests verify delegation to the core; they do not duplicate formulas in UI
 assertions. Manual usability review covers readability, units, warnings,
 keyboard navigation, high-DPI scaling, and Windows/macOS behavior.
+
+The v1.0 usability gate includes an external real user, including a non-QENS
+expert, completing a guided reduced-data analysis on an ordinary macOS or
+Windows laptop, inspecting warnings/results, and exporting the analysis.
 
 ## 12. Acceptance gates
 
@@ -441,15 +465,18 @@ approved.
 Independent sequential results, manual-refit history, FWHM/tau/EISF convention
 tests, and exclusion-scope tests.
 
-### Gate E: motion comparison
+### Gate E: ezQENS v1.0 public release
 
-Scientifically approved equations, independent references, candidate-fit
-recovery, comparable metrics, and cautious interpretation.
+Gates A–D plus guided GUI delegation to the core, useful export, lightweight
+reproducibility, user/scientific documentation, representative external-user
+validation, and supported macOS/Windows packages.
 
-### Gate F: persistence and GUI
+### Gate F: later capabilities — provisional
 
-After milestone 8, safe round trips/migrations and privacy/export review; after
-GUI implementation, cross-platform core and GUI smoke/workflow passes.
+Any selected dynamics analysis requires approved equations and independent
+references and gates v1.0 only if explicitly promoted into release scope. Any
+later project container requires an approved format plus safe
+round-trip, migration where necessary, privacy, integrity, and security tests.
 
 ## 13. Assumptions and explicit non-goals
 
@@ -457,15 +484,17 @@ This plan assumes the owner can run private DAVE/script comparisons locally and
 review numerical tolerances. It does not assume private files can enter CI or
 that one optimizer/reference implementation is infallible.
 
-It does not validate raw reduction, detector operations, INS, Bayesian/global
-fits, Arrhenius analysis, or non-version-1 motion features.
+Version 1.0 does not validate raw reduction, detector operations, INS,
+Bayesian/global fits, Arrhenius analysis, molecular interpretation,
+candidate-motion comparison, or GPU acceleration.
 
 ## 14. Unresolved decisions, risks, and milestone dependencies
 
 Unresolved items include detailed general parser grammar, explicit-list comment
 policy, future edge-padding refinements, convolution grid
-details, fit-quality thresholds, AIC/AICc/covariance conventions, approved
-motion equations, and supported Windows versions. Q-bin edge/midpoint and DAVE
+details, fit-quality thresholds, AIC/AICc/covariance conventions, and supported
+Windows versions. Post-v1.0 motion equations and persistence format also remain
+unresolved. Q-bin edge/midpoint and DAVE
 four-value semantics, invalid-sigma handling, and padding-v2 are approved.
 
 Risks include circular tests, overfitting tolerances to one benchmark,
@@ -476,6 +505,6 @@ tolerances, privacy checks, and staged gates mitigate these.
 Detector/table-import tests precede Q mapping and resolution association.
 Convolution tests precede
 parameter recovery. Single-spectrum recovery precedes batch tests. Covariance
-validation precedes EISF uncertainty. Approved equations precede motion tests.
-Stable scientific contracts precede milestone-8 persistence fixtures. Core
-gates A–C precede GUI implementation.
+validation precedes EISF uncertainty. Core gates A–C precede GUI implementation;
+gates A–D plus GUI/export/reproducibility/packaging validation precede the v1.0
+release gate. Approved equations precede any post-v1.0 motion tests.

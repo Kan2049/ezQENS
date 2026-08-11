@@ -10,9 +10,9 @@ from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 from matplotlib.patches import Rectangle
 
-from qensfit.domain import QBins, ReducedDataset, Spectrum, SpectrumRole
-from qensfit.preprocessing import FittingSelection, detect_edge_padding
-from qensfit.visualization import plot_q_bins, plot_spectrum_inspection
+from ezqens.domain import QBins, ReducedDataset, Spectrum, SpectrumRole
+from ezqens.preprocessing import FittingSelection, detect_edge_padding
+from ezqens.visualization import plot_q_bins, plot_spectrum_inspection
 
 
 def make_selection() -> FittingSelection:

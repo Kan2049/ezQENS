@@ -9,8 +9,8 @@ import numpy as np
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 
-from qensfit.domain import QBins
-from qensfit.preprocessing import FittingSelection
+from ezqens.domain import QBins
+from ezqens.preprocessing import FittingSelection
 
 
 def _figure_and_axes(

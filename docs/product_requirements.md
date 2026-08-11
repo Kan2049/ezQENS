@@ -2,30 +2,71 @@
 
 ## 1. Purpose
 
-qensfit is a desktop application for standardized analysis of reduced
-quasielastic neutron scattering (QENS) data. Its intended users are
-neutron-scattering researchers. The product may eventually be released
-publicly, but the current project is early-stage and not suitable for
-scientific use.
+ezQENS is a lightweight, scientifically rigorous desktop application for
+analysis of reduced quasielastic neutron scattering (QENS) data. It is designed
+for both QENS experts and non-experts. A non-expert should eventually be able to
+complete a trustworthy basic analysis through a guided GUI without knowing the
+Python implementation or every advanced fitting option. The Python distribution
+and import package are named `ezqens`.
 
-The long-term product comprises a desktop GUI, a Python analysis core,
-standardized fitting workflows, batch analysis, motion-model evaluation,
-reproducible project files, and exports suitable for scientific review. A
-public Python API is not a version-1 user-facing deliverable, although the core
-must be callable cleanly from the start.
+Design priorities are scientific correctness, reliability, simplicity,
+usability, performance, and feature count, in that order. For equally correct
+solutions, prefer fewer concepts, less code, fewer dependencies, lower CPU and
+memory use, and easier maintenance. The application targets ordinary personal
+laptops and is CPU-first; GPU or HPC resources are not assumed.
+
+The product comprises a desktop GUI, a GUI-independent Python analysis core,
+standardized fitting workflows, independent batch analysis, lightweight
+reproducibility information, and exports suitable for scientific review. A
+public Python API is not a v1.0 user-facing deliverable, although the core must
+be callable cleanly from the start.
+
+ezQENS creates value through scientifically safe defaults, compression of
+repetitive expert workflows, and progressive analytical depth from spectra to
+basic physical quantities and later approved dynamics analysis.
 
 ## 2. Scope and assumptions
 
-Version 1 operates on reduced sample data and corresponding measured
+Version 1.0 operates on reduced sample data and corresponding measured
 resolution data. Raw detector-data reduction is assumed complete before data
-reach qensfit. Detector-level calibration, grouping, and masking therefore
+reach ezQENS. Detector-level calibration, grouping, and masking therefore
 remain the responsibility of upstream reduction software.
 
-Initial development and testing target macOS on Apple Silicon. Windows support
-is required before public release. Mantid interoperability is optional and
-must not be required by the analysis core.
+The primary public-release platforms are macOS and Windows laptops. Linux may
+be supported on a best-effort basis when this adds little complexity, but must
+not delay the first public release. Initial reduced-input support is centered
+on DAVE- and Mantid-preprocessed workflows. Real validation should include
+workflows such as PSI FOCUS and ILL IN5/IN16 without hard-coded
+instrument-specific assumptions. Mantid must not be a required core dependency.
 
-## 3. Required version-1 workflow
+### 2.1 Product and scientific backbone
+
+The primary experience is a GUI with progressive depth. Non-experts receive a
+guided path, understandable choices, trustworthy basic outputs, and meaningful
+warnings. Experienced users can progressively access ranges, masks, model
+components, parameters, bounds, resolution settings, batch behavior,
+diagnostics, visualization, and exports. Both use the same scientific core.
+
+The long-term scientific workflow is:
+
+```text
+reduced QENS data
+  -> preprocessing and fitting-data selection
+  -> measured-resolution treatment
+  -> spectral fitting
+  -> basic QENS quantities
+  -> later approved physical dynamics analysis
+```
+
+Spectral analysis yields integrated elastic/quasielastic intensities, FWHM,
+uncertainties, convergence information, diagnostics, and residuals. Basic QENS
+quantities include FWHM(Q), relaxation time, EISF(Q), component intensity versus
+Q, and supported uncertainty propagation. Later dynamics analysis may fit their
+Q dependence to scientifically approved temporal or spatial models. Automatic
+model inference from arbitrary coordinates, symmetry, or molecular structure is
+a substantially later capability and must not drive current architecture.
+
+## 3. Required version-1.0 workflow
 
 A user must be able to:
 
@@ -41,17 +82,16 @@ A user must be able to:
 10. Extract FWHM linewidths.
 11. Calculate relaxation times.
 12. Calculate experimental EISF.
-13. Import a molecular XYZ model.
-14. Calculate and fit separate candidate EISF models.
-15. Compare candidate motion models.
-16. Export results and save a reproducible project.
+13. Inspect diagnostics, warnings, residuals, and failure states.
+14. Export useful scientific results.
+15. Retain lightweight reproducibility information for the analysis.
 
 Each stage must preserve sufficient provenance to explain inputs, settings,
 transformations, exclusions, warnings, and results.
 
 ## 4. Supported inputs
 
-Version 1 must support:
+Version 1.0 must support:
 
 - DAVE group-block ASCII output;
 - wide QENS tables with shared `x` and paired `yN`/`yerrN` columns;
@@ -60,9 +100,7 @@ Version 1 must support:
 - measured resolution from vanadium or a low-temperature sample;
 - uniform outer-edge bins, explicit representative values, approved DAVE
   Q-parameter files, and later validated explicit-list/imported-metadata Q
-  mappings; and
-- XYZ files with element symbols and Cartesian coordinates in angstrom,
-  compatible with common VESTA exports.
+  mappings.
 
 HDF5 input may follow only after the ASCII path is validated.
 
@@ -234,10 +272,10 @@ per-Q warnings.
 
 The system distinguishes invalid values, fitting-energy ranges, manually
 masked energy points, Q spectra excluded from spectral fitting, and fitted Q
-spectra excluded from later EISF-model fitting. Possible Bragg contamination
-may trigger a warning but never silent deletion. Every exclusion is recorded
-in the analysis state; the complete persistent project history is a
-milestone-8 responsibility.
+spectra excluded from later validated derived quantities. Possible Bragg
+contamination may trigger a warning but never silent deletion. Every exclusion
+is recorded in the analysis state. A complete append-only persistent history is
+not a v1.0 requirement.
 
 Automatic edge-padding masks are a further distinct point-level mask. `AUTO`
 may be default-on but remains reversible; `REVIEW` remains separate and
@@ -273,51 +311,63 @@ Normalization fails when no finite positive integral exists.
 
 The complete imported energy range must never be assumed physically valid.
 
-## 8. Derived quantities and motion-model comparison
+## 8. Derived quantities and later dynamics analysis
 
-Spectral outputs use FWHM linewidths. Relaxation time and experimental EISF
-follow the authoritative formulas in `scientific_conventions.md`.
+Spectral outputs use FWHM linewidths. Relaxation time and experimental EISF,
+where scientifically validated, follow the authoritative formulas in
+`scientific_conventions.md`. Component intensity versus Q and supported
+uncertainty propagation are also part of progressive basic analysis.
 
-XYZ import retains every atom. The first incoherent motion calculation uses
-hydrogen coordinates only, a fixed rotation center `(0, 0, 0)`, and a
-user-selected x, y, or z axis. Users can inspect all atoms, selected hydrogens,
-their coordinates, and distances from the rotation center.
+Scientifically approved dynamics analysis may later fit the Q dependence of
+these outputs to diffusion/jump-diffusion, characteristic/residence-time,
+rotational/reorientational, EISF-geometry, confined/localized-motion, or other
+validated QENS models. The owner may schedule selected models before or after
+the first public release; this document does not create a mandatory catalogue.
+Automatic molecular structure interpretation, XYZ-driven model selection, and
+the currently unresolved C2/C4/isotropic candidate workflow remain outside
+v1.0 unless explicitly promoted.
 
-C2 rotation, C4 rotation, and isotropic reorientation are fitted as separate
-candidate alternatives, not combined populations. Comparison uses weighted
-residuals, reduced chi-square, AICc, parameter uncertainties, residual
-structure, parameter validity, and scientific warnings. The result identifies
-the best-supported and alternative models without claiming proof of a unique
-microscopic mechanism.
+## 9. Reproducibility, export, visualization, and GUI requirements
 
-## 9. Project, export, and GUI requirements
+Version 1.0 retains enough lightweight reproducibility information to identify
+inputs, selections and masks, model configuration, fit settings, results,
+warnings, and software version. This does not require a complex archive or
+database, UUIDs everywhere, hash-addressed arrays, migration frameworks,
+append-only histories, or attachment infrastructure.
 
-A saved project preserves source references and practical hashes, imported
-data, Q mapping, units, processing history, masks, resolution settings,
-spectral definitions, initial values, constraints, fit ranges, optimizer
-settings, results, diagnostics, excluded Q values, EISF and motion-model
-results, software version, and project-schema version.
+The former `.qensfit` project-container proposal is not a permanent contract.
+The final container format and extension remain unresolved until persistence
+work is actually designed. Heavy persistence, migration, security, and archive
+architecture are provisional post-v1.0 work and must not delay scientific or
+release validation.
 
-The versioned `.qensfit` container remains a long-term version-1 proposal. Its
-complete persistence infrastructure is not implemented in milestones 1–6.
-Those milestones use only minimal typed in-memory models for import, Q mapping,
-masks, resolution, convolution, fitting, batch, and derived results. They do
-not require UUIDs for every temporary value, entity migrations, hash-addressed
-array registries, append-only histories, final ZIP64 layout, attachments, or
-atomic project saving. Milestone 8 reviews and implements the final format,
-security model, hashes, migrations, archive layout, and public contract.
+Scientific export is a first-class evolving boundary. It may progressively
+include processed spectra, fitted curves and components, residuals, parameters,
+uncertainties, FWHM(Q), relaxation time, EISF(Q), later dynamics results, and
+the configuration needed for lightweight reproducibility.
+
+Visualization likewise consumes prepared scientific results and may grow from
+spectra/resolution/fit inspection to derived-Q and later dynamics views,
+comparison controls, and publication-oriented vector output. It must never
+recompute EISF, relaxation times, or other authoritative quantities.
 
 The final GUI uses PySide6 and initially provides:
 
 1. Import
 2. Spectrum Fit
 3. Batch Results
-4. Motion Models
-5. Export or Project Summary
+4. Export or Analysis Summary
 
-It must be small, elegant, scientific, free of formulas and optimizer logic,
-and responsive during cancellable long-running fits executed outside the GUI
-thread.
+It must be small, elegant, scientific, guided for non-experts, free of formulas
+and optimizer logic, and responsive during cancellable long-running fits
+executed outside the GUI thread. It calls the same scientific core used by
+Python workflows; no scientific operation is duplicated in GUI code.
+
+The GUI exposes complexity progressively rather than requiring literal
+“beginner” and “advanced” modes. Safe defaults, clear choices, basic outputs,
+and warnings come first; detailed ranges, masks, components, parameters,
+bounds, resolution settings, diagnostics, visualization, and export controls
+appear when needed.
 
 The planned Import screen includes a data-format section showing the automatic
 proposal, evidence, warnings, manual override, group/pair count, and a preview
@@ -327,9 +377,9 @@ supported imported metadata. It shows the resolved explicit Q list and compares
 its count with sample and applicable resolution spectra. Automatically
 detected formats and generated/imported mappings require confirmation.
 
-## 10. Explicit non-goals
+## 10. Explicit v1.0 non-goals
 
-Version 1 excludes:
+Version 1.0 excludes:
 
 - raw detector-data reduction;
 - detector calibration or grouping;
@@ -340,7 +390,12 @@ Version 1 excludes:
 - automatic publication-quality figure editing;
 - multi-temperature Arrhenius fitting;
 - simultaneous global spectrum fitting;
-- arbitrary user-defined Python motion models; and
+- arbitrary user-defined Python motion models;
+- automatic molecular-model interpretation;
+- XYZ-driven automatic motion-model selection;
+- C2/C4/isotropic candidate-motion comparison;
+- general crystal or symmetry analysis;
+- GPU acceleration; and
 - automatic derivation of unrestricted molecular dynamics from arbitrary
   crystal structures.
 
@@ -348,8 +403,8 @@ Version 1 excludes:
 
 The initial private benchmark has a reduced DAVE sample, matching measured
 resolution, 14 Q groups, a user-supplied range of 0.46–2.02 inverse angstrom,
-extra DAVE `ModelFit` and `Func` columns to ignore, and separate C2/C4/isotropic
-comparisons. These details validate configurable behavior; none is a default.
+extra DAVE `ModelFit` and `Func` columns to ignore. These details validate
+configurable behavior; none is a default.
 
 Files in `private_data/` are confidential. They cannot be committed, staged,
 copied to tests/docs/examples/packages, printed as full arrays, redistributed,
@@ -358,47 +413,51 @@ must use independently generated synthetic data.
 
 ## 12. Acceptance criteria
 
-Version 1 is acceptable when:
+Version 1.0 is acceptable when:
 
 - the required workflow is usable end to end on reduced data;
 - all mandatory formats and Q-mapping modes have validated import paths;
 - original data and every user-visible transformation remain traceable;
-- spectral and motion fits expose the required diagnostics and warnings;
-- linewidth/EISF conventions are explicit in UI, tables, plots, projects, and
-  exports;
+- spectral fits expose the required diagnostics and warnings;
+- linewidth/EISF conventions are explicit in UI, tables, plots,
+  reproducibility records, and exports;
 - sequential batch fits remain independent per Q;
-- project save/reload reproduces the analysis state without executable data;
+- lightweight reproducibility information identifies inputs, selections,
+  settings, results, warnings, and software version;
 - private-data rules are enforced by design and test;
 - the scientific validation plan passes on macOS Apple Silicon and supported
   Windows targets; and
-- documentation makes limitations and unresolved scientific decisions visible.
+- documentation makes limitations and unresolved scientific decisions visible;
+  and
+- an external real user, including a non-QENS expert, can complete a guided
+  reduced-data analysis end to end on an ordinary macOS or Windows laptop,
+  inspect results and warnings, and export the analysis.
 
 ## 13. Unresolved decisions
 
-- Exact authoritative C2 and C4 equations and parameter definitions.
-- Exact isotropic-reorientation equation and parameterization.
 - Detailed accepted syntax within DAVE and generic ASCII layout families.
 - Blank-line/comment policy for explicit Q-list files.
 - Default uniform convolution grid and interpolation method.
 - Exact AIC/AICc likelihood convention and covariance-estimation policy.
 - Bragg-contamination warning heuristic.
 - Final public packaging, licensing, and Windows installer technology.
-- Final review and approval of the proposed project container format.
+- Final project-container format and extension, if a container is later needed.
+- Post-v1.0 molecular/motion-model equations and parameterizations.
 
 ## 14. Risks and milestone dependencies
 
 The largest risks are silent format misinterpretation, invalid resolution
-tails, convolution artifacts, parameter non-identifiability, overstated motion
-interpretation, loss of provenance, GUI/core coupling, and leakage of private
-data. The mitigation is staged scientific validation with explicit warnings
-and immutable originals.
+tails, convolution artifacts, parameter non-identifiability, loss of
+traceability, GUI/core coupling, non-expert misuse, and leakage of private data.
+The mitigation is staged scientific validation, guided interaction, explicit
+warnings, and immutable originals.
 
 The content detector and core table importers precede Q mapping and resolution
 work. Resolution-grid processing precedes convolution. Convolution precedes
 validated single-spectrum fitting.
 Single-spectrum validation precedes batch fitting and derived quantities.
-Experimental EISF precedes motion-model fitting. Minimal in-memory contracts
-evolve through the scientific milestones; full persistence is reviewed and
-implemented in milestone 8 and must not delay milestones 1–6. GUI
+Minimal in-memory contracts evolve through the scientific milestones. GUI
 implementation starts only after the importer, resolution, convolution, and
-single-spectrum path are scientifically validated.
+single-spectrum path are scientifically validated. GUI, export, lightweight
+reproducibility, documentation, and macOS/Windows packaging all precede the
+special v1.0 public-release gate.

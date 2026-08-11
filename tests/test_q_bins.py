@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from qensfit.domain import (
+from ezqens.domain import (
     ImportValidationError,
     QBins,
     ReducedDataset,
@@ -13,7 +13,7 @@ from qensfit.domain import (
     SpectrumRole,
     uniform_q_bins,
 )
-from qensfit.io import parse_dave_q_bins
+from ezqens.io import parse_dave_q_bins
 
 FIXTURES = Path(__file__).parent / "fixtures" / "q_bins"
 

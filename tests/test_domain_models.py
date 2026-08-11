@@ -5,7 +5,7 @@ from typing import cast
 import numpy as np
 import pytest
 
-from qensfit.domain import ReducedDataset, Spectrum, SpectrumRole
+from ezqens.domain import ReducedDataset, Spectrum, SpectrumRole
 
 
 def make_spectrum(

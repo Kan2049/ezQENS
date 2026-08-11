@@ -8,7 +8,7 @@ from enum import StrEnum
 import numpy as np
 import numpy.typing as npt
 
-from qensfit.domain import ReducedDataset, Spectrum
+from ezqens.domain import ReducedDataset, Spectrum
 
 BoolArray = npt.NDArray[np.bool_]
 

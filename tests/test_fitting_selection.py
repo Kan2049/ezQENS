@@ -5,8 +5,8 @@ from collections.abc import Sequence
 import numpy as np
 import pytest
 
-from qensfit.domain import QBins, ReducedDataset, Spectrum, SpectrumRole
-from qensfit.preprocessing import (
+from ezqens.domain import QBins, ReducedDataset, Spectrum, SpectrumRole
+from ezqens.preprocessing import (
     FittingRange,
     FittingSelection,
     PaddingStatus,

@@ -8,12 +8,12 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from qensfit.domain import ImportValidationError
-from qensfit.io.importers import (
+from ezqens.domain import ImportValidationError
+from ezqens.io.importers import (
     detect_reduced_data_format,
     import_reduced_data,
 )
-from qensfit.preprocessing import detect_edge_padding
+from ezqens.preprocessing import detect_edge_padding
 
 _SEVERITIES = ("info", "warning", "error")
 

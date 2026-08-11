@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from qensfit.domain import DiagnosticSeverity, ReducedDataFormat
-from qensfit.io.importers import detect_reduced_data_format
+from ezqens.domain import DiagnosticSeverity, ReducedDataFormat
+from ezqens.io.importers import detect_reduced_data_format
 
 FIXTURES = Path(__file__).parent / "fixtures" / "reduced_data"
 

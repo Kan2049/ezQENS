@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
-from qensfit.domain import (
+from ezqens.domain import (
     DiagnosticSeverity,
     ImportDiagnostic,
     ImportValidationError,

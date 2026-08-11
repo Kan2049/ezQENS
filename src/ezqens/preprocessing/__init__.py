@@ -1,6 +1,6 @@
 """GUI-independent preprocessing services."""
 
-from qensfit.preprocessing.edge_padding import (
+from ezqens.preprocessing.edge_padding import (
     BoundaryPaddingResult,
     BoundarySide,
     EdgePaddingDetectionResult,
@@ -8,7 +8,7 @@ from qensfit.preprocessing.edge_padding import (
     SpectrumPaddingResult,
     detect_edge_padding,
 )
-from qensfit.preprocessing.fitting_selection import FittingRange, FittingSelection
+from ezqens.preprocessing.fitting_selection import FittingRange, FittingSelection
 
 __all__ = [
     "BoundaryPaddingResult",

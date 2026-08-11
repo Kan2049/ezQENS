@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from qensfit.domain import (
+from ezqens.domain import (
     DiagnosticSeverity,
     FormatDetectionResult,
     ImportDiagnostic,
     ReducedDataFormat,
 )
-from qensfit.io.importers._text import (
+from ezqens.io.importers._text import (
     TextHeader,
     analyze_wide_columns,
     find_group_markers,

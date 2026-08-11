@@ -5,17 +5,18 @@
 This document defines the current architectural boundary and near-term
 direction. It keeps scientific computation independent of PySide6 and permits
 a future internal Python API without committing to a stable public API in
-version 1.
+version 1.0. The application targets ordinary CPU-based macOS and Windows
+laptops; Linux support is best-effort.
 
-The package remains under `src/qensfit`, uses typed Python, avoids global
+The package remains under `src/ezqens`, uses typed Python, avoids global
 mutable state, and passes explicit immutable or validated values between
 layers.
 
 Milestones 1–6 implement only minimal typed in-memory domain objects needed for
-import through derived QENS results. They do not implement the complete
-project-file architecture. The versioned `.qensfit` container, security model,
-hash registry, migrations, archive layout, attachments, atomic save, and public
-file contract are reviewed and implemented in milestone 8.
+import through derived QENS results. Version 1.0 adds only the lightweight
+reproducibility information needed to identify inputs, selections, settings,
+results, warnings, and software version. The final project-container format and
+extension are unresolved; the former `.qensfit` proposal is not a contract.
 
 ## 2. Architectural principles
 
@@ -25,15 +26,16 @@ file contract are reviewed and implemented in milestone 8.
    services; scientific modules never import PySide6.
 3. **Data is explicit.** Units, spectrum role, Q identity, masks, parameter
    meaning, source metadata, and warnings travel with data.
-4. **Originals are immutable.** Imported sample, resolution, and molecular
-   values are preserved; processing creates derived records.
+4. **Originals are immutable.** Imported sample and resolution values are
+   preserved; processing creates derived records.
 5. **Operations are reproducible.** Services accept configurations and return
    results rather than relying on process-wide settings.
 6. **Ambiguity is visible.** Invalid inputs and unresolved mappings produce
    diagnostics or require a user decision; no silent deletion or guessing.
-7. **Persistence follows science.** Minimal immutable in-memory models support
-   early validation. Milestone 8 persistence is data-only and contains
-   validated declarative data, never pickle, Python code, or executable plugins.
+7. **Reproducibility follows science.** Minimal immutable in-memory models
+   support early validation. Version 1.0 records the small set of information
+   needed to identify and review an analysis without predeclaring an archive or
+   database architecture.
 8. **Private data stays local.** Core code has no external-upload behavior, and
    logs summarize rather than dump numerical arrays.
 9. **Design seams, not scaffolding.** Extract a general abstraction only after
@@ -53,15 +55,28 @@ Downstream science depends on `ReducedDataset` / `Spectrum`, never the original
 file type. The current producer is reduced text import. Future producers are
 added from real schemas without changing this boundary.
 
-## 3. Proposed package boundaries
+### 2.1 Core stable, edges extensible
+
+Relatively stable core concepts are `Spectrum`, `ReducedDataset`, scientific
+units and conventions, Q identity, masks/selections, resolution semantics,
+spectral-model semantics, fit-result semantics, and basic derived quantities.
+
+Frequently evolving edges are input/reduction sources, export formats,
+visualization, GUI workflows, and later dynamics models. A new edge capability
+should normally be localized behind an existing scientific boundary and should
+not require unrelated core changes. This is an extension-seam rule, not
+permission to build registries, factories, plugins, or adapter hierarchies
+before concrete implementations need them.
+
+## 3. Current and near-term package boundaries
 
 The names below are target boundaries, not files created by this task.
 
 ```text
-qensfit/
+ezqens/
   domain/              typed scientific values and validation
   io/
-    importers/         DAVE, generic ASCII, XYZ
+    importers/         reduced DAVE and generic ASCII inputs
     exporters/         tables, machine-readable output, review reports
   preprocessing/       input validation, ranges, masks, baseline operations
   resolution/          resolution processing and sample-group association
@@ -71,10 +86,6 @@ qensfit/
   diagnostics/         residual statistics, information criteria, warnings
   batch/               sequential independent per-Q execution
   derived/             FWHM-to-tau and experimental EISF
-  molecular/           XYZ-domain geometry and hydrogen selection
-  motion/              candidate interfaces and approved implementations
-  comparison/          candidate-model evidence and reporting language
-  project/             milestone-8 persistence, migration, hashes, audit
   reporting/           GUI-neutral tables, plots, and export view models
   application/         workflow use cases and cancellation boundaries
   gui/                 PySide6 views/controllers/adapters, added later
@@ -90,8 +101,8 @@ Dataclasses are appropriate for small immutable computational values. Pydantic
 or equivalent validated types are appropriate at import boundaries. During
 milestones 1–6, numerical arrays may be direct NumPy values held by typed
 in-memory objects; UUIDs, entity schema versions, hash-addressed registries,
-and migration machinery are not mandatory. Pydantic persistence schemas and
-external array references are reviewed in milestone 8.
+and migration machinery are not mandatory. No persistence schema is
+anticipated before a concrete v1.0 reproducibility workflow requires one.
 
 `Spectrum` contains only its scientific role, ordered group identity, immutable
 energy/intensity/uncertainty arrays, units, and invalid-value masks.
@@ -127,9 +138,26 @@ Both edge-defined paths produce midpoint representatives; explicit values leave
 edges unknown. Source-specific metadata and diagnostics stay in `io`, while the
 scientific object contains no parser, confirmation, or GUI state.
 
+Reduced-data import and any future raw reduction remain distinct internal
+responsibilities even if a later GUI presents both under “Import Data”:
+
+```text
+reduced source -> localized importer -> ReducedDataset -> scientific core
+raw source -> source-specific reduction -> ReducedDataset -> scientific core
+```
+
+Future reduction learns only the required behavior from Mantid, DAVE, facility
+software, and documented algorithms; it does not reproduce their architectures.
+
 Exporters consume result/report models; they do not recompute fits. Every
 scientific export includes units, FWHM labels, exclusions, warnings, software
-version, and sufficient project/result identifiers for traceability.
+version, and sufficient analysis/result context for traceability.
+
+Export and visualization are first-class evolving boundaries. Export may grow
+to cover processed spectra, curves/components, residuals, parameters,
+uncertainties, basic QENS quantities, later dynamics results, and lightweight
+reproducibility configuration. Visualization consumes scientific results and
+never independently recomputes EISF, relaxation time, or other formulas.
 
 ### 3.3 Preprocessing and resolution
 
@@ -137,8 +165,8 @@ version, and sufficient project/result identifiers for traceability.
 side-effect-free operations returning new data plus minimal trace records.
 Milestone 2 distinguishes invalid values, per-group fit ranges, `AUTO` padding,
 and `REVIEW` padding; later fitting workflows add manual point, spectral, and
-motion-fit exclusions as separate state. Sigma is valid only when finite and
-strictly positive; every other sigma is automatically invalid-masked without
+derived-result exclusions as separate state. Sigma is valid only when finite
+and strictly positive; every other sigma is automatically invalid-masked without
 changing original arrays.
 
 Boundary-padding detection is a separate preprocessing service, not importer
@@ -196,38 +224,35 @@ Each invocation returns an independent `FitResult`. Previous-successful-fit
 seeding is an explicit option and does not create parameter coupling. A
 cancellation token is checked between fits and at safe optimizer boundaries.
 
-### 3.6 Derived quantities, molecular geometry, and motion models
+### 3.6 Derived quantities
 
-`derived` owns explicit FWHM-to-relaxation-time and experimental-EISF
-calculations. It consumes completed fit results and retains component inputs
-and warnings.
-
-`molecular` parses and represents all XYZ atoms, selects hydrogens for the
-first incoherent model, and calculates geometry relative to the fixed origin
-and selected x/y/z axis.
-
-`motion` defines a candidate interface with identity/version, parameter
-definitions, required molecular inputs, predicted EISF over Q, validity checks,
-and warnings. C2 and C4 implementations cannot be added until their equations
-are approved. Candidates are fit independently.
-
-`comparison` compares compatible candidate results using weighted residuals,
-reduced chi-square, AICc, uncertainty, residual structure, parameter validity,
-and warnings. Its narrative says “best supported under the evaluated models
-and assumptions,” never “proven mechanism.”
+`derived` owns explicit FWHM-to-relaxation-time, experimental-EISF, component-Q,
+and supported uncertainty-propagation calculations. It consumes completed fit
+results and retains component inputs and warnings. Later approved temporal or
+spatial dynamics analysis consumes these quantities without changing spectral
+fit semantics. No generic model registry or mandatory catalogue is declared.
+Automatic inference from coordinates, symmetry, or molecular structure is a
+substantially later extension and does not shape current modules.
 
 ### 3.7 Application and GUI
 
 `application` exposes workflow-oriented use cases such as import sample,
-process resolution, fit spectrum, run batch, derive EISF, compare candidates,
-save project, and export. It is the seam used by both tests and the GUI.
+process resolution, fit spectrum, run batch, derive EISF, retain lightweight
+analysis metadata, and export. It is the seam used by both tests and the GUI.
 
 The later PySide6 GUI contains presentation and interaction only. Proposed
-screens are Import, Spectrum Fit, Batch Results, Motion Models, and
-Export/Project Summary. Controllers submit long operations to worker
+screens are Import, Spectrum Fit, Batch Results, and Export/Analysis Summary.
+Controllers submit long operations to worker
 infrastructure, receive progress/result messages, and support cancellation.
 They never contain formulas, residual construction, convolution, or optimizer
 logic.
+
+Interaction exposes complexity progressively. Guided workflows emphasize safe
+defaults, understandable choices, warnings, and basic physical outputs;
+experienced workflows progressively expose ranges, masks, components,
+parameters, bounds, resolution settings, batch behavior, diagnostics,
+visualization, and export controls. This does not prescribe two literal UI
+modes.
 
 The Import screen eventually presents format proposal/evidence/warnings,
 manual override, group or paired-column count, and array mapping preview. It
@@ -240,23 +265,19 @@ comparison; and requires confirmation before applying detected/generated data.
 ```text
 GUI -> application -> core services -> domain
 reporting/export -> result/domain models
-project persistence -> domain schemas and array storage
 batch -> single-spectrum fitting -> spectral + convolution + diagnostics
-motion comparison -> motion fits -> derived EISF + molecular geometry
 ```
 
 Disallowed dependencies include:
 
-- core or domain importing `qensfit.gui` or PySide6;
+- core or domain importing `ezqens.gui` or PySide6;
 - importers calling fitters;
 - exporters recomputing scientific results;
 - spectral components reading files or process-global settings;
-- motion models accessing GUI state;
-- persistence importing executable user code; and
 - Mantid types appearing in core signatures.
 
 If a concrete interoperability source is implemented later, it stays outside
-the core and produces qensfit domain values. No adapter base class, registry,
+the core and produces `ezqens` domain values. No adapter base class, registry,
 factory, or plugin protocol is predeclared now.
 
 ## 5. Core callable interfaces
@@ -279,11 +300,7 @@ process_resolution(original, configuration) -> ResolutionProcessingOutcome
 fit_spectrum(spectrum, resolution, configuration) -> FitResult
 fit_batch(spectra, resolution_map, configuration, cancellation) -> BatchFitResult
 derive_qens(batch_result, configuration) -> DerivedQENSResult
-import_xyz(source) -> ImportOutcome[MolecularStructure]
-fit_motion_model(derived, structure, definition) -> MotionModelFitResult
-compare_motion_models(results, configuration) -> ModelComparisonResult
-save_project(project, destination) -> ExportRecord
-load_project(source) -> ProjectLoadOutcome
+export_analysis(results, reproducibility_summary, destination) -> ExportRecord
 ```
 
 These signatures describe responsibilities only. Concrete names and error
@@ -298,9 +315,7 @@ source-specific import or reduction
   -> processed sample/resolution views + processing steps
   -> per-Q spectral fit configurations/results
   -> derived FWHM/tau/EISF records
-  -> molecular structure + independent motion fits
-  -> model comparison
-  -> reports/exports/project snapshot
+  -> reports/exports + lightweight reproducibility summary
 ```
 
 During milestones 1–6, each arrow returns immutable typed values plus the
@@ -308,20 +323,21 @@ minimal configuration, diagnostics, and simple links required to reproduce the
 current calculation in memory. It need not create a UUID-backed entity,
 hash-addressed payload, migration schema, or append-only project event.
 Manual refits remain separate result objects rather than mutating successful
-neighbors. Complete persistent history and migration semantics begin in
-milestone 8.
+neighbors. Complete persistent history and migration semantics are not v1.0
+requirements.
 
-## 7. Project-file format
+## 7. Reproducibility and future project-file format
 
-Persistence is deferred, non-binding design work until milestone 8. Milestones
-1–6 do not build container, archive, migration, attachment, hash-registry, or
-atomic-save infrastructure. Milestone 8 first reviews the stable scientific
-contracts, then chooses and documents a safe data-only `.qensfit` format.
+Version 1.0 records enough lightweight information to identify inputs,
+selections and masks, configurations, results, warnings, and software version.
+It does not require container, archive, migration, attachment, hash-registry,
+or database infrastructure.
 
-That review must address schema/version migration, integrity hashes, private
-path redaction, archive traversal and size limits, non-executable array storage,
-and atomic save behavior. No current domain object or dependency is retained
-solely to anticipate that design.
+Any later project-file design begins from stable scientific contracts and must
+choose its format and extension explicitly. The former `.qensfit` proposal is
+not permanent. If a container is introduced, its data-only security, redaction,
+integrity, size, path-safety, and atomic-write requirements are reviewed then;
+no current domain object or dependency exists solely to anticipate it.
 
 ## 8. Reporting and logging
 
@@ -335,13 +351,18 @@ separate:
 - scientific-quality warnings; and
 - user exclusions or overrides.
 
+Diagnostics remain available through import, preprocessing, resolution,
+fitting, parameter/covariance validity, derived quantities, and any later
+dynamics fitting. Optimizer convergence and scientific validity are distinct
+whenever the underlying evidence allows that distinction.
+
 Plots and tables receive prepared view models with units and FWHM semantics,
 preventing UI-specific reinterpretation.
 
 ## 9. Acceptance criteria
 
 - Core tests run without importing PySide6.
-- Module boundaries cover every responsibility required by version 1.
+- Module boundaries cover every responsibility required by version 1.0.
 - No scientific operation depends on global mutable state.
 - Sample and resolution spectra are semantically distinct behind one common
   numerical interface.
@@ -355,14 +376,14 @@ preventing UI-specific reinterpretation.
   adapters rather than embedded in scientific calculations.
 
 For milestones 1–6, minimal in-memory typed objects and simple traceability are
-sufficient; complete persistence is not an acceptance criterion. At milestone
-8, project saves additionally become data-only, versioned, hash-verifiable,
-migration-tested, and safely atomic.
+sufficient. Before the v1.0 release gate, lightweight reproducibility, export,
+GUI delegation, and macOS/Windows packaging must be validated. Complete
+persistence is not a v1.0 acceptance criterion.
 
 ## 10. Assumptions and explicit non-goals
 
 The architecture assumes in-memory NumPy arrays are practical for typical
-reduced version-1 datasets during early scientific milestones; later storage
+reduced v1.0 datasets during early scientific milestones; later storage
 references may enable lazy loading. It assumes one local user and one active
 project per application window. Neither assumption changes a scientific
 convention.
@@ -372,16 +393,15 @@ plugin execution, a public stable Python API, or a final GUI visual design.
 
 ## 11. Unresolved decisions and risks
 
-Unresolved engineering choices include later result types, persistence format
-and limits, worker process versus
+Unresolved engineering choices include later result types, any future
+persistence format and limits, worker process versus
 thread execution, stable report formats, and concrete raw HDF/NeXus schemas if
 raw reduction is ever added.
 
-Risks include archive abuse, schema drift, large-memory use, cancellation that
-leaves partial state, Windows path/process differences, dependency leakage into
-the core, and overgrown domain objects. Address these through threat-oriented
-load tests, explicit migrations, immutable results, bounded workers, interface
-tests, and narrow modules.
+Risks include large-memory use, cancellation that leaves partial state, Windows
+path/process differences, dependency leakage into the core, GUI/core drift, and
+overgrown domain objects. Address these through immutable results, bounded
+workers, interface tests, real-user validation, and narrow modules.
 
 ## 12. Milestone dependencies
 
@@ -389,8 +409,8 @@ Domain primitives and diagnostics vocabulary precede all other core work. The
 content detector and DAVE/wide/single importers precede Q mapping and
 resolution association. Resolution processing and grid validation precede
 convolution. Convolution precedes single-spectrum fitting.
-Validated single fits precede batch and derived results. Derived EISF and
-approved equations precede candidate-model fitting. Minimal in-memory contracts
-evolve through milestones 1–6; full persistence is reviewed and implemented in
-milestone 8. Reporting follows stable result contracts. GUI work follows
-scientific validation of the importer-through-single-fit path.
+Validated single fits precede batch and derived results. Minimal in-memory
+contracts evolve through milestones 1–6. Reporting follows stable result
+contracts. GUI work follows scientific validation of the
+importer-through-single-fit path, and the guided GUI, export, lightweight
+reproducibility, documentation, and macOS/Windows packages precede v1.0 release.

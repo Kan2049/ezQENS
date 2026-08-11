@@ -1,34 +1,59 @@
-# qensfit project instructions
+# ezQENS project instructions
 
 ## Purpose and status
 
-qensfit is an early-stage desktop application and GUI-independent Python core
-for standardized analysis of reduced quasielastic neutron scattering (QENS)
-data. It is not yet suitable for scientific use. The initial platform is macOS
-on Apple Silicon; Windows must be supported before a public release.
+ezQENS is an early-stage, lightweight desktop application and GUI-independent
+Python core for scientifically rigorous analysis of reduced quasielastic
+neutron scattering (QENS) data. It is intended for QENS experts and non-experts
+and is not yet suitable for scientific use. The Python distribution and import
+package are `ezqens`.
+
+Prioritize scientific correctness, reliability, simplicity, usability,
+performance, and feature count, in that order. For equally correct solutions,
+prefer fewer concepts, less code, fewer dependencies, lower resource use, and
+easier maintenance. Target ordinary personal laptops and CPU-first execution.
+macOS and Windows laptops are required for the first public release; Linux is
+best-effort and must not delay it.
+
+The primary user experience is a GUI. It guides non-experts toward trustworthy
+basic outputs and meaningful warnings while progressively exposing ranges,
+masks, parameters, bounds, components, resolution settings, batch behavior,
+diagnostics, visualization, and export controls for experienced users. Both
+depths use the same scientific core; the GUI never duplicates calculations.
 
 Treat the documents under `docs/` as the authoritative product, scientific,
 architecture, data-model, validation, and sequencing specifications. If code
 and documentation disagree, stop and request scientific-owner review rather
 than silently changing a scientific convention.
 
-## Version 1 boundaries
+## Version 1.0 boundaries
 
-Version 1 starts with reduced sample and measured-resolution data. Its workflow
-covers import, inspection, Q mapping, analysis-level masking, resolution
-processing, measured-resolution convolution, independent and sequential batch
-spectral fits, FWHM linewidths, relaxation times, experimental EISF, XYZ
-molecular coordinates, separate C2/C4/isotropic candidate-model fits, model
-comparison, exports, and reproducible project persistence.
+Version 1.0 is primarily a reduced-QENS-data analysis application. Its workflow
+covers reduced sample and measured-resolution import, inspection, Q mapping,
+analysis-level masking, resolution processing, measured-resolution convolution,
+reliable single-Q and independent sequential batch fitting, FWHM linewidths,
+relaxation times, experimental EISF where validated, clear diagnostics,
+scientific export, a guided responsive desktop GUI, and lightweight
+reproducibility information.
 
 Do not add raw detector reduction, detector calibration or grouping,
 detector-level bad-detector masking, INS analysis, fixed-window scans,
 Bayesian/MCMC fitting, global simultaneous spectrum fitting, multi-temperature
 Arrhenius fitting, arbitrary user Python motion models, unrestricted molecular
-dynamics from crystal structures, web or multi-user features, or automatic
-publication-figure editing to version 1.
+dynamics from crystal structures, automatic molecular interpretation,
+XYZ-driven motion-model selection, C2/C4/isotropic candidate comparison,
+general crystal/symmetry analysis, GPU requirements, web or multi-user
+features, or automatic publication-figure editing to version 1.0. Raw-data
+reduction and automatic inference of motion models from molecular coordinates,
+symmetry, or structures are substantially later capabilities. Scientifically
+approved temporal or spatial QENS dynamics models are a natural extension of
+the core, but no catalogue is mandatory for v1.0 unless explicitly promoted by
+the owner.
 
-Mantid interoperability is optional and must stay outside the analysis core.
+Initial input support is centered on DAVE- and Mantid-preprocessed reduced-data
+workflows, including real validation from PSI FOCUS and ILL IN5/IN16 where
+available. Do not hard-code instrument assumptions or require Mantid in the
+analysis core.
 PySide6 is the intended GUI toolkit, but GUI work must wait until the importer,
 resolution path, convolution, and single-spectrum fit have been scientifically
 validated.
@@ -66,9 +91,9 @@ validated.
 - Preserve original resolution data separately from processed resolution data.
 - Preserve component-level results and covariance information needed for later
   uncertainty propagation.
-- C2 and C4 formulas are unresolved pending authoritative scientific input. Do
-  not invent or encode final formulas. Any other unspecified model equation or
-  diagnostic convention also requires explicit review.
+- Any unspecified model equation or diagnostic convention requires explicit
+  scientific-owner review. Post-v1.0 C2 and C4 formulas remain unresolved and
+  must not be invented or encoded.
 
 ## Import and Q-mapping rules
 
@@ -115,18 +140,22 @@ fixture or a source of defaults.
 
 ## Architecture and implementation rules
 
-- Keep the `src/qensfit` layout and typed Python.
+- Keep the `src/ezqens` layout and typed Python.
 - Keep the scientific core callable and independent of PySide6.
 - Keep `ReducedDataset` / `Spectrum` as the stable scientific boundary between
   source-specific import or reduction and downstream analysis. Source formats
   must not leak into future fitting interfaces.
+- Apply **core stable, edges extensible**. Stable concepts include spectra,
+  datasets, units, Q identity, masks/selections, resolution and spectral
+  semantics, fit results, and basic derived quantities. Evolving edges include
+  import/reduction sources, exports, visualization, GUI workflows, and later
+  dynamics models. Extend an edge locally without unrelated core changes.
 - Design extension seams, not extension scaffolding. Do not add abstract HDF,
   NeXus, instrument, Mantid, registry, factory, adapter, or plugin frameworks
   before at least two real implementations require a shared abstraction.
 - Separate domain models, import/export, preprocessing, resolution handling,
   spectral components, convolution, fitting, diagnostics, batch execution,
-  derived quantities, molecular geometry, motion models, comparison,
-  persistence, reporting, and GUI adapters.
+  derived quantities, reporting, application workflows, and GUI adapters.
 - Put no formulas or optimizer logic in GUI code.
 - Avoid global mutable state and hidden unit conversions.
 - Use dataclasses or similarly typed immutable objects for early computation
@@ -134,23 +163,26 @@ fixture or a source of defaults.
 - Retain runtime dependencies only when current production functionality uses
   them; add future numerical, plotting, HDF, persistence, or GUI dependencies
   in the milestone that needs them.
-- During milestones 1–6, implement only the minimal typed in-memory models
-  required by the scientific workflow. Do not require UUIDs on every temporary
-  object, entity migrations, hash-addressed arrays, append-only project
-  histories, attachment handling, or archive infrastructure.
+- During scientific-core milestones 1–6, implement only the minimal typed
+  in-memory models required by the scientific workflow. Do not require UUIDs
+  on every temporary object, entity migrations, hash-addressed arrays,
+  append-only project histories, attachment handling, or archive infrastructure.
 - Simple identifiers and immutable values may be used where they improve
   traceability, but persistence work must not delay scientific validation.
-- Review and implement persistent schema versions, stable identifiers, hashes,
-  migrations, security, atomic save, and the `.qensfit` archive contract in
-  milestone 8.
-- Preserve source references and hashes where practical, imported data,
-  processing history, masks, settings, configurations, results, warnings,
-  exclusions, software version, and project-schema version.
-- When milestone 8 implements project files, treat them as untrusted input: no
-  pickle or executable payloads, validate sizes and schemas, prevent unsafe
-  archive paths, verify hashes, and write atomically.
+- Version 1.0 reproducibility is lightweight: retain enough information to
+  identify inputs, masks/selections, model and fit settings, results, warnings,
+  and software version. Do not require UUIDs everywhere, hash-addressed arrays,
+  append-only histories, archive/database infrastructure, or migrations.
+- The final project-container format and extension are unresolved until
+  persistence work is designed. The former `.qensfit` proposal is not a
+  permanent contract. Heavy persistence architecture is provisional post-v1.0.
 - Long-running fitting must eventually execute outside the GUI thread and
   support cancellation.
+- Treat export and visualization as first-class evolving product boundaries.
+  They consume authoritative scientific results and never recompute formulas.
+- Keep diagnostics available across import, preprocessing, resolution, fitting,
+  parameter/covariance validity, derived quantities, and later dynamics fits.
+  Distinguish optimizer convergence from scientific validity where meaningful.
 
 ## Development sequence and quality
 
@@ -173,17 +205,22 @@ selection, and small GUI-independent inspection plots. It does not add Q
 rebinning, manual single-point masks, whole-Q exclusions, fitting, or GUI state.
 
 Do not begin GUI implementation before the importer, resolution processing,
-numerical convolution, and single-spectrum fitting are validated. Full project
-persistence begins in milestone 8, not milestones 1–6. AIC/AICc remain planned
-diagnostics but do not block the first validated single-spectrum prototype
-while their likelihood convention is unresolved.
+numerical convolution, and single-spectrum fitting are validated. AIC/AICc
+remain planned diagnostics but do not block the first validated single-spectrum
+prototype while their likelihood convention is unresolved.
+
+The special ezQENS v1.0 release gate requires an external real user, including
+a non-QENS expert, to complete a guided reduced-data workflow end to end on an
+ordinary macOS or Windows laptop, inspect results and warnings, and export the
+analysis. GUI, export, lightweight reproducibility, documentation, and both
+platform packages must pass before public release.
 
 For each implementation change, add tests appropriate to its scientific risk.
 The validation program includes unit, synthetic-spectrum, convolution,
 parameter-recovery, regression, DAVE and existing-script comparisons, private
-benchmark summaries, cross-platform checks, project round trips, GUI smoke
-tests, and explicit convention tests. Never alter a scientific formula merely
-to make a test pass.
+benchmark summaries, cross-platform checks, lightweight reproducibility tests,
+GUI smoke tests, and explicit convention tests. Never alter a scientific
+formula merely to make a test pass.
 
 Run the existing pytest suite, Ruff, and mypy before handoff. Document
 assumptions and unresolved decisions; do not resolve scientific ambiguity by
@@ -197,7 +234,7 @@ After any milestone that changes public APIs, data models, preprocessing, import
 
 `docs/test_notebook_maintenance.md`
 
-The current production implementation under `src/qensfit/` is the source of truth.
+The current production implementation under `src/ezqens/` is the source of truth.
 
 Do not preserve obsolete production APIs solely for notebook compatibility.
 

@@ -8,7 +8,7 @@ from enum import StrEnum
 import numpy as np
 import numpy.typing as npt
 
-from qensfit.domain.diagnostics import DiagnosticSeverity, ImportDiagnostic
+from ezqens.domain.diagnostics import DiagnosticSeverity, ImportDiagnostic
 
 FloatArray = npt.NDArray[np.float64]
 BoolArray = npt.NDArray[np.bool_]

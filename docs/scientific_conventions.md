@@ -3,11 +3,11 @@
 ## 1. Scope
 
 This document fixes the scientific conventions that are authoritative for
-version 1. Unspecified details are marked unresolved and must not be inferred
+version 1.0. Unspecified details are marked unresolved and must not be inferred
 from private data or chosen merely to make tests pass.
 
 Reduced inputs are assumed to have completed detector reduction and
-detector-level bad-detector masking. qensfit performs analysis-level operations
+detector-level bad-detector masking. ezQENS performs analysis-level operations
 only.
 
 ## 2. Axes, units, and identity
@@ -91,10 +91,10 @@ tau_ps = 1.3164239138 / Gamma_meV
 ```
 
 Every relevant parameter name, table heading, axis label, plot annotation,
-export field, and project field must identify the linewidth as FWHM. No layer
-may silently convert FWHM to HWHM. If a numerical routine uses HWHM internally,
-that conversion must be local, explicit, tested, and absent from persisted
-meaning.
+export field, and reproducibility field must identify the linewidth as FWHM. No
+layer may silently convert FWHM to HWHM. If a numerical routine uses HWHM
+internally, that conversion must be local, explicit, tested, and absent from
+persisted meaning.
 
 A finite relaxation time requires a finite positive FWHM. Zero, negative, NaN,
 or infinite FWHM must produce no valid `tau_ps` and an explicit warning rather
@@ -224,7 +224,7 @@ Required traversal is low Q to high Q, with optional high-to-low traversal.
 Using the previous successful fit as the next initial guess is optional and
 recorded. Failure at one Q does not erase other results. A failed Q can be
 manually refitted. Exclusion from spectral fitting and exclusion from later
-EISF-model fitting are distinct states with recorded reasons.
+derived-quantity use are distinct states with recorded reasons.
 
 ## 8. Analysis-level masks and warnings
 
@@ -239,11 +239,11 @@ The following current Milestone-2 concepts remain distinct:
 The derived Milestone-2 exclusion is exactly invalid measurement data OR
 `AUTO` padding OR points outside that group's inclusive fitting range. `REVIEW`
 padding remains retained unless excluded by another current rule. Manual
-single-point masks, whole-Q fitting exclusions, and motion-fit exclusions are
-deferred until later workflows require them.
+single-point masks, whole-Q fitting exclusions, and derived-result exclusions
+are deferred until later workflows require them.
 
 Possible Bragg contamination, including contamination near the elastic line at
-specific Q, may generate a warning. qensfit must not silently delete the Q
+specific Q, may generate a warning. ezQENS must not silently delete the Q
 spectrum or affected points. The detection heuristic is unresolved.
 
 The importer preserves every repeated value. Edge-padding detection runs
@@ -280,8 +280,8 @@ exclusions, Bragg warnings, and padding masks remain independently recoverable.
 Constant or linear backgrounds remain future spectral-model components.
 
 Every automatic flag, user mask, range change, Q exclusion, restoration, and
-reason remains traceable in the analysis state; the complete append-only
-project history is deferred to milestone 8.
+reason remains traceable in the analysis state. A complete append-only project
+history is not required for v1.0.
 
 ## 9. Resolution processing and convolution
 
@@ -317,13 +317,13 @@ convolution boundary treatment, kernel centering, and normalization integration
 rule remain unresolved. These must be validated independently before
 single-spectrum fitting is accepted.
 
-## 10. Molecular coordinates
+## 10. Post-v1.0 molecular coordinates — provisional
 
-Version 1 XYZ input consists of element symbols and Cartesian coordinates in
-angstrom. Import retains all atoms. The first incoherent motion-model
-calculation selects hydrogen atoms only.
+If this post-v1.0 capability is promoted, XYZ input consists of element symbols
+and Cartesian coordinates in angstrom. Import retains all atoms. The first
+incoherent motion-model calculation selects hydrogen atoms only.
 
-The version-1 rotation center is exactly `(0, 0, 0)`. The user selects x, y, or
+The initially proposed rotation center is exactly `(0, 0, 0)`. The user selects x, y, or
 z as rotation axis. The system exposes all atoms, selected hydrogens, hydrogen
 coordinates, and hydrogen distances from the rotation center.
 
@@ -331,7 +331,7 @@ Atom-selection decisions and the XYZ source/provenance must persist. No
 automatic derivation of unrestricted dynamics from arbitrary crystal
 structures is in scope.
 
-## 11. Candidate motion models
+## 11. Post-v1.0 candidate motion models — provisional
 
 C2 rotational motion, C4 rotational motion, and isotropic reorientation are
 separate alternative candidates, not combined populations. The analysis flow
@@ -349,8 +349,9 @@ uncertainties, residual structure, parameter validity, and scientific
 warnings. Reports identify the best-supported model and alternatives but must
 state that numerical preference does not prove a unique microscopic mechanism.
 
-The authoritative C2 and C4 equations and parameter definitions are explicitly
-unresolved pending scientific-owner input and review. They must not be invented
+This capability is not required for v1.0. The authoritative C2 and C4 equations
+and parameter definitions are explicitly unresolved pending scientific-owner
+input and review. They must not be invented
 in specifications or production code. The exact isotropic equation and
 parameterization also require written approval because they are not supplied
 by the current requirements.
@@ -369,14 +370,16 @@ by the current requirements.
   processed data.
 - All masks, range choices, mappings, exclusions, and warnings are traceable.
 - Batch results are demonstrably independent per Q.
-- Candidate comparison language avoids claims of unique mechanism.
+- Any later candidate comparison language avoids claims of unique mechanism.
 - Tests encode authoritative conventions rather than undocumented defaults.
 
 ## 13. Explicit non-goals
 
-This document does not define raw-data reduction, INS or fixed-window analysis,
-Bayesian/MCMC inference, global spectrum fitting, Arrhenius analysis, combined
-motion-model populations, or arbitrary user-defined motion equations.
+Version 1.0 does not define raw-data reduction, INS or fixed-window analysis,
+Bayesian/MCMC inference, global spectrum fitting, Arrhenius analysis, molecular
+interpretation, XYZ-driven motion selection, candidate-motion comparison,
+combined motion-model populations, GPU acceleration, or arbitrary user-defined
+motion equations.
 
 ## 14. Risks, unresolved decisions, and dependencies
 
@@ -393,5 +396,5 @@ and invalid-uncertainty handling are fixed conventions.
 ASCII parsing and Q identity must be validated before resolution association.
 Resolution processing and convolution must be validated before spectral fits.
 Fit covariance and component areas must be validated before EISF uncertainty.
-Experimental EISF and approved candidate equations are prerequisites for motion
-model comparison.
+Experimental EISF and approved candidate equations remain prerequisites for any
+post-v1.0 motion-model comparison.

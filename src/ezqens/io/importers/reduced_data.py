@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
-from qensfit.domain import (
+from ezqens.domain import (
     DiagnosticSeverity,
     FormatDetectionResult,
     ImportDiagnostic,
@@ -16,8 +16,8 @@ from qensfit.domain import (
     Spectrum,
     SpectrumRole,
 )
-from qensfit.domain.models import SourceColumnMetadata
-from qensfit.io.importers._text import (
+from ezqens.domain.models import SourceColumnMetadata
+from ezqens.io.importers._text import (
     TextHeader,
     analyze_wide_columns,
     find_group_markers,
@@ -26,7 +26,7 @@ from qensfit.io.importers._text import (
     read_text_lines,
     split_columns,
 )
-from qensfit.io.importers.detection import detect_reduced_data_format
+from ezqens.io.importers.detection import detect_reduced_data_format
 
 _REQUIRED_COLUMNS = ("x", "y", "yerr")
 

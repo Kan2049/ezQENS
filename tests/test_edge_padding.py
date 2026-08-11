@@ -7,8 +7,8 @@ from collections.abc import Sequence
 import numpy as np
 import pytest
 
-from qensfit.domain import ReducedDataset, Spectrum, SpectrumRole
-from qensfit.preprocessing import PaddingStatus, detect_edge_padding
+from ezqens.domain import ReducedDataset, Spectrum, SpectrumRole
+from ezqens.preprocessing import PaddingStatus, detect_edge_padding
 
 
 def make_dataset(

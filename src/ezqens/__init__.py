@@ -1,4 +1,4 @@
-"""Top-level package for qensfit."""
+"""Top-level package for ezqens."""
 
 from typing import Final
 

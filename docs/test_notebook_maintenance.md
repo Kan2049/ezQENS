@@ -1,6 +1,6 @@
 # Validation Notebook Maintenance After Each Milestone
 
-The project's Jupyter validation notebook is a persistent human-facing integration test and scientific demonstration of the current `qensfit` API.
+The project's Jupyter validation notebook is a persistent human-facing integration test and scientific demonstration of the current `ezqens` API.
 
 It must evolve together with production code.
 
@@ -24,7 +24,7 @@ The validation notebook serves as a human-readable integration layer between:
 
 It is not the authoritative implementation.
 
-Production code under `src/qensfit/` is the source of truth.
+Production code under `src/ezqens/` is the source of truth.
 
 The notebook must call production APIs rather than reproduce production algorithms.
 
@@ -292,7 +292,7 @@ An API error caused by stale imports must not be "fixed" by altering production 
 
 Retain a lightweight development-package check near the beginning of the notebook.
 
-It should establish that the notebook imports the intended repository version of `qensfit`.
+It should establish that the notebook imports the intended repository version of `ezqens`.
 
 Displayed output must remain privacy-safe.
 

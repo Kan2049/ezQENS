@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from qensfit.domain import (
+from ezqens.domain import (
     DiagnosticSeverity,
     ImportDiagnostic,
     ImportValidationError,

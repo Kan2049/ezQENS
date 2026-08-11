@@ -1,11 +1,11 @@
 """Minimal scientific domain API for reduced-data import."""
 
-from qensfit.domain.diagnostics import (
+from ezqens.domain.diagnostics import (
     DiagnosticSeverity,
     ImportDiagnostic,
     ImportValidationError,
 )
-from qensfit.domain.models import (
+from ezqens.domain.models import (
     FormatDetectionResult,
     QBins,
     ReducedDataFormat,

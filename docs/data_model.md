@@ -3,12 +3,19 @@
 ## 1. Scope
 
 This document defines the small current scientific boundary and the minimum
-near-term values needed through milestone 7. It does not prescribe production
-classes for unimplemented workflows or the milestone-8 persistence container.
+near-term values needed for the v1.0 reduced-data workflow. It does not
+prescribe production classes for post-v1.0 workflows or a future persistence
+container.
 
 The design rule is to preserve scientific invariants while deriving state that
 can be calculated reliably. General abstractions are introduced only after at
 least two real implementations require them.
+
+The stable scientific backbone comprises spectra/datasets, units, Q identity,
+masks/selections, resolution semantics, spectral and fit-result semantics, and
+basic derived quantities. Expanding import/export, visualization, GUI, and
+later dynamics edges consume or produce these values without adding
+source-specific or presentation-specific state to the stable core.
 
 ## 2. Current reduced-data boundary
 
@@ -159,7 +166,8 @@ retained finite energy bounds.
 
 ## 4. Current and near-term scientific values
 
-These values remain minimal immutable in-memory objects through milestone 7.
+These values remain minimal immutable in-memory objects through the v1.0
+scientific-core milestones.
 
 ### 4.1 QBins — milestone 2
 
@@ -191,8 +199,8 @@ excluded, and retained masks. Exclusion is invalid measurement OR `AUTO`
 padding OR outside the selected group range. `REVIEW` is not automatically
 excluded. A selection fails when a group retains no usable measured points.
 
-Manual point masks, whole-Q fitting exclusions, Bragg warnings, and motion-fit
-exclusions remain separate future concepts and are not Milestone-2 state.
+Manual point masks, whole-Q fitting exclusions, and Bragg warnings remain
+separate future concepts and are not Milestone-2 state.
 
 ### 4.3 ResolutionDataset and processing values — milestone 3
 
@@ -225,34 +233,33 @@ seeding, failure, exclusion, manual-refit, and selected-result state.
 elastic and individual quasielastic integrated areas, EISF, validity, and
 warnings. Missing covariance never means zero uncertainty.
 
-### 4.6 Molecular and motion values — milestone 7
+### 4.6 Later dynamics values — provisional
 
-`MolecularStructure` retains all XYZ atoms, hydrogen selection, coordinates in
-angstrom, fixed origin, selected axis, and hydrogen distances.
-`MotionModelDefinition`, `MotionModelFitResult`, and `ModelComparisonResult`
-are added only after authoritative equations and statistical conventions are
-approved. C2, C4, and isotropic candidates remain separate alternatives. C2
-and C4 formulas are unresolved and must not be inferred here.
+Selected temporal or spatial QENS dynamics analysis may later consume validated
+FWHM(Q), relaxation-time, EISF(Q), component-Q, and uncertainty results. If a
+model is promoted, its minimal typed inputs/results are specified only after
+authoritative equations, real workflows, diagnostics, and statistical
+conventions are approved. No current class, registry, or interface exists
+merely to anticipate a model catalogue.
 
-## 5. Persistence is deferred to milestone 8
+Automatic model inference from molecular coordinates, symmetry, or structures
+is a substantially later and separate capability. It does not shape current
+derived-result values.
 
-The long-term version-1 project must eventually represent `AnalysisProject`,
-datasets/spectra, mappings, processing steps, masks, model and parameter
-definitions, fit/batch/derived results, molecular and motion values,
-comparisons, `ExportRecord`, and `ProvenanceRecord`.
+## 5. Lightweight v1.0 reproducibility and future persistence
 
-Those persistent schemas are not current production requirements. Milestone 8
-reviews the stable scientific values first, then defines identifiers, schema
-versions, hashes, migration, archive layout, attachments, security, redaction,
-and atomic save behavior. No UUID, hash registry, entity migration, append-only
-history, archive object, or persistence dependency is required in milestones
-1–7 merely to anticipate that work.
+Version 1.0 retains enough lightweight information to identify input sources,
+Q assignment, processing selections and masks, model configuration, fit
+settings, results, warnings, exclusions, and software version. The exact value
+or export records are introduced only when the release workflow needs them.
 
-The future project format must remain data-only, reject executable/pickle
-payloads and unsafe archive paths, validate dimensions and sizes, protect
-private source paths, and preserve units, FWHM meaning, original data,
-processing decisions, masks, configurations, results, warnings, exclusions,
-software version, and project-schema version.
+A complex project container is not a v1.0 requirement. The former `.qensfit`
+proposal is not a permanent format or extension. Any post-v1.0 persistence
+design begins from then-stable scientific values and addresses data-only
+security, identifiers, schemas, hashes, migration, archive layout, redaction,
+and atomic writes only if the selected format requires them. No UUID, hash
+registry, entity migration, append-only history, archive object, or persistence
+dependency is added merely to anticipate that work.
 
 ## 6. Relationship summary
 
@@ -265,8 +272,13 @@ SpectrumPaddingResult -> one Spectrum by group order/identity
 future milestone sequence:
 ReducedDataset + QBins -> FittingSelection -> processed resolution
   -> FitConfiguration -> FitResult -> BatchFitResult
-  -> DerivedQENSResult -> molecular/motion results -> comparison
-  -> milestone-8 project/export/provenance schemas
+  -> DerivedQENSResult -> reports/exports + lightweight reproducibility
+
+later, if explicitly approved:
+DerivedQENSResult -> selected temporal/spatial dynamics analysis
+
+substantially later:
+molecular/structure input -> automatic candidate inference
 ```
 
 ## 7. Acceptance criteria
@@ -294,6 +306,6 @@ or current persistence classes.
 
 Still unresolved are detailed general DAVE grammar, explicit-list comment
 syntax, resolution/convolution policies, covariance and AIC/AICc
-conventions, Bragg heuristics, motion equations, and the milestone-8 project
-format. None may be resolved from private benchmark values or by adding
-premature abstraction.
+conventions, Bragg heuristics, and any future project format. Post-v1.0 motion
+equations also remain unresolved. None may be resolved from private benchmark
+values or by adding premature abstraction.

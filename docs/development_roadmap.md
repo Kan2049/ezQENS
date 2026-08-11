@@ -2,7 +2,9 @@
 
 ## 1. Roadmap philosophy
 
-QENSfit is developed incrementally as a small, focused, scientifically transparent QENS analysis toolkit.
+ezQENS is developed incrementally as a lightweight, focused, scientifically
+transparent QENS analysis application for experts and non-experts. It targets
+ordinary CPU-based macOS and Windows laptops; Linux is best-effort.
 
 The roadmap follows **rolling refinement**:
 
@@ -24,8 +26,32 @@ The guiding principles are:
 7. Future data sources should converge on the common `ReducedDataset` / `Spectrum` boundary.
 8. Scientific visualization should evolve alongside the analysis core rather than being postponed until the final GUI.
 9. Desktop GUI development should begin only after a complete single-Q scientific fitting path has been validated.
+10. For equally correct solutions, prefer fewer concepts, less code, fewer dependencies, lower resource use, and easier maintenance.
 
 When a milestone is completed, it is scientifically validated and frozen before development proceeds. The roadmap is then reviewed and may be adjusted according to newly discovered research needs.
+
+### 1.1 High-level progression
+
+The detailed milestone numbers retain their historical meaning. At product
+level, work progresses through four overlapping phases:
+
+1. **Phase I — Scientific foundation:** import, scientific data model, Q
+   assignment, selection/masking, resolution, convolution, single-Q fitting,
+   independent batch fitting, and basic derived quantities. The scientific core
+   becomes trustworthy.
+2. **Phase II — Complete QENS analysis:** validated FWHM, relaxation time, EISF,
+   component-Q outputs, selected temporal/spatial dynamics models, diagnostics,
+   visualization, and scientific output. Individual Phase-II dynamics models
+   may be scheduled before or after the first public release by later owner
+   decision; no large catalogue is implied.
+3. **Phase III — ezQENS application and v1.0 readiness:** progressively guided
+   and advanced GUI workflows, usability, export, lightweight reproducibility,
+   documentation, and macOS/Windows packaging. This culminates in the special
+   v1.0 public-release gate.
+4. **Phase IV — Expansion:** additional formats/instruments, richer output,
+   additional dynamics, raw reduction, temperature workflows, molecular
+   structure input, and advanced automation. These do not burden earlier
+   architecture without a concrete requirement.
 
 ---
 
@@ -396,13 +422,57 @@ After Milestone 6, the desktop GUI may become the primary interactive workflow w
 
 ---
 
-## 10. Later scientific capabilities — provisional
+## 10. Special Milestone — ezQENS v1.0 First Public Release
+
+This release gate follows validation of the reduced-data scientific core. It
+passes only when an external real user, including a non-QENS expert, can use a
+guided workflow to complete a reduced-data analysis end to end on an ordinary
+macOS or Windows laptop, inspect warnings and results, and export the analysis.
+
+Required release capabilities are:
+
+* a guided, responsive desktop GUI that delegates all science to the same
+  GUI-independent Python core;
+* useful scientific export;
+* lightweight reproducibility information identifying inputs, selections and
+  masks, model and fit settings, results, warnings, and software version;
+* clear user and scientific documentation;
+* validated macOS and Windows packages; and
+* real-workflow validation centered on DAVE- and Mantid-preprocessed data,
+  including representative PSI FOCUS and ILL IN5/IN16 workflows where
+  available, without instrument-specific core assumptions.
+
+Detailed GUI, export, reproducibility, and packaging milestones are defined
+through rolling refinement when they become active. A complex project archive,
+raw-data reduction, automatic molecular interpretation, and a large mandatory
+dynamics-model catalogue do not gate v1.0. A selected dynamics model gates the
+release only if the owner explicitly promotes it into release scope.
+
+---
+
+## 11. Later scientific capabilities — provisional
 
 The following directions are expected but intentionally not fully specified.
 
-Their order may change according to scientific need.
+Their order relative to the first public release may change according to
+scientific need and explicit owner decisions.
 
-### Motion-model analysis
+### Selected QENS dynamics analysis
+
+Potential scientifically approved temporal or spatial analyses include:
+
+* diffusion and jump-diffusion models;
+* characteristic or residence times;
+* rotational or reorientational dynamics;
+* EISF geometry models;
+* confined or localized motion; and
+* other concrete QENS dynamics models justified by real workflows.
+
+Each model is added locally only after its equations, parameters, references,
+diagnostics, and validation cases are approved. Do not create a generic model
+registry or mandatory catalogue.
+
+### Automatic molecular or structure-driven analysis
 
 Potential capabilities include:
 
@@ -412,7 +482,11 @@ Potential capabilities include:
 * fitting theoretical EISF models against experimental EISF;
 * comparison of candidate motion models.
 
-Candidate models such as C2, C4, isotropic reorientation, or later alternatives are implemented only after their equations, parameter meanings, and reference cases are scientifically reviewed.
+Automatic generation or inference of candidates from coordinates, symmetry, or
+molecular structure is a substantially later capability. Candidate models such
+as C2, C4, isotropic reorientation, or later alternatives are implemented only
+after their equations, parameter meanings, and reference cases are
+scientifically reviewed.
 
 ### Additional QENS analysis tools
 
@@ -428,9 +502,10 @@ These capabilities are added only when concrete research use cases require them.
 
 ---
 
-## 11. Future data-source and reduction capabilities — provisional
+## 12. Post-v1.0 data-source and reduction capabilities — provisional
 
-QENSfit should remain capable of expanding upstream from reduced-data analysis toward raw-data workflows.
+ezQENS may later expand upstream from reduced-data analysis toward raw-data
+workflows. Raw reduction is not required for v1.0.
 
 Possible future sources include:
 
@@ -464,27 +539,28 @@ The existing reduced-data workflow must remain usable independently of future ra
 
 ---
 
-## 12. Future application capabilities — provisional
+## 13. Post-v1.0 application capabilities — provisional
 
 Possible later product work includes:
 
 * richer scientific plotting;
 * publication-oriented export;
-* project save/reload;
-* reproducible analysis records;
+* richer project save/reload beyond v1.0 lightweight reproducibility;
 * expanded desktop workflows;
-* macOS and Windows packaging;
-* public release and documentation.
+* additional platform packaging.
 
 These capabilities consume the validated scientific core rather than redefine scientific behavior.
 
-Project-container, migration, packaging, security, and long-term persistence architecture are designed only when those capabilities become active.
+The final project-container format and extension remain unresolved. Container,
+migration, security, and long-term persistence architecture are designed only
+when those capabilities become active; the former `.qensfit` proposal is not a
+permanent contract.
 
 They are not current scientific-core requirements.
 
 ---
 
-## 13. Cross-cutting requirements
+## 14. Cross-cutting requirements
 
 At every active milestone:
 
@@ -507,7 +583,7 @@ Scientific visualization should be treated as part of validation and usability, 
 
 ---
 
-## 14. Milestone completion and freeze procedure
+## 15. Milestone completion and freeze procedure
 
 Every milestone follows the same completion cycle:
 
@@ -552,9 +628,9 @@ A frozen milestone should not be reopened merely to anticipate distant functiona
 
 ---
 
-## 15. Roadmap maintenance
+## 16. Roadmap maintenance
 
-This roadmap is intentionally not a complete version-1 implementation specification.
+This roadmap is intentionally not a complete v1.0 implementation specification.
 
 When a milestone becomes the next active milestone:
 
