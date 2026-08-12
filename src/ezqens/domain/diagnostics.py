@@ -1,4 +1,4 @@
-"""Structured, privacy-safe diagnostics for reduced-data import."""
+"""Structured, privacy-safe diagnostics for scientific workflows."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import Final
 
 
 class DiagnosticSeverity(StrEnum):
-    """Severity of an import or format-detection diagnostic."""
+    """Severity of a structured scientific diagnostic."""
 
     INFO = "info"
     WARNING = "warning"

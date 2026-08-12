@@ -80,7 +80,8 @@ validated.
   an intensity baseline shift.
 - Unweighted and logarithmic relative losses are not defaults.
 - Evaluate the elastic term directly as `A_elastic * R_Q(E - E0)` using the
-  selected, optionally baseline-corrected, unit-area measured resolution.
+  selected, unit-area measured resolution. Milestone 3 performs no baseline
+  subtraction, clipping, or recentering.
   Never construct a grid-dependent numerical delta spike for production fits.
 - Evaluate each quasielastic term as a unit-area Lorentzian convolved with the
   measured resolution and multiplied by its integrated area. Preserve area
@@ -203,6 +204,18 @@ Milestone 2 adds dataset-level `QBins`, approved uniform edge generation and
 DAVE Q-bin parsing, per-group inclusive fitting ranges, derived fitting-point
 selection, and small GUI-independent inspection plots. It does not add Q
 rebinning, manual single-point masks, whole-Q exclusions, fitting, or GUI state.
+
+Milestone 3 prepares measured resolution only. It requires exact ordered
+sample/resolution Q identity, detects resolution padding independently, derives
+default support from valid measured bounds, applies resolution `AUTO` padding
+by default while keeping it explicitly reversible, retains `REVIEW`, validates
+the retained measured grid, and normalizes each Q kernel by trapezoidal area on
+its original coordinates. Support and AUTO-application state remain distinct;
+invalid energy/intensity cannot be overridden. An internal invalid measured
+point blocks preparation rather than being dropped and bridged. Source arrays
+stay immutable and normalized arrays are derived. Sample fitting ranges do not
+define resolution support. M3 performs no interpolation, convolution, baseline
+subtraction, energy recentering, fitting, GUI work, or analytic fallback.
 
 Do not begin GUI implementation before the importer, resolution processing,
 numerical convolution, and single-spectrum fitting are validated. AIC/AICc

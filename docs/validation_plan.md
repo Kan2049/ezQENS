@@ -202,7 +202,7 @@ Validate numerical convolution before using it in fitting:
 - kernel unit-area normalization is verified numerically;
 - different sample/resolution grid lengths and spacings behave as specified;
 - boundary and padded-tail detection does not modify originals; and
-- exact versus explicitly selected nearest-Q association is traceable.
+- prepared measured-resolution input retains exact ordered Q association.
 
 Tests cover odd/even lengths and energy-center offsets. Tolerances are expressed
 in absolute/relative terms and tied to grid spacing and floating-point error.
@@ -308,22 +308,37 @@ Create independent synthetic resolution inputs with valid central peaks,
 nonfinite values, constant offsets, nonuniform grids, and repeated boundary
 padding. Validate:
 
-- detection versus mutation separation;
-- `AUTO` padding is reversible and exactly point-masked;
-- `REVIEW` padding remains decision-gated;
-- mandatory manual valid-range selection and its authoritative use;
-- original and selected ranges are both inspectable;
-- optional suggested-range rationale and explicit confirmation;
-- optional baseline correction;
-- unit-area normalization and failure on invalid area;
-- uniform-grid interpolation under the approved method;
-- original/processed separation;
-- exact and user-selected nearest-Q association; and
-- full processing audit history.
+- exact sample/resolution Q count, order, representative-value, and known-edge
+  matching within the fixed small tolerance;
+- clear count/value/edge failure with no reordering, nearest-Q matching, or
+  repair;
+- independent sample and resolution padding results;
+- matching retained boundaries and warning-only mismatch diagnostics without
+  mask mutation;
+- resolution `AUTO` exclusion from normalization and source-grid kernel
+  contribution by default, independently of support;
+- explicit per-group AUTO disabling restores otherwise valid points while a
+  support-only change does not alter AUTO application;
+- `REVIEW` retention by default;
+- explicit support overrides distinct from sample fitting ranges;
+- unit-area trapezoidal normalization on uniform and nonuniform measured grids;
+- integrated-area rather than peak-height normalization;
+- explicit failure on nonfinite, zero, and negative areas;
+- finite, strictly increasing, unique accepted coordinates and enough points;
+- blocking internal invalid energy/intensity holes without interpolation or a
+  trapezoidal bridge, while support may exclude invalid boundary regions;
+- original arrays and masks unchanged and referenced by prepared state;
+- accepted energy coordinates unchanged, demonstrating no M3 interpolation;
+- original uncertainty retained and normalized by the deterministic factor,
+  with invalid uncertainty never replaced by zero; and
+- inspection plots consuming the authoritative prepared state.
 
 No fixed padding value is approved. The `edge-padding-v2.0.0` detector uses the
 small explicit rule in `scientific_conventions.md`; changes require versioned
-tests and scientific-owner review. Interpolation algorithms remain unresolved.
+tests and scientific-owner review. M3 performs no baseline treatment,
+recentring, or interpolation. Milestone 4 validates the common numerical grid,
+interpolation, and convolution boundary behavior separately. Normalization-area
+covariance propagation and analytic resolution sources remain deferred.
 
 ## 6. Fit diagnostics validation
 
@@ -449,8 +464,11 @@ and scientific inspection plots. Generic custom mapping remains deferred.
 
 ### Gate B: resolution and convolution
 
-Approved processing policies; independent direct/FFT agreement; no wrap-around;
-original preservation; auditable group association.
+Milestone 3 first gates exact Q association, independent resolution support and
+padding, original preservation, measured-grid validation, positive finite
+trapezoidal area, unit normalization, and inspectable diagnostics. Milestone 4
+then separately gates independent direct/FFT agreement, interpolation policy,
+area preservation, and no wrap-around.
 
 ### Gate C: single-spectrum science
 

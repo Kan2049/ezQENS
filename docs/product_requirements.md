@@ -225,8 +225,8 @@ free-fit values for elastic integrated area, each Lorentzian integrated area
 and FWHM, energy-center shift, and background parameters. Every parameter must
 have an initial value, lower and upper bounds, and a fixed/free state.
 
-After valid-range selection, optional approved constant-baseline correction,
-and unit-area normalization, let the measured resolution be `R_Q(E)`. Evaluate
+After accepted-support selection and unit-area normalization, let the measured
+resolution be `R_Q(E)`. Evaluate
 the elastic contribution directly as:
 
 ```text
@@ -292,24 +292,43 @@ rule must at minimum require positive statistical degrees of freedom.
 
 ## 7. Resolution processing
 
-The system retains original and processed resolution data separately. The first
-implementation makes manual valid-range selection mandatory and authoritative.
-It supports invalid-value detection, optional explicit constant-baseline
-correction, explicit validated unit-area normalization, energy-grid validation,
-interpolation to a uniform internal grid, sample-to-resolution Q-group
-association, exact or explicitly selected nearest-Q matching, numerical
-convolution protected against circular FFT wrap-around, and recorded processing
-decisions.
+Milestone 3 retains the immutable imported resolution dataset and stores only
+minimal preparation state referencing it. Sample and resolution Q bins must
+match one-to-one in count, order, representative values, and known edges within
+small fixed floating-point tolerances. No group reordering, nearest-Q matching,
+Q interpolation, or silent repair is supported.
 
-`AUTO` edge-padding masks from the preprocessing service may be default-on and
-remain reversible. `REVIEW` masks are never applied without an explicit later
-user decision. Neither replaces mandatory, authoritative manual resolution
-valid-range selection. The processing preview should show original range,
-automatic and review masks, selected range, invalid points, baseline setting,
-normalization result, and warnings.
-Normalization fails when no finite positive integral exists.
+Edge-padding detection runs independently on resolution spectra. Resolution
+`AUTO` padding is excluded from the kernel and normalization by default, while
+remaining explicitly reversible per Q. Disabling AUTO application restores its
+otherwise valid points only when they are inside the independently selected
+support. A support edit alone does not disable AUTO. `REVIEW` remains accepted
+by default and visible; invalid energy/intensity is never restored. Default
+support uses valid measured bounds and can be replaced by an explicit per-group
+resolution support. It is not the sample fitting range. Sample/resolution
+retained boundaries are compared diagnostically without forcing either mask.
 
-The complete imported energy range must never be assumed physically valid.
+Each accepted Q-specific resolution is normalized independently to unit
+integrated area by trapezoidal integration over its actual measured energy
+coordinates. The original grid is preserved; M3 does not interpolate sample or
+resolution data. Normalization fails on fewer than two usable points,
+non-increasing or duplicate accepted energy coordinates, or a nonfinite,
+zero, or negative integral. An internal invalid energy/intensity point inside
+the selected support is a blocking hole and is not dropped, interpolated, or
+bridged by trapezoidal integration. Boundary invalid points excluded by support
+do not block preparation. Sample spectra are never normalized by this operation.
+
+M3 performs no default or automatic baseline subtraction, tail estimate,
+negative-value clipping, curve shifting, peak finding, or energy recentering.
+Original uncertainty is retained; derived normalized uncertainty uses the same
+deterministic scale factor, without covariance propagation for the estimated
+area. The measured kernel is initially fixed for fitting. Uniform internal-grid
+interpolation, numerical convolution, and wrap-around protection belong to
+Milestone 4.
+
+The complete imported energy range is not presumed valid. A future explicit
+baseline treatment and a future analytic Gaussian/Lorentzian/ideal resolution
+source remain deferred capabilities, not M3 behavior.
 
 ## 8. Derived quantities and later dynamics analysis
 

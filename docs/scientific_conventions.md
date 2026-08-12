@@ -117,8 +117,9 @@ Elastic and Lorentzian amplitude parameters used for EISF are integrated areas,
 not peak heights. Component identifiers and individual quasielastic areas must
 be retained even when an aggregate is displayed.
 
-Let `R_Q(E)` be the measured resolution after manual valid-range selection,
-optional approved constant-baseline correction, and unit-area normalization.
+Let `R_Q(E)` be the measured resolution after accepted-support selection and
+unit-area normalization. Milestone 3 applies no baseline subtraction, clipping,
+or energy shift.
 The elastic contribution is evaluated directly as:
 
 ```text
@@ -286,36 +287,62 @@ history is not required for v1.0.
 ## 9. Resolution processing and convolution
 
 Resolution may originate from vanadium or a low-temperature sample. Original
-arrays are immutable and stored separately from processed arrays.
+arrays are immutable. A Milestone-3 prepared resolution references the original
+`Spectrum`/`ReducedDataset` and stores minimal support, normalization,
+association, and diagnostic state rather than duplicate original arrays.
 
-The first implementation supports:
+Sample and resolution datasets require exact ordered one-to-one Q association:
+equal group counts and representative values, plus equal edges when explicitly
+known on both. Fixed relative tolerance `1e-10` and absolute tolerance `1e-12`
+in `Å^-1` allow harmless representation noise only. No reordering, nearest-Q
+matching, Q interpolation, or repair occurs.
 
-1. Detection and flagging of invalid values, NaNs, and infinities.
-2. Mandatory, authoritative manual valid-range selection.
-3. Optional explicit constant-baseline correction.
-4. Explicit unit-area normalization.
-5. Energy-grid validation.
-6. Interpolation onto a uniform internal grid.
-7. Explicit association with sample Q groups.
-8. Exact group matching or explicitly selected nearest-Q matching.
-9. Numerical convolution with protection against circular FFT wrap-around.
+Padding detection runs independently on sample and resolution. Resolution
+`AUTO` points do not enter the prepared kernel or its normalization and have
+conceptual zero kernel contribution by default. AUTO application is an
+independent per-group boolean state and is reversible: explicitly disabling it
+restores otherwise valid AUTO-marked points inside the selected support. A
+support change alone does not disable AUTO. `REVIEW` remains accepted by
+default. Invalid energy/intensity is non-overridable; invalid uncertainty
+remains visible and is never replaced with zero. The default support spans the
+valid measured bounds, independently of AUTO application. Resolution support is
+distinct from the sample fitting range.
 
-The full imported resolution range is not presumed physically valid. Processing
-order, parameters, array references, warnings, and user choices are auditable.
-Normalization must fail clearly when a finite positive normalization area
-cannot be established.
+Sample and resolution AUTO-retained boundaries are compared per associated Q
+as a warning-only consistency diagnostic using fixed relative tolerance
+`1e-10` and absolute tolerance `1e-12` in the energy unit. A disagreement does
+not modify either mask.
 
-`AUTO` boundary-padding masks may be default-on while remaining reversible.
-`REVIEW` masks still require a recorded later decision. Neither changes
-original values nor replaces
-mandatory manual resolution valid-range selection. The processing preview
-exposes original range, auto-padding mask, optional suggestion, selected range,
-invalid points, baseline setting, normalization result, and warnings.
+For accepted measured coordinates `(E_j, I_j)`, Milestone 3 uses trapezoidal
+integration on the actual, possibly nonuniform grid:
 
-Uniform-grid spacing, interpolation method, baseline-estimation method,
-convolution boundary treatment, kernel centering, and normalization integration
-rule remain unresolved. These must be validated independently before
-single-spectrum fitting is accepted.
+```text
+area_Q = trapezoid(I_j, E_j)
+R_Q(E_j) = I_j / area_Q
+sigma_R_Q(E_j) = sigma_j / area_Q
+```
+
+The area must be finite and strictly positive. Accepted coordinates must be
+finite, strictly increasing, unique, and contain at least two usable points.
+If invalid energy/intensity occurs between the first and last measured indices
+selected by the support, preparation fails with a blocking diagnostic. The
+invalid point is not deleted and valid neighbors are not connected across it;
+M3 performs no interpolation or implicit trapezoidal bridge. Invalid boundary
+regions may instead be excluded explicitly by the support.
+Normalization is by integrated area, never peak height. Sample spectra are not
+normalized. Uncertainty in `area_Q` is not propagated into a covariance matrix;
+M3/M4/M5 initially treat the measured kernel as fixed.
+
+M3 preserves the accepted original measured grid and does not interpolate
+sample or resolution data. It performs no baseline subtraction or estimate,
+negative-intensity clipping, curve shift, automatic elastic-peak detection, or
+energy recentering. Alignment is inspected against the unchanged `E = 0`
+reference. A future explicit common energy transformation remains unresolved.
+
+Milestone 4 owns the temporary uniform convolution grid, interpolation of the
+resolution and theory, linear-convolution boundary treatment, and evaluation
+back on original sample points. A future analytic Gaussian, Lorentzian, or
+ideal resolution source is also deferred and has no M3 registry or fallback.
 
 ## 10. Post-v1.0 molecular coordinates — provisional
 

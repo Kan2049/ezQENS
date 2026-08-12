@@ -12,7 +12,12 @@ from matplotlib.patches import Rectangle
 
 from ezqens.domain import QBins, ReducedDataset, Spectrum, SpectrumRole
 from ezqens.preprocessing import FittingSelection, detect_edge_padding
-from ezqens.visualization import plot_q_bins, plot_spectrum_inspection
+from ezqens.resolution import prepare_measured_resolution
+from ezqens.visualization import (
+    plot_q_bins,
+    plot_resolution_inspection,
+    plot_spectrum_inspection,
+)
 
 
 def make_selection() -> FittingSelection:
@@ -98,6 +103,83 @@ def test_spectrum_plot_reflects_group_range_q_and_selection_without_mutation() -
     assert "Retained for later fitting" in labels
     for current, original in zip(
         (spectrum.energy, spectrum.intensity, spectrum.uncertainty),
+        originals,
+        strict=True,
+    ):
+        np.testing.assert_array_equal(current, original)
+    plt.close(figure)
+
+
+def test_resolution_plot_consumes_prepared_state_without_mutation() -> None:
+    energy = np.arange(-5.0, 5.0)
+    q_bins = QBins.from_q_values([0.5])
+    sample_spectrum = Spectrum(
+        role=SpectrumRole.SAMPLE,
+        group_index=0,
+        group_label="sample-group",
+        energy=energy,
+        intensity=np.linspace(1.0, 2.0, energy.size),
+        uncertainty=np.full(energy.size, 0.2),
+        energy_unit="meV",
+        intensity_unit="counts",
+        uncertainty_unit="counts",
+    )
+    resolution_spectrum = Spectrum(
+        role=SpectrumRole.RESOLUTION,
+        group_index=0,
+        group_label="resolution-group",
+        energy=energy,
+        intensity=np.array([10.0] * 5 + [1.0, 3.0, 4.0, 2.0, 1.0]),
+        uncertainty=np.full(energy.size, 0.2),
+        energy_unit="meV",
+        intensity_unit="counts",
+        uncertainty_unit="counts",
+    )
+    sample = ReducedDataset(
+        role=SpectrumRole.SAMPLE,
+        spectra=(sample_spectrum,),
+    ).assign_q_bins(q_bins)
+    resolution = ReducedDataset(
+        role=SpectrumRole.RESOLUTION,
+        spectra=(resolution_spectrum,),
+    ).assign_q_bins(q_bins)
+    originals = tuple(
+        value.copy()
+        for value in (
+            resolution_spectrum.energy,
+            resolution_spectrum.intensity,
+            resolution_spectrum.uncertainty,
+        )
+    )
+    prepared = prepare_measured_resolution(sample, resolution)
+
+    figure, axes = plot_resolution_inspection(prepared, 0)
+
+    assert isinstance(figure, Figure)
+    assert len(axes) == 2
+    source_labels = axes[0].get_legend_handles_labels()[1]
+    normalized_labels = axes[1].get_legend_handles_labels()[1]
+    assert "Original measured resolution" in source_labels
+    assert "Accepted kernel points" in source_labels
+    assert "AUTO padding (excluded)" in source_labels
+    assert "Corresponding sample (alignment only)" in source_labels
+    assert "E = 0" in source_labels
+    assert "Unit-area measured resolution" in normalized_labels
+    normalized_line = next(
+        line
+        for line in axes[1].lines
+        if line.get_label() == "Unit-area measured resolution"
+    )
+    np.testing.assert_array_equal(
+        np.asarray(normalized_line.get_xdata(), dtype=np.float64),
+        prepared.spectra[0].energy,
+    )
+    for current, original in zip(
+        (
+            resolution_spectrum.energy,
+            resolution_spectrum.intensity,
+            resolution_spectrum.uncertainty,
+        ),
         originals,
         strict=True,
     ):

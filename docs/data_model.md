@@ -204,12 +204,37 @@ separate future concepts and are not Milestone-2 state.
 
 ### 4.3 ResolutionDataset and processing values — milestone 3
 
-Keep original resolution spectra separate from every processed result. Minimal
-processing values record authoritative manual valid range, optional approved
-baseline setting, unit-area normalization result, grid/interpolation settings,
-group association, and diagnostics. Normalization requires a finite positive
-integral. Edge-padding masks remain reversible and do not replace manual range
-selection.
+`PreparedResolution` is the measured-resolution-only dataset result. It
+references the immutable sample and resolution `ReducedDataset` values, their
+independently calculated `EdgePaddingDetectionResult` values, one ordered
+`PreparedResolutionSpectrum` per resolution group, per-Q padding comparisons,
+and privacy-safe diagnostics. Association is by exact existing group/Q order;
+Q values remain dataset-level and are not copied into `Spectrum`.
+
+`PreparedResolutionSpectrum` references its original resolution `Spectrum`,
+its resolution-specific padding result, one `ResolutionSupport`, the raw
+normalization integral, its reciprocal factor, the declared trapezoidal method,
+and local diagnostics. It does not store copies of original or normalized
+arrays. Accepted masks, accepted original coordinates, normalized intensity,
+scaled uncertainty, normalized integral, and a source-grid representation with
+zero outside accepted support are derived read-only properties.
+
+`ResolutionSupport` is a finite inclusive energy interval distinct from sample
+`FittingRange`. Its source is either the default valid measured bounds or an
+explicit override. `PreparedResolutionSpectrum.auto_padding_applied` is a
+separate boolean that defaults to true and can explicitly restore otherwise
+valid AUTO-marked points inside the support. Changing support alone does not
+change this state. `REVIEW` remains accepted by default. Invalid
+energy/intensity is non-overridable; invalid uncertainty stays inspectable and
+is scaled as supplied rather than replaced or included in normalization-area
+covariance propagation.
+
+The accepted measured energy coordinates contain at least two finite, strictly
+increasing, unique points. An invalid energy/intensity point between the first
+and last coordinates selected by the support is a blocking internal hole; it is
+not removed and bridged during trapezoidal integration. Trapezoidal area must
+be finite and positive. No baseline, interpolation, FFT/convolution,
+recentring, fit, optimizer, cache, or GUI state belongs to these values.
 
 ### 4.4 Spectral and convolution values — milestones 4–5
 
@@ -270,7 +295,7 @@ EdgePaddingDetectionResult -> ordered SpectrumPaddingResult
 SpectrumPaddingResult -> one Spectrum by group order/identity
 
 future milestone sequence:
-ReducedDataset + QBins -> FittingSelection -> processed resolution
+ReducedDataset + QBins -> FittingSelection + PreparedResolution
   -> FitConfiguration -> FitResult -> BatchFitResult
   -> DerivedQENSResult -> reports/exports + lightweight reproducibility
 
@@ -295,6 +320,11 @@ molecular/structure input -> automatic candidate inference
   independent of invalid masks.
 - Q bins are dataset-level, count-aligned, immutable, and absent from `Spectrum`.
 - Per-group fitting ranges and derived masks preserve all original arrays.
+- Prepared resolution references immutable sources, applies reversible
+  resolution `AUTO` exclusion by default, retains `REVIEW`, and normalizes
+  independently per Q.
+- Exact ordered sample/resolution Q identity is required; nearest-Q association
+  and Q interpolation are absent.
 - No Q rebinning, interpolation, baseline shift, or silent repair occurs.
 - Future sources can produce `ReducedDataset` without a predeclared framework.
 
@@ -305,7 +335,9 @@ instrument protocols, plugin systems, generic reduction factories, GUI state,
 or current persistence classes.
 
 Still unresolved are detailed general DAVE grammar, explicit-list comment
-syntax, resolution/convolution policies, covariance and AIC/AICc
-conventions, Bragg heuristics, and any future project format. Post-v1.0 motion
-equations also remain unresolved. None may be resolved from private benchmark
-values or by adding premature abstraction.
+syntax, Milestone-4 convolution-grid/interpolation/centering policies, any
+future explicit resolution baseline or energy-recentering operation,
+normalization-integral covariance propagation, analytic resolution sources,
+covariance and AIC/AICc conventions, Bragg heuristics, and any future project
+format. Post-v1.0 motion equations also remain unresolved. None may be resolved
+from private benchmark values or by adding premature abstraction.

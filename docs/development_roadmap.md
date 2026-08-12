@@ -232,38 +232,51 @@ Validate:
 
 ---
 
-## 5. Milestone 3 — Measured-resolution preparation
+## 5. Milestone 3 — Measured-resolution preparation (completed)
 
 ### Goal
 
-Prepare measured resolution data for numerical convolution while preserving the original measurement.
+Prepare measured resolution data for later numerical convolution while
+preserving and referencing the immutable original measurement.
 
-Expected capabilities include:
+The completed implementation covers:
 
-* resolution valid-range selection;
-* integration with existing invalid and padding masks;
-* optional explicitly requested baseline handling;
-* unit-area normalization;
-* energy-grid validation;
-* association between sample and resolution spectra;
-* preparation of the resolution representation needed by convolution.
+* exact ordered sample/resolution Q association, including known-edge checks;
+* independent sample and resolution edge-padding detection;
+* warning-only comparison of AUTO-retained energy boundaries;
+* default resolution support derived from valid measured bounds;
+* explicit immutable per-group support overrides distinct from sample ranges;
+* default-on, reversible per-group `AUTO` application independent of support;
+* default retention of `REVIEW` and non-overridable invalid energy/intensity;
+* strict accepted-grid validation without interpolation or reordering;
+* blocking diagnostics for internal invalid energy/intensity holes, with no
+  deletion or trapezoidal bridging;
+* independent per-Q unit-area trapezoidal normalization on actual coordinates;
+* derived read-only normalized intensity and scaled uncertainty;
+* explicit failure for unusable grids and nonfinite/nonpositive area; and
+* minimal Python/Jupyter inspection of support, masks, Q association,
+  normalization, retained-boundary comparison, and unchanged energy alignment.
 
-Original and processed resolution data remain distinct.
+The prepared value references source datasets/spectra and stores only support,
+normalization, association, and diagnostic state. Normalized arrays are derived,
+not persisted as duplicate scientific state. Sample spectra are not normalized.
 
-Exact normalization, interpolation, association, and valid-range policies will be specified and scientifically validated immediately before this milestone is implemented.
-
-Do not build speculative instrument-specific resolution frameworks.
+M3 does not perform baseline subtraction, energy recentering, interpolation,
+convolution, fitting, GUI work, or analytic-resolution fallback. Uniform-grid
+construction and interpolation remain Milestone 4 responsibilities. A future
+explicit baseline operation and analytic Gaussian/Lorentzian/ideal resolution
+source remain deferred. Do not build speculative instrument or resolution-source
+frameworks.
 
 ### Scientific visualization
 
 Add resolution-specific inspection including:
 
 * original measured resolution;
-* selected valid range;
-* invalid/padding regions;
-* optional baseline treatment;
+* accepted support and invalid/`AUTO`/`REVIEW` states;
 * normalized resolution;
-* sample-resolution association.
+* exact sample-resolution Q association and retained-boundary comparison; and
+* unchanged `E = 0` alignment inspection.
 
 These plots form part of scientific validation and must remain accessible outside the GUI.
 

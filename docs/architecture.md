@@ -78,7 +78,7 @@ ezqens/
   io/
     importers/         reduced DAVE and generic ASCII inputs
     exporters/         tables, machine-readable output, review reports
-  preprocessing/       input validation, ranges, masks, baseline operations
+  preprocessing/       input validation, ranges, masks, explicit transforms
   resolution/          resolution processing and sample-group association
   spectral/            component definitions and spectral evaluation
   convolution/         grid construction and linear numerical convolution
@@ -178,14 +178,23 @@ and a compact reason. Internal candidates and calculations are not public
 domain state. The service never shifts intensity values or treats an internal
 constant segment as edge padding.
 
-`resolution` retains originals and makes manual valid-range selection
-mandatory and authoritative in the first implementation. It applies explicit
-optional baseline correction and validated unit-area normalization, validates
-grids, builds uniform processed grids, and associates sample and resolution
-groups. Exact versus user-selected nearest-Q association is explicit.
-`AUTO` padding may be default-on but reversible; `REVIEW` requires a later user
-decision. Neither mutates originals or replaces
-manual resolution valid-range selection.
+`resolution` implements the measured-resolution-only Milestone-3 boundary. It
+requires exact ordered sample/resolution Q identity, runs padding detection
+independently on both datasets, compares retained boundaries diagnostically,
+represents a distinct per-Q resolution support, validates accepted measured
+coordinates, and derives unit-area normalization on the original grid.
+
+The prepared result references the immutable source datasets and stores only
+support, normalization metadata, Q association by order, and diagnostics.
+Normalized energy/intensity/uncertainty and source-grid contribution are
+derived read-only properties. Resolution `AUTO` padding is applied by default
+but has an independent reversible per-group application state; changing support
+alone does not disable it. `REVIEW` remains accepted by default and invalid
+energy/intensity remains non-overridable. An internal invalid point inside the
+selected support blocks preparation rather than creating a trapezoidal bridge.
+Sample fitting ranges do not enter this state. There is no baseline operation,
+interpolation, convolution, recentering, nearest-Q association, caching, or
+analytic fallback in M3.
 
 ### 3.4 Spectral models and convolution
 
@@ -200,10 +209,11 @@ delta. Each quasielastic evaluator returns
 linewidth. Convolution preserves integrated areas within reviewed finite-grid
 tolerance.
 
-`convolution` performs numerical linear convolution on validated compatible
-grids. Any FFT implementation pads sufficiently and crops deliberately to
-avoid circular wrap-around. Grid, centering, interpolation, padding, and
-normalization choices are explicit inputs and provenance.
+`convolution` will perform numerical linear convolution on validated compatible
+grids. Milestone 4 owns temporary common-grid construction, interpolation of
+prepared resolution and theory, sufficient padding, deliberate cropping, and
+evaluation back on the unchanged sample grid. Its centering, interpolation,
+padding, and finite-grid tolerances remain explicit future decisions.
 
 ### 3.5 Fitting, diagnostics, and batch execution
 
@@ -296,7 +306,8 @@ uniform_q_bins(lower_q_edge, upper_q_edge, group_count) -> QBins
 parse_dave_q_bins(source) -> DAVEQBinsResult
 dataset.assign_q_bins(q_bins) -> ReducedDataset
 FittingSelection.uniform(dataset, padding, energy_bounds) -> FittingSelection
-process_resolution(original, configuration) -> ResolutionProcessingOutcome
+prepare_measured_resolution(sample, resolution, support_overrides)
+  -> PreparedResolution
 fit_spectrum(spectrum, resolution, configuration) -> FitResult
 fit_batch(spectra, resolution_map, configuration, cancellation) -> BatchFitResult
 derive_qens(batch_result, configuration) -> DerivedQENSResult
@@ -312,7 +323,7 @@ types can evolve before the internal API stabilizes.
 source-specific import or reduction
   -> immutable ReducedDataset + minimal source traceability
   -> dataset-level QBins + per-group FittingSelection
-  -> processed sample/resolution views + processing steps
+  -> sample fitting selection + prepared measured resolution
   -> per-Q spectral fit configurations/results
   -> derived FWHM/tau/EISF records
   -> reports/exports + lightweight reproducibility summary
