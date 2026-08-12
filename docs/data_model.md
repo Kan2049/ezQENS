@@ -238,6 +238,22 @@ recentring, fit, optimizer, cache, or GUI state belongs to these values.
 
 ### 4.4 Spectral and convolution values — milestones 4–5
 
+Milestone 4 adds two immutable computational values, not persistence entities.
+`ConvolutionPlan` contains copied read-only original sample target coordinates,
+the canonical-meV S1/4 spacing, zero-anchored intrinsic-model coordinates,
+temporary resolution coordinates and unit-area values, explicit full-output
+coordinates, the pre-correction representation area, FFT length, and fixed
+resolution transform. It derives the corrected numerical resolution area,
+full linear length, energy unit, and approximate temporary working memory.
+
+`ConvolvedProfile` contains one read-only full linear-convolution energy/value
+pair and its uniform spacing. It evaluates the fixed profile linearly at
+arbitrary finite target coordinates, including future `target - E0` queries,
+only when those coordinates remain inside the calculated physical domain.
+Neither value stores sample intensity/uncertainty, modifies source arrays,
+duplicates M3 normalized source state for persistence, or owns fit/model/Q/GUI
+policy.
+
 `SpectralModelDefinition` minimally describes one elastic component, one or
 more unit-area Lorentzians, constant or linear background, integrated-area
 amplitudes, and FWHM linewidths. `ParameterDefinition` supplies initial value,

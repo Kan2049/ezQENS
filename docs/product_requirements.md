@@ -330,6 +330,21 @@ The complete imported energy range is not presumed valid. A future explicit
 baseline treatment and a future analytic Gaussian/Lorentzian/ideal resolution
 source remain deferred capabilities, not M3 behavior.
 
+Milestone 4 consumes this prepared state on a temporary canonical-meV grid. It
+uses automatic S1/4 spacing, a model domain derived exactly from sample and
+resolution support bounds, linear measured-resolution interpolation with zero
+outside accepted support, and a representation-only unit-area correction. It
+performs full FFT linear convolution with explicit physical output coordinates
+and evaluates only the convolved theoretical model on the unchanged original
+sample energy coordinates. The grid remains fixed for future `E0` shifts.
+
+Narrow intrinsic Lorentzians use analytic cell-integrated probability density
+with FWHM input; intrinsic linewidth is not bounded below by instrumental
+resolution. Sample/resolution data are not recentered, missing tails are not
+extrapolated, and no analytic-resolution fallback is introduced. Unknown or
+uncanonicalized physical energy units block convolution rather than being
+guessed.
+
 ## 8. Derived quantities and later dynamics analysis
 
 Spectral outputs use FWHM linewidths. Relaxation time and experimental EISF,
@@ -396,6 +411,14 @@ supported imported metadata. It shows the resolved explicit Q list and compares
 its count with sample and applicable resolution spectra. Automatically
 detected formats and generated/imported mappings require confirmation.
 
+Future resolution/convolution inspection treats differing grids, spacings,
+ranges, moderate nonuniformity, and asymmetric support as supported information,
+not warnings by themselves. Warning candidates include possible incomplete
+resolution-peak containment, non-negligible accepted-boundary signal,
+suspiciously matching sample/resolution ends, padding/support mismatch, and
+common or relative elastic-line offsets. They never trigger automatic
+baseline subtraction, recentering, tail reconstruction, or Q changes.
+
 ## 10. Explicit v1.0 non-goals
 
 Version 1.0 excludes:
@@ -456,7 +479,6 @@ Version 1.0 is acceptable when:
 
 - Detailed accepted syntax within DAVE and generic ASCII layout families.
 - Blank-line/comment policy for explicit Q-list files.
-- Default uniform convolution grid and interpolation method.
 - Exact AIC/AICc likelihood convention and covariance-estimation policy.
 - Bragg-contamination warning heuristic.
 - Final public packaging, licensing, and Windows installer technology.

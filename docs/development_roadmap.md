@@ -282,7 +282,7 @@ These plots form part of scientific validation and must remain accessible outsid
 
 ---
 
-## 6. Milestone 4 — Resolution convolution
+## 6. Milestone 4 — Resolution convolution ✅
 
 ### Goal
 
@@ -290,19 +290,30 @@ Provide a validated GUI-independent numerical convolution core suitable for QENS
 
 The convolution path must support:
 
-* measured resolution functions;
-* explicit treatment of sample/resolution grid differences;
-* appropriate internal numerical grids;
-* interpolation of the resolution and theoretical model where required;
-* protection against circular FFT wrap-around;
-* preservation of integrated-area semantics;
-* evaluation of the final model on the original sample measurement grid.
+* the authoritative M3 prepared measured resolution and exact Q association;
+* canonical-meV coordinate validation with unknown units blocking;
+* automatic S1/4 spacing from sample/resolution median adjacent spacings;
+* the mathematically required model domain from sample and resolution bounds;
+* a fixed zero-anchored intrinsic-model lattice independent of future `E0`;
+* linear temporary-grid resolution interpolation, zero outside accepted
+  support, and representation-only unit-area correction;
+* a cell-integrated unit-area Lorentzian primitive safe below one grid cell;
+* explicit-coordinate full FFT linear convolution with one spacing factor and
+  padding of at least `N_model + N_resolution - 1`;
+* linear evaluation of only the convolved theory on original sample energies;
+* scale-aware, narrow-line, asymmetric-support, shift-phase, unit, and direct
+  reference validation; and
+* privacy-safe real-data runtime/memory and visual owner validation.
 
 The original sample data are never interpolated merely for residual evaluation.
 
 The elastic component follows the approved measured-resolution convention rather than using an artificial grid-dependent numerical delta spike.
 
-Detailed grid construction, interpolation, centering, padding, cropping, and numerical tolerances will be specified and independently validated at implementation time.
+Asymmetric support is supported and is not inherently a warning. Possible
+incomplete resolution-peak containment is retained as a future warning
+candidate without threshold, baseline, tail, recentering, or Q-repair logic in
+M4. Production implementation, automated and private owner validation, and the
+required code and scientific reviews are complete; Milestone 4 is frozen.
 
 ### Scientific visualization
 

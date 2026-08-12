@@ -12,7 +12,9 @@ only.
 
 ## 2. Axes, units, and identity
 
-- Energy transfer is represented in meV.
+- Energy transfer is represented canonically in meV. Physical convolution and
+  fitting require an explicitly known/canonicalized unit; an unknown or
+  unresolved energy unit is blocking rather than guessed.
 - Momentum transfer Q is represented in inverse angstrom (`Å^-1`).
 - Molecular Cartesian coordinates and radii are represented in angstrom.
 - Relaxation time is represented in picoseconds.
@@ -339,10 +341,67 @@ negative-intensity clipping, curve shift, automatic elastic-peak detection, or
 energy recentering. Alignment is inspected against the unchanged `E = 0`
 reference. A future explicit common energy transformation remains unresolved.
 
-Milestone 4 owns the temporary uniform convolution grid, interpolation of the
-resolution and theory, linear-convolution boundary treatment, and evaluation
-back on original sample points. A future analytic Gaussian, Lorentzian, or
-ideal resolution source is also deferred and has no M3 registry or fallback.
+Milestone 4 builds a temporary fixed physical grid for each exactly associated
+sample/resolution group. Its automatic spacing is:
+
+```text
+h = min(median positive sample spacing,
+        median positive prepared-resolution spacing) / 4
+```
+
+Both coordinate sequences must be finite and strictly increasing; they are not
+sorted, deduplicated, or repaired. For sample evaluation bounds
+`[E_sample_min, E_sample_max]` and accepted resolution support
+`[E_res_min, E_res_max]`, the required intrinsic-model domain is:
+
+```text
+model_min = E_sample_min - E_res_max
+model_max = E_sample_max - E_res_min
+```
+
+The zero-centered intrinsic-model lattice covers these bounds with no more
+than the deterministic spacing-alignment extension required at either side.
+It is fixed by physical coordinates and never moves with a future `E0` fit
+parameter. A future shift is evaluated as the fixed convolved profile at
+`E_sample - E0`.
+
+The accepted M3 resolution is linearly interpolated onto its temporary uniform
+representation, is exactly zero outside accepted support, and receives a small
+representation-only correction back to unit numerical area. This does not
+alter or reinterpret the M3 measurement. Resolution, theory, and sample energy
+coordinates are never recentered, and no missing tails are extrapolated.
+
+For Lorentzian FWHM `Gamma > 0`, M4 uses `gamma = Gamma / 2` locally and the
+analytic average probability density in each model-grid cell:
+
+```text
+L_bar_i = [atan((E_i + h/2 - E_c) / gamma)
+           - atan((E_i - h/2 - E_c) / gamma)] / (pi * h)
+```
+
+The intrinsic primitive defaults to `E_c = 0`. This cell-integrated form keeps
+the integrated-area meaning for lines much narrower than a grid cell; intrinsic
+FWHM is not bounded below by instrumental width. The implementation performs
+full FFT linear convolution with at least `N_model + N_resolution - 1` samples,
+multiplies by `h` exactly once, constructs output coordinates from the sum of
+the two input origins, and linearly evaluates only the convolved model on the
+unchanged original sample coordinates. Scale-aware profile, peak, FWHM,
+centroid, and area validation uses the provisional relative target of about
+`5e-4`; exact FFT/direct and normalization identities use tighter tolerances.
+
+Asymmetric accepted support is a supported normal condition and is not a
+warning by itself. Possible incomplete resolution-peak containment remains a
+future warning candidate informed by boundary signal, local rise, edge-region
+fraction, and related sample coverage. Future sample/resolution boundary
+comparisons use physical energy coordinates rather than matching array or bin
+indices across different grids. No universal threshold, baseline subtraction,
+tail reconstruction, recentering, or automatic Q change is approved. A future
+analytic Gaussian, Lorentzian, or ideal resolution source also remains deferred
+and has no M3/M4 registry or fallback.
+
+Finite model domains capture less than the infinite area of sufficiently broad
+Lorentzian tails. Future Milestone-5 amplitude semantics must account for this
+explicitly and must not silently renormalize a truncated numerical model array.
 
 ## 10. Post-v1.0 molecular coordinates — provisional
 

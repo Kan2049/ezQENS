@@ -209,11 +209,22 @@ delta. Each quasielastic evaluator returns
 linewidth. Convolution preserves integrated areas within reviewed finite-grid
 tolerance.
 
-`convolution` will perform numerical linear convolution on validated compatible
-grids. Milestone 4 owns temporary common-grid construction, interpolation of
-prepared resolution and theory, sufficient padding, deliberate cropping, and
-evaluation back on the unchanged sample grid. Its centering, interpolation,
-padding, and finite-grid tolerances remain explicit future decisions.
+`convolution` implements the Milestone-4 CPU numerical core as a reusable
+per-Q `ConvolutionPlan` plus a `ConvolvedProfile`. The plan is built from the
+authoritative ordered `PreparedResolution` association, validates canonical
+meV coordinates, constructs the automatic S1/4 zero-anchored model lattice,
+linearly represents and unit-area-corrects the measured resolution, and
+precomputes only its fixed FFT state. It exposes explicit model, resolution,
+and full-convolution coordinates rather than relying on implicit centering.
+
+The plan accepts a theoretical density already evaluated on its model grid,
+performs power-of-two-padded full FFT linear convolution with one spacing
+factor, and linearly evaluates a fixed convolved profile on original sample
+coordinates. The analytic cell-integrated Lorentzian is the only M4 spectral
+primitive because narrow-line correctness requires it. `ConvolutionPlan` does
+not contain fit parameters, model composition, optimizer, backend, registry,
+cache, GUI, recentering, analytic-resolution fallback, or source-specific Q
+policy. Future `E0` shifts change evaluation coordinates, not the plan/grid.
 
 ### 3.5 Fitting, diagnostics, and batch execution
 

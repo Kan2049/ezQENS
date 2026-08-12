@@ -187,25 +187,41 @@ against analytic integrals or a separately reviewed reference calculation.
 
 Validate numerical convolution before using it in fitting:
 
-- delta-like kernel reproduces the input within justified tolerance;
+- Gaussian × Gaussian, Lorentzian × Lorentzian, and Gaussian-resolution ×
+  Lorentzian cases agree with analytic or independent numerical references;
 - unit-area measured resolution multiplied directly by `A_elastic` integrates
   to the elastic area within tolerance;
 - elastic evaluation does not construct or depend on a discrete numerical
   delta spike;
 - a unit-area Lorentzian multiplied by `A_i` retains its integrated area after
   measured-resolution convolution within reviewed finite-grid tolerance;
-- constant/known signals have expected linear-convolution behavior;
-- symmetric kernels preserve approved centering;
-- direct discrete convolution agrees with the FFT path;
-- padding/cropping prevents signal appearing at the opposite boundary;
-- nonuniform grids are rejected or explicitly interpolated;
-- kernel unit-area normalization is verified numerically;
-- different sample/resolution grid lengths and spacings behave as specified;
+- ordinary, sub-cell, and approximately `FWHM/h = 0.05` Lorentzians match their
+  analytic cell probabilities and remain narrow-line safe relative to the
+  measured resolution;
+- direct discrete convolution agrees tightly with the power-of-two FFT path,
+  output coordinates begin at the sum of input origins, and padding prevents
+  circular signal at the opposite boundary;
+- the discrete calculation applies exactly one `h` factor and changing
+  numerical refinement does not systematically rescale area or peak;
+- nonuniform measured resolution is linearly represented with zero outside
+  support and a validated representation-only unit-area correction;
+- different sample/resolution grid lengths and spacings, asymmetric sample
+  intervals, asymmetric resolution support, and nonzero resolution peaks
+  behave without hidden recentering;
+- the derived model domain covers the original sample targets and only the
+  convolved model is linearly evaluated back on those coordinates;
+- a fixed plan supports sub-cell `E0/h` phases `0`, `0.1`, `0.25`, `0.5`,
+  `0.75`, and `0.9` with stable centroid, peak shape, FWHM, and area;
+- dimensionally equivalent problems remain stable from approximately `1e-3`
+  to `1` meV, and explicitly converted `25 µeV` and `0.025 meV` inputs agree;
+- repeated evaluation is deterministic and unusable/noncanonical coordinates
+  fail without sorting, repair, extrapolation, or unit guessing;
 - boundary and padded-tail detection does not modify originals; and
 - prepared measured-resolution input retains exact ordered Q association.
 
-Tests cover odd/even lengths and energy-center offsets. Tolerances are expressed
-in absolute/relative terms and tied to grid spacing and floating-point error.
+Scale-aware profile/peak/FWHM/centroid/area criteria target about `5e-4` where
+scientifically meaningful. Pure FFT/direct and normalization identities use
+tighter floating-point tolerances without fragile machine-epsilon equality.
 
 ### 3.5 Parameter-recovery tests
 
