@@ -107,8 +107,12 @@ than a misleading number.
 The measured-resolution-convolved model supports:
 
 - an elastic component;
-- one Lorentzian or multiple Lorentzians;
+- zero or more Lorentzian components, with no software-level count ceiling;
 - a constant or linear background.
+
+Automatic initialization and recommendation above the currently validated
+standard candidate scope are not implied by this arbitrary-N scientific-model
+capability.
 
 For each Q spectrum, free fitting permits independent elastic integrated area,
 Lorentzian integrated area, Lorentzian FWHM, energy-center shift, and
@@ -186,10 +190,10 @@ invalid-data mask. They must not be replaced with one or neighboring values,
 made absolute, estimated from intensity, inferred from other groups, or deleted
 from original arrays.
 
-The fitting service fails clearly when too few valid, in-range, unmasked points
-remain. The final minimum-point rule is resolved during fitting implementation,
-but it must at least ensure positive statistical degrees of freedom:
-`n_fitted_points - n_free_parameters > 0`.
+Single-Q fitting requires at least two retained sample energy coordinates. It
+also requires positive nominal statistical degrees of freedom:
+`n_fitted_points - n_free_parameters > 0`. The fitting service fails clearly
+when either precondition is not met.
 
 A mature result records:
 
@@ -197,25 +201,28 @@ A mature result records:
 - raw residuals (`model - data`);
 - standardized residuals;
 - chi-square and reduced chi-square;
-- AIC and AICc;
+- AIC, AICc, and BIC under the declared absolute-sigma convention;
 - fitted-point and free-parameter counts;
 - convergence status and optimizer termination information;
 - bound-hit warnings;
 - invalid covariance or Jacobian warnings; and
 - scientific-quality warnings.
 
-The exact likelihood assumptions used for AIC/AICc and the rules for deriving
-standard errors from the Jacobian are unresolved pending scientific review.
-Until fixed, implementations must expose the chosen convention and never
-compare values calculated under different conventions.
+Supplied valid `sigma` values are treated as absolute experimental standard
+deviations. For a regular identifiable local fit, covariance is
+`(J.T @ J)^-1`; it is not multiplied by reduced chi-square. A missing or
+rank-deficient covariance produces unavailable standard errors, never zero
+errors. Any active fitted parameter bound also makes the ordinary local
+covariance/correlation unavailable for the complete fit in Phase A. The
+Phase-A information-criterion convention is Gaussian
+absolute-sigma likelihood with the data-only constant omitted: `AIC = chi2 +
+2k`, with its small-sample correction for AICc, and `BIC = chi2 + k ln(n)`.
+These values may be compared only when the data points, masks/Q selection,
+uncertainty treatment, residual definition, and likelihood convention match.
 
-AIC/AICc do not block the first validated single-spectrum prototype. That
-prototype may pass using convergence/termination, raw and standardized
-residuals, chi-square, reduced chi-square, parameter recovery, bound hits,
-Jacobian/covariance status, and scientific warnings. When implemented,
-AIC/AICc are comparable only for fits with identical data points, masks and Q
-selection, uncertainty treatment, residual definition, and likelihood
-convention.
+AIC/AICc/BIC are supporting candidate evidence. No minimum-information-
+criterion result alone establishes an adequate model or a physically resolved
+component decomposition.
 
 ## 7. Batch fitting
 
@@ -280,7 +287,9 @@ Padding masks never modify or baseline-shift intensity arrays. All plateau
 points are included exactly, including the point immediately adjacent to the
 first retained interior point. Invalid-data masks, manual masks, ranges, Q
 exclusions, Bragg warnings, and padding masks remain independently recoverable.
-Constant or linear backgrounds remain future spectral-model components.
+Phase-A production backgrounds are NONE, B0 (constant `b0`), and B1 (linear
+`b0 + b1 * E`). They are additive spectral-model components and do not alter
+the source intensity arrays.
 
 Every automatic flag, user mask, range change, Q exclusion, restoration, and
 reason remains traceable in the analysis state. A complete append-only project

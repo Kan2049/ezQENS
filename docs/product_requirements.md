@@ -254,13 +254,15 @@ objective. A future optional robust weighted mode may use soft-L1 or Huber
 loss. Unweighted and logarithmic relative losses are not defaults.
 
 Every mature fit result records optimized values, estimable standard errors,
-raw and standardized residuals, chi-square, reduced chi-square, AIC, AICc,
+raw and standardized residuals, chi-square, reduced chi-square, AIC, AICc, BIC,
 fitted-point count, free-parameter count, convergence, bound hits, invalid
-covariance/Jacobian warnings, and scientific-quality warnings. AIC/AICc remain
-planned but do not block the first validated single-spectrum prototype while
-the likelihood convention is unresolved. They may be compared only for fits
+covariance/Jacobian warnings, and scientific-quality warnings. Their production
+calculation convention is defined from weighted Gaussian residuals using
+supplied absolute sigma. AIC, AICc, and BIC are candidate evidence fields, not
+an automatic scientific preference rule. They may be compared only for fits
 using identical points, masks/Q selection, uncertainty treatment, residual
-definition, and likelihood convention.
+definition, and likelihood convention; a numerical minimum does not by itself
+establish the preferred scientific model.
 
 ## 6. Batch analysis and masking
 
@@ -479,7 +481,8 @@ Version 1.0 is acceptable when:
 
 - Detailed accepted syntax within DAVE and generic ASCII layout families.
 - Blank-line/comment policy for explicit Q-list files.
-- Exact AIC/AICc likelihood convention and covariance-estimation policy.
+- Auto model-selection weighting, adequacy, and recommendation policy for the
+  defined AIC/AICc/BIC evidence fields.
 - Bragg-contamination warning heuristic.
 - Final public packaging, licensing, and Windows installer technology.
 - Final project-container format and extension, if a container is later needed.

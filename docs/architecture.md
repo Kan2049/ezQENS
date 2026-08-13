@@ -228,17 +228,22 @@ policy. Future `E0` shifts change evaluation coordinates, not the plan/grid.
 
 ### 3.5 Fitting, diagnostics, and batch execution
 
-`fitting` adapts a `FitConfiguration` to
-`scipy.optimize.least_squares`, constructs weighted standardized residuals,
-honors fixed/free state and bounds, and returns raw optimizer facts without
-hiding failure.
+`fitting` represents one elastic component, a variable-length Lorentzian
+collection, one shared energy shift, and NONE/B0/B1 background. It adapts this
+manual configuration to `scipy.optimize.least_squares(method="trf")`, uses the
+existing fitting selection and prepared resolution, constructs weighted
+standardized residuals on retained original sample coordinates, honors
+fixed/free state and bounds, and returns raw optimizer facts without hiding
+failure. The scientific model has no Lorentzian-count ceiling; validated
+automatic multistart initialization is currently limited to standard 0L/1L/2L
+candidates.
 
-`diagnostics` derives raw/standardized residuals, chi-square, reduced
-chi-square, covariance/standard-error status, bound hits, and scientific
-warnings. AIC/AICc are added under one approved declared convention; their
-absence does not block the initial single-spectrum prototype. Cross-fit
-comparison requires identical points, masks/Q selection, uncertainty
-treatment, residual definition, and likelihood convention.
+Fit results expose component-resolved model values, raw/standardized residuals,
+chi-square, reduced chi-square, unscaled absolute-sigma covariance/error
+status, Jacobian singular values/rank/condition, bound activity, residual
+structure, multistart outcomes, and threshold-free identifiability metrics.
+AIC/AICc/BIC use one declared convention. Candidate generation and evaluation
+are separate from the unresolved Auto recommendation/adequacy policy.
 
 `batch` orders spectra and invokes the single-spectrum service repeatedly.
 Each invocation returns an independent `FitResult`. Previous-successful-fit

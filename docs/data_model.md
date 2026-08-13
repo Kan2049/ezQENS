@@ -254,17 +254,22 @@ Neither value stores sample intensity/uncertainty, modifies source arrays,
 duplicates M3 normalized source state for persistence, or owns fit/model/Q/GUI
 policy.
 
-`SpectralModelDefinition` minimally describes one elastic component, one or
-more unit-area Lorentzians, constant or linear background, integrated-area
-amplitudes, and FWHM linewidths. `ParameterDefinition` supplies initial value,
-bounds, fixed/free state, unit, and meaning.
+`SpectralModelDefinition` minimally describes one elastic component, a
+variable-length collection of zero or more unit-area Lorentzians, NONE/B0/B1
+background, one shared `E0`, integrated-area amplitudes, and FWHM linewidths.
+`ParameterConfiguration` supplies initial value, bounds, and fixed/free state.
+The model has no software-level Lorentzian-count maximum; fitted components are
+canonicalized by increasing FWHM.
 
-`FitConfiguration` captures the selected spectrum/resolution, masks/range,
-model parameters, weighted residual definition, optimizer and convolution
-settings. `FitResult` captures parameters, residuals, chi-square, reduced
-chi-square, point/free-parameter counts, convergence, bound hits,
-Jacobian/covariance status, and scientific warnings. AIC/AICc remain optional
-until their likelihood convention is approved.
+`FitResult` preserves the submitted model configuration separately from fitted
+parameter estimates. It links both to retained original sample coordinates,
+component-resolved values, raw and standardized residuals, absolute-sigma
+covariance/correlation, chi-square, reduced chi-square, AIC/AICc/BIC,
+point/free-parameter counts, convergence, bound activity, Jacobian diagnostics,
+and provenance. Each multistart record retains its submitted seed, fitted
+output, and canonical component-order mapping. Missing covariance remains
+distinct from zero uncertainty. `StandardModelCandidate` describes generated
+search structure; it does not contain a recommendation.
 
 ### 4.5 Batch and derived values — milestone 6
 
@@ -354,6 +359,7 @@ Still unresolved are detailed general DAVE grammar, explicit-list comment
 syntax, Milestone-4 convolution-grid/interpolation/centering policies, any
 future explicit resolution baseline or energy-recentering operation,
 normalization-integral covariance propagation, analytic resolution sources,
-covariance and AIC/AICc conventions, Bragg heuristics, and any future project
-format. Post-v1.0 motion equations also remain unresolved. None may be resolved
-from private benchmark values or by adding premature abstraction.
+Auto model-recommendation weighting/decision rules, Bragg heuristics, and any
+future project format. Post-v1.0 motion equations also remain unresolved. None
+may be resolved from private benchmark values or by adding premature
+abstraction.

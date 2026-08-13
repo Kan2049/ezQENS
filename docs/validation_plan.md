@@ -363,11 +363,12 @@ chi-square, degrees of freedom, and reduced chi-square. Verify that invalid
 sigma is masked without modifying originals and that fitting fails when
 `n_fitted_points - n_free_parameters <= 0`.
 
-The first single-spectrum gate does not require AIC/AICc. Once their convention
-is approved, test AIC/AICc against an independent hand calculation, including
-small-sample and undefined cases. Cross-fit comparisons must reject differing
-data points, masks/Q selection, uncertainty treatment, residual definitions,
-or likelihood conventions.
+Test the approved absolute-sigma, unscaled `(J.T @ J)^-1` covariance against an
+independent hand calculation. Test AIC/AICc/BIC under the declared
+Gaussian-absolute-sigma convention, including small-sample/undefined AICc
+cases. Cross-fit comparisons must reject differing data points, masks/Q
+selection, uncertainty treatment, residual definitions, or likelihood
+conventions.
 
 Create Jacobians/covariances that are full rank, rank deficient, ill
 conditioned, and unavailable. Verify standard-error status and warnings.
@@ -491,8 +492,9 @@ area preservation, and no wrap-around.
 Approved component semantics, weighted residuals, parameter recovery,
 diagnostics, warning behavior, and independent benchmark/script comparison.
 Direct elastic-resolution evaluation and convolved integrated-area preservation
-must pass. AIC/AICc are not required until their likelihood convention is
-approved.
+must pass. Dense narrow/sub-bin observable tests must cover multiple energy-
+shift phases and coarse/irregular sample grids. Candidate evidence must remain
+separate from the unresolved Auto recommendation rule.
 
 ### Gate D: batch and derived quantities
 
@@ -526,9 +528,9 @@ candidate-motion comparison, or GPU acceleration.
 
 Unresolved items include detailed general parser grammar, explicit-list comment
 policy, future edge-padding refinements, convolution grid
-details, fit-quality thresholds, AIC/AICc/covariance conventions, and supported
-Windows versions. Post-v1.0 motion equations and persistence format also remain
-unresolved. Q-bin edge/midpoint and DAVE
+details, fit-quality thresholds, Auto information-criterion weighting/decision
+rules, and supported Windows versions. Post-v1.0 motion equations and
+persistence format also remain unresolved. Q-bin edge/midpoint and DAVE
 four-value semantics, invalid-sigma handling, and padding-v2 are approved.
 
 Risks include circular tests, overfitting tolerances to one benchmark,

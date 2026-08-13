@@ -334,10 +334,15 @@ Visualization should help detect grid, normalization, centering, or convolution-
 
 Fit one selected QENS spectrum reliably using the validated measured-resolution and convolution path.
 
+Phase A provides the reusable production single-Q engine, manual arbitrary-N
+Lorentzian configuration, standard 0L/1L/2L multistart candidate evaluation,
+absolute-sigma covariance and threshold-free diagnostics. It intentionally
+does not finalize an Auto winner/adequacy rule.
+
 The first useful free-fit model should support:
 
 * elastic contribution;
-* one or more quasielastic Lorentzian components;
+* zero or more quasielastic Lorentzian components;
 * simple background;
 * explicit parameter initial values;
 * bounds;
@@ -352,7 +357,9 @@ The first accepted implementation prioritizes:
 * physically meaningful FWHM output;
 * transparent failure behavior.
 
-Additional statistical diagnostics such as advanced covariance treatment, information criteria, or model-quality heuristics are added only after their conventions are reviewed and a real workflow requires them.
+Model-quality thresholds, containment severity, reference-Q policy, and the
+Auto recommendation/adequacy rule remain unresolved and must not be inferred
+from optimizer convergence or minimum AICc/BIC alone.
 
 ### Scientific visualization
 
