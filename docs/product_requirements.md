@@ -307,10 +307,31 @@ otherwise valid points only when they are inside the independently selected
 support. A support edit alone does not disable AUTO. `REVIEW` remains accepted
 by default and visible; invalid energy/intensity is never restored. Default
 support uses valid measured bounds and can be replaced by an explicit per-group
-resolution support. It is not the sample fitting range. Sample/resolution
+resolution support during preview. It is not the sample fitting range. Sample/resolution
 retained boundaries are compared diagnostically without forcing either mask.
 
-Each accepted Q-specific resolution is normalized independently to unit
+Every resolution Q group must receive an explicit user-reviewed decision and
+confirmation before normalization, convolution, or fitting. KEEP accepts the
+unchanged measured support and makes no claim that ezQENS identified any
+structure as instrumental. A suspicious or overlapping structure may be kept
+with a neutral expert-judgement warning; no automatic correction follows.
+EXCLUDE accepts only a narrower contiguous support inside the original valid
+support, so it can trim one or both boundaries but cannot create an internal
+hole. Different groups may have independent decisions, supports, warnings, and
+signed-area ratios.
+
+The pre-normalization preview exposes original and accepted supports, accepted
+raw coordinates and values, retained pre-normalization signed area and signed-
+area ratio, normalization factor, warnings, and confirmation state. The ratio
+uses signed trapezoidal areas, is not constrained to `[0, 1]`, may exceed 1,
+and is not a physical containment fraction or probability. It is diagnostic
+only; no threshold approves or blocks a kernel. Suspicious internal
+or overlapping structure is never automatically detected, classified,
+subtracted, masked, interpolated, or reconstructed. When neither retaining the
+measurement nor a justified outer-support exclusion is acceptable, users must
+provide a better expert-prepared measured resolution.
+
+Each confirmed, accepted Q-specific resolution is normalized independently to unit
 integrated area by trapezoidal integration over its actual measured energy
 coordinates. The original grid is preserved; M3 does not interpolate sample or
 resolution data. Normalization fails on fewer than two usable points,

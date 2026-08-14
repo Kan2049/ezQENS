@@ -204,17 +204,34 @@ separate future concepts and are not Milestone-2 state.
 
 ### 4.3 ResolutionDataset and processing values — milestone 3
 
-`PreparedResolution` is the measured-resolution-only dataset result. It
+`ResolutionPreparationPreview` is the per-Q review state before scientific use.
+It references the immutable datasets and padding results and contains one
+`ResolutionPreparationPreviewSpectrum` per group. Each spectrum exposes its
+original valid support, proposed accepted support, accepted raw
+energy/intensity/uncertainty, projected reciprocal normalization factor,
+accepted pre-normalization signed area, optional signed-area ratio, diagnostics,
+and explicit `ResolutionAcceptance`.
+
+`ResolutionAcceptance` records an optional decision, confirmation boolean, and
+neutral warnings. Decisions are `KEEP` or
+`EXCLUDE_BY_CONTIGUOUS_SUPPORT`. KEEP requires unchanged support. EXCLUDE
+requires a strictly narrower interval within the original support. Warnings can
+record suspicious structure retained by user judgement without identifying its
+physical origin. Absence of a decision or confirmation is valid preview state
+but cannot produce prepared resolution.
+
+`PreparedResolution` is the confirmed measured-resolution-only dataset result. It
 references the immutable sample and resolution `ReducedDataset` values, their
 independently calculated `EdgePaddingDetectionResult` values, one ordered
 `PreparedResolutionSpectrum` per resolution group, per-Q padding comparisons,
 and privacy-safe diagnostics. Association is by exact existing group/Q order;
 Q values remain dataset-level and are not copied into `Spectrum`.
 
-`PreparedResolutionSpectrum` references its original resolution `Spectrum`,
-its resolution-specific padding result, one `ResolutionSupport`, the raw
-normalization integral, its reciprocal factor, the declared trapezoidal method,
-and local diagnostics. It does not store copies of original or normalized
+`PreparedResolutionSpectrum` is the confirmed subtype of the preview spectrum.
+It references its original resolution `Spectrum`, its resolution-specific
+padding result, original and accepted `ResolutionSupport`, acceptance state,
+pre-QC and retained raw signed integrals, signed-area ratio, reciprocal factor,
+the declared trapezoidal method, and local diagnostics. It does not store copies of original or normalized
 arrays. Accepted masks, accepted original coordinates, normalized intensity,
 scaled uncertainty, normalized integral, and a source-grid representation with
 zero outside accepted support are derived read-only properties.
@@ -228,6 +245,13 @@ change this state. `REVIEW` remains accepted by default. Invalid
 energy/intensity is non-overridable; invalid uncertainty stays inspectable and
 is scaled as supplied rather than replaced or included in normalization-area
 covariance propagation.
+
+The accepted support is always one interval; the model has no arbitrary point
+mask or internal-hole representation for resolution QC. `signed_area_ratio` is
+the accepted signed trapezoidal area divided by the valid pre-QC signed
+trapezoidal area when that denominator is finite and positive. It is
+dimensionless, may exceed 1, and is diagnostic provenance rather than a
+probability or physical containment fraction. It has no policy threshold.
 
 The accepted measured energy coordinates contain at least two finite, strictly
 increasing, unique points. An invalid energy/intensity point between the first
@@ -266,7 +290,10 @@ parameter estimates. It links both to retained original sample coordinates,
 component-resolved values, raw and standardized residuals, absolute-sigma
 covariance/correlation, chi-square, reduced chi-square, AIC/AICc/BIC,
 point/free-parameter counts, convergence, bound activity, Jacobian diagnostics,
-and provenance. Each multistart record retains its submitted seed, fitted
+and provenance. Fit provenance embeds the accepted resolution group/source,
+original and accepted supports, decision, retained signed area/ratio,
+normalization method/factor, confirmation, warning, and AUTO-application state.
+Each multistart record retains its submitted seed, fitted
 output, and canonical component-order mapping. Missing covariance remains
 distinct from zero uncertainty. `StandardModelCandidate` describes generated
 search structure; it does not contain a recommendation.

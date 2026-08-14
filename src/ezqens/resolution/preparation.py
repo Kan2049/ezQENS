@@ -34,6 +34,46 @@ class ResolutionSupportSource(StrEnum):
     EXPLICIT_OVERRIDE = "explicit_override"
 
 
+class ResolutionAcceptanceDecision(StrEnum):
+    """User-reviewed disposition of one measured-resolution Q group."""
+
+    KEEP = "keep"
+    EXCLUDE_BY_CONTIGUOUS_SUPPORT = "exclude_by_contiguous_support"
+
+
+class ResolutionAcceptanceWarning(StrEnum):
+    """Scientifically neutral warning retained with an approved kernel."""
+
+    SUSPICIOUS_STRUCTURE_RETAINED = "suspicious_structure_retained_by_user"
+
+
+@dataclass(frozen=True, slots=True)
+class ResolutionAcceptance:
+    """Explicit per-Q review decision and confirmation state."""
+
+    decision: ResolutionAcceptanceDecision | None = None
+    confirmed: bool = False
+    warnings: tuple[ResolutionAcceptanceWarning, ...] = ()
+
+    def __post_init__(self) -> None:
+        warnings = tuple(self.warnings)
+        if self.decision is not None and not isinstance(
+            self.decision, ResolutionAcceptanceDecision
+        ):
+            raise ValueError("decision must be a ResolutionAcceptanceDecision or None")
+        if not isinstance(self.confirmed, bool):
+            raise ValueError("confirmed must be a boolean")
+        if self.confirmed and self.decision is None:
+            raise ValueError("a confirmed resolution acceptance requires a decision")
+        if any(
+            not isinstance(warning, ResolutionAcceptanceWarning) for warning in warnings
+        ):
+            raise ValueError("warnings must contain ResolutionAcceptanceWarning values")
+        if warnings and self.decision is not ResolutionAcceptanceDecision.KEEP:
+            raise ValueError("resolution warnings may only accompany a KEEP decision")
+        object.__setattr__(self, "warnings", warnings)
+
+
 @dataclass(frozen=True, slots=True)
 class ResolutionSupport:
     """Inclusive energy support for one measured-resolution spectrum."""
@@ -111,21 +151,25 @@ class ResolutionPaddingComparison:
 
 
 @dataclass(frozen=True, slots=True)
-class PreparedResolutionSpectrum:
-    """One unit-area resolution linked to its immutable measured spectrum."""
+class ResolutionPreparationPreviewSpectrum:
+    """One proposed accepted raw kernel and its normalization preview."""
 
     source_spectrum: Spectrum = field(repr=False)
     padding: SpectrumPaddingResult = field(repr=False)
+    original_support: ResolutionSupport
     support: ResolutionSupport
+    acceptance: ResolutionAcceptance
     auto_padding_applied: bool
+    pre_qc_integral: float
     normalization_integral: float
     normalization_factor: float
+    signed_area_ratio: float | None
     normalization_method: str = NORMALIZATION_METHOD
     diagnostics: tuple[ResolutionDiagnostic, ...] = ()
 
     def __post_init__(self) -> None:
         if self.source_spectrum.role is not SpectrumRole.RESOLUTION:
-            raise ValueError("prepared source spectrum must have resolution role")
+            raise ValueError("resolution source spectrum must have resolution role")
         if (
             self.padding.group_index != self.source_spectrum.group_index
             or self.padding.group_identity != self.source_spectrum.group_label
@@ -142,10 +186,36 @@ class PreparedResolutionSpectrum:
             or self.normalization_factor <= 0.0
         ):
             raise ValueError("normalization factor must be finite and positive")
+        if not np.isclose(
+            self.normalization_factor,
+            1.0 / self.normalization_integral,
+            rtol=1.0e-14,
+            atol=0.0,
+        ):
+            raise ValueError("normalization factor must be the reciprocal integral")
         if self.normalization_method != NORMALIZATION_METHOD:
             raise ValueError("unsupported normalization method")
         if not isinstance(self.auto_padding_applied, bool):
             raise ValueError("auto_padding_applied must be a boolean")
+        if not isinstance(self.acceptance, ResolutionAcceptance):
+            raise ValueError("acceptance must be a ResolutionAcceptance")
+        if self.signed_area_ratio is not None and not np.isfinite(
+            self.signed_area_ratio
+        ):
+            raise ValueError("signed_area_ratio must be finite or None")
+        if np.isfinite(self.pre_qc_integral) and self.pre_qc_integral > 0.0:
+            expected_ratio = self.normalization_integral / self.pre_qc_integral
+            if self.signed_area_ratio is None or not np.isclose(
+                self.signed_area_ratio,
+                expected_ratio,
+                rtol=1.0e-14,
+                atol=0.0,
+            ):
+                raise ValueError("signed_area_ratio must match the pre-QC integral")
+        elif self.signed_area_ratio is not None:
+            raise ValueError(
+                "signed_area_ratio requires a finite positive pre-QC integral"
+            )
 
     @property
     def invalid_mask(self) -> BoolArray:
@@ -160,7 +230,7 @@ class PreparedResolutionSpectrum:
 
     @property
     def support_mask(self) -> BoolArray:
-        """Return points inside the explicit inclusive support range."""
+        """Return points inside the proposed inclusive support range."""
 
         energy = self.source_spectrum.energy
         return _readonly_mask(
@@ -171,7 +241,7 @@ class PreparedResolutionSpectrum:
 
     @property
     def accepted_mask(self) -> BoolArray:
-        """Return usable kernel points; REVIEW remains accepted by default."""
+        """Return proposed usable kernel points; REVIEW remains accepted."""
 
         spectrum = self.source_spectrum
         applied_auto_mask = (
@@ -188,27 +258,59 @@ class PreparedResolutionSpectrum:
 
     @property
     def energy(self) -> FloatArray:
-        """Return accepted original measured energy coordinates."""
+        """Return proposed accepted original measured energy coordinates."""
 
         return _readonly_float_array(self.source_spectrum.energy[self.accepted_mask])
+
+    @property
+    def intensity(self) -> FloatArray:
+        """Return proposed accepted measured intensity before normalization."""
+
+        return _readonly_float_array(self.source_spectrum.intensity[self.accepted_mask])
+
+    @property
+    def uncertainty(self) -> FloatArray:
+        """Return proposed accepted measured uncertainty before normalization."""
+
+        return _readonly_float_array(
+            self.source_spectrum.uncertainty[self.accepted_mask]
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedResolutionSpectrum(ResolutionPreparationPreviewSpectrum):
+    """One confirmed unit-area resolution linked to its measured spectrum."""
+
+    def __post_init__(self) -> None:
+        super(PreparedResolutionSpectrum, self).__post_init__()
+        if not self.acceptance.confirmed:
+            raise ValueError("prepared resolution acceptance must be confirmed")
+        if self.acceptance.decision is ResolutionAcceptanceDecision.KEEP:
+            if self.support != self.original_support:
+                raise ValueError("confirmed KEEP must preserve the original support")
+        elif self.acceptance.decision is (
+            ResolutionAcceptanceDecision.EXCLUDE_BY_CONTIGUOUS_SUPPORT
+        ):
+            if not _support_is_within(self.support, self.original_support):
+                raise ValueError(
+                    "confirmed EXCLUDE support must remain inside original"
+                )
+            if not _support_is_narrower(self.support, self.original_support):
+                raise ValueError("confirmed EXCLUDE support must be narrower")
+        else:
+            raise ValueError("prepared resolution requires an acceptance decision")
 
     @property
     def normalized_intensity(self) -> FloatArray:
         """Return accepted intensity scaled to unit trapezoidal area."""
 
-        return _readonly_float_array(
-            self.source_spectrum.intensity[self.accepted_mask]
-            * self.normalization_factor
-        )
+        return _readonly_float_array(self.intensity * self.normalization_factor)
 
     @property
     def normalized_uncertainty(self) -> FloatArray:
-        """Return source uncertainty scaled by the deterministic area factor."""
+        """Return accepted uncertainty scaled by the deterministic area factor."""
 
-        return _readonly_float_array(
-            self.source_spectrum.uncertainty[self.accepted_mask]
-            * self.normalization_factor
-        )
+        return _readonly_float_array(self.uncertainty * self.normalization_factor)
 
     @property
     def normalized_integral(self) -> float:
@@ -229,8 +331,96 @@ class PreparedResolutionSpectrum:
 
 
 @dataclass(frozen=True, slots=True)
+class ResolutionAcceptanceProvenance:
+    """Accepted measured-kernel provenance copied into downstream results."""
+
+    group_index: int
+    group_label: str
+    q_value: float
+    source_reference: str | None
+    original_support: tuple[float, float]
+    accepted_support: tuple[float, float]
+    decision: ResolutionAcceptanceDecision
+    retained_pre_normalization_area: float
+    signed_area_ratio: float | None
+    normalization_method: str
+    normalization_factor: float
+    confirmed: bool
+    warnings: tuple[ResolutionAcceptanceWarning, ...]
+    auto_padding_applied: bool
+
+
+def _validate_resolution_collection(
+    sample_dataset: ReducedDataset,
+    resolution_dataset: ReducedDataset,
+    sample_padding: EdgePaddingDetectionResult,
+    resolution_padding: EdgePaddingDetectionResult,
+    spectra: tuple[ResolutionPreparationPreviewSpectrum, ...],
+    comparisons: tuple[ResolutionPaddingComparison, ...],
+) -> None:
+    count = len(sample_dataset.spectra)
+    if sample_dataset.role is not SpectrumRole.SAMPLE:
+        raise ValueError("sample_dataset must have sample role")
+    if resolution_dataset.role is not SpectrumRole.RESOLUTION:
+        raise ValueError("resolution_dataset must have resolution role")
+    if not (
+        len(resolution_dataset.spectra)
+        == len(sample_padding.spectra)
+        == len(resolution_padding.spectra)
+        == len(spectra)
+        == len(comparisons)
+        == count
+    ):
+        raise ValueError("resolution preparation state must align by group")
+    if any(
+        prepared.source_spectrum is not source
+        for prepared, source in zip(spectra, resolution_dataset.spectra, strict=True)
+    ):
+        raise ValueError("prepared spectra must reference resolution sources")
+
+
+def _q_value(
+    resolution_dataset: ReducedDataset, spectrum_count: int, group_index: int
+) -> float:
+    if not 0 <= group_index < spectrum_count:
+        raise IndexError("group_index is outside the resolution preparation")
+    q_bins = resolution_dataset.q_bins
+    if q_bins is None:  # guarded by preview_measured_resolution
+        raise RuntimeError("resolution preparation has no Q assignment")
+    return float(q_bins.q_values[group_index])
+
+
+@dataclass(frozen=True, slots=True)
+class ResolutionPreparationPreview:
+    """Ordered per-Q review preview before normalization is authorized."""
+
+    sample_dataset: ReducedDataset = field(repr=False)
+    resolution_dataset: ReducedDataset = field(repr=False)
+    sample_padding: EdgePaddingDetectionResult = field(repr=False)
+    resolution_padding: EdgePaddingDetectionResult = field(repr=False)
+    spectra: tuple[ResolutionPreparationPreviewSpectrum, ...]
+    padding_comparisons: tuple[ResolutionPaddingComparison, ...]
+    diagnostics: tuple[ResolutionDiagnostic, ...] = ()
+
+    def __post_init__(self) -> None:
+        _validate_resolution_collection(
+            self.sample_dataset,
+            self.resolution_dataset,
+            self.sample_padding,
+            self.resolution_padding,
+            self.spectra,
+            self.padding_comparisons,
+        )
+
+    def q_value(self, group_index: int) -> float:
+        """Return the exactly associated dataset-level representative Q value."""
+
+        return _q_value(self.resolution_dataset, len(self.spectra), group_index)
+
+
+@dataclass(frozen=True, slots=True)
 class PreparedResolution:
-    """Ordered measured-resolution preparation associated exactly with sample Q."""
+    """Ordered confirmed measured resolution associated exactly with sample Q."""
 
     sample_dataset: ReducedDataset = field(repr=False)
     resolution_dataset: ReducedDataset = field(repr=False)
@@ -241,37 +431,50 @@ class PreparedResolution:
     diagnostics: tuple[ResolutionDiagnostic, ...] = ()
 
     def __post_init__(self) -> None:
-        count = len(self.sample_dataset.spectra)
-        if self.sample_dataset.role is not SpectrumRole.SAMPLE:
-            raise ValueError("sample_dataset must have sample role")
-        if self.resolution_dataset.role is not SpectrumRole.RESOLUTION:
-            raise ValueError("resolution_dataset must have resolution role")
-        if not (
-            len(self.resolution_dataset.spectra)
-            == len(self.sample_padding.spectra)
-            == len(self.resolution_padding.spectra)
-            == len(self.spectra)
-            == len(self.padding_comparisons)
-            == count
-        ):
-            raise ValueError("prepared resolution state must align by group")
-        if any(
-            prepared.source_spectrum is not source
-            for prepared, source in zip(
-                self.spectra, self.resolution_dataset.spectra, strict=True
-            )
-        ):
-            raise ValueError("prepared spectra must reference resolution sources")
+        _validate_resolution_collection(
+            self.sample_dataset,
+            self.resolution_dataset,
+            self.sample_padding,
+            self.resolution_padding,
+            self.spectra,
+            self.padding_comparisons,
+        )
 
     def q_value(self, group_index: int) -> float:
         """Return the exactly associated dataset-level representative Q value."""
 
-        if not 0 <= group_index < len(self.spectra):
-            raise IndexError("group_index is outside the prepared resolution")
-        q_bins = self.resolution_dataset.q_bins
-        if q_bins is None:  # guarded by prepare_measured_resolution
-            raise RuntimeError("prepared resolution has no Q assignment")
-        return float(q_bins.q_values[group_index])
+        return _q_value(self.resolution_dataset, len(self.spectra), group_index)
+
+    def acceptance_provenance(self, group_index: int) -> ResolutionAcceptanceProvenance:
+        """Return immutable provenance for the accepted kernel used at one Q."""
+
+        q_value = self.q_value(group_index)
+        spectrum = self.spectra[group_index]
+        decision = spectrum.acceptance.decision
+        if decision is None:  # guarded by PreparedResolutionSpectrum
+            raise RuntimeError("prepared resolution has no acceptance decision")
+        return ResolutionAcceptanceProvenance(
+            group_index=group_index,
+            group_label=spectrum.source_spectrum.group_label,
+            q_value=q_value,
+            source_reference=self.resolution_dataset.source_reference,
+            original_support=(
+                spectrum.original_support.lower_energy,
+                spectrum.original_support.upper_energy,
+            ),
+            accepted_support=(
+                spectrum.support.lower_energy,
+                spectrum.support.upper_energy,
+            ),
+            decision=decision,
+            retained_pre_normalization_area=spectrum.normalization_integral,
+            signed_area_ratio=spectrum.signed_area_ratio,
+            normalization_method=spectrum.normalization_method,
+            normalization_factor=spectrum.normalization_factor,
+            confirmed=spectrum.acceptance.confirmed,
+            warnings=spectrum.acceptance.warnings,
+            auto_padding_applied=spectrum.auto_padding_applied,
+        )
 
 
 def _error(
@@ -452,13 +655,51 @@ def _default_support(spectrum: Spectrum) -> ResolutionSupport:
     )
 
 
-def _prepare_spectrum(
+def _support_is_within(
+    candidate: ResolutionSupport,
+    original: ResolutionSupport,
+) -> bool:
+    lower_ok = candidate.lower_energy >= original.lower_energy or np.isclose(
+        candidate.lower_energy,
+        original.lower_energy,
+        rtol=PADDING_BOUNDARY_RTOL,
+        atol=PADDING_BOUNDARY_ATOL,
+    )
+    upper_ok = candidate.upper_energy <= original.upper_energy or np.isclose(
+        candidate.upper_energy,
+        original.upper_energy,
+        rtol=PADDING_BOUNDARY_RTOL,
+        atol=PADDING_BOUNDARY_ATOL,
+    )
+    return bool(lower_ok and upper_ok)
+
+
+def _support_is_narrower(
+    candidate: ResolutionSupport,
+    original: ResolutionSupport,
+) -> bool:
+    same_lower = np.isclose(
+        candidate.lower_energy,
+        original.lower_energy,
+        rtol=PADDING_BOUNDARY_RTOL,
+        atol=PADDING_BOUNDARY_ATOL,
+    )
+    same_upper = np.isclose(
+        candidate.upper_energy,
+        original.upper_energy,
+        rtol=PADDING_BOUNDARY_RTOL,
+        atol=PADDING_BOUNDARY_ATOL,
+    )
+    return bool(not (same_lower and same_upper))
+
+
+def _accepted_values(
     spectrum: Spectrum,
     padding: SpectrumPaddingResult,
     support: ResolutionSupport,
     *,
     auto_padding_applied: bool,
-) -> PreparedResolutionSpectrum:
+) -> tuple[BoolArray, float]:
     support_mask = (
         np.isfinite(spectrum.energy)
         & (spectrum.energy >= support.lower_energy)
@@ -532,6 +773,76 @@ def _prepare_spectrum(
             group_identity=spectrum.group_label,
         )
 
+    return _readonly_mask(accepted), integral
+
+
+def _pre_qc_integral(
+    spectrum: Spectrum,
+    padding: SpectrumPaddingResult,
+    original_support: ResolutionSupport,
+    *,
+    auto_padding_applied: bool,
+) -> float:
+    support_mask = (
+        np.isfinite(spectrum.energy)
+        & (spectrum.energy >= original_support.lower_energy)
+        & (spectrum.energy <= original_support.upper_energy)
+    )
+    support_indices = np.flatnonzero(support_mask)
+    if support_indices.size < 2:
+        return float("nan")
+    support_slice = slice(int(support_indices[0]), int(support_indices[-1]) + 1)
+    if np.any(
+        spectrum.invalid_energy_mask[support_slice]
+        | spectrum.invalid_intensity_mask[support_slice]
+    ):
+        return float("nan")
+    applied_auto_mask = (
+        padding.auto_mask
+        if auto_padding_applied
+        else np.zeros(spectrum.energy.size, dtype=np.bool_)
+    )
+    accepted = (
+        support_mask
+        & ~applied_auto_mask
+        & ~spectrum.invalid_energy_mask
+        & ~spectrum.invalid_intensity_mask
+    )
+    energy = spectrum.energy[accepted]
+    intensity = spectrum.intensity[accepted]
+    if energy.size < 2 or not np.all(np.diff(energy) > 0.0):
+        return float("nan")
+    with np.errstate(over="ignore", invalid="ignore"):
+        return float(np.trapezoid(intensity, energy))
+
+
+def _preview_spectrum(
+    spectrum: Spectrum,
+    padding: SpectrumPaddingResult,
+    original_support: ResolutionSupport,
+    support: ResolutionSupport,
+    acceptance: ResolutionAcceptance,
+    *,
+    auto_padding_applied: bool,
+) -> ResolutionPreparationPreviewSpectrum:
+    accepted, integral = _accepted_values(
+        spectrum,
+        padding,
+        support,
+        auto_padding_applied=auto_padding_applied,
+    )
+    pre_qc_integral = _pre_qc_integral(
+        spectrum,
+        padding,
+        original_support,
+        auto_padding_applied=auto_padding_applied,
+    )
+    signed_area_ratio = (
+        integral / pre_qc_integral
+        if np.isfinite(pre_qc_integral) and pre_qc_integral > 0.0
+        else None
+    )
+
     diagnostics: list[ResolutionDiagnostic] = []
     invalid_uncertainty_count = int(
         np.count_nonzero(spectrum.invalid_uncertainty_mask & accepted)
@@ -549,25 +860,59 @@ def _prepare_spectrum(
                 group_identity=spectrum.group_label,
             )
         )
-    return PreparedResolutionSpectrum(
+    if acceptance.warnings:
+        diagnostics.append(
+            ResolutionDiagnostic(
+                code="suspicious_resolution_structure_retained_by_user",
+                severity=DiagnosticSeverity.WARNING,
+                message=(
+                    "user retained measured resolution structure of unknown "
+                    "physical origin; no automatic correction was applied"
+                ),
+                group_index=spectrum.group_index,
+                group_identity=spectrum.group_label,
+            )
+        )
+    return ResolutionPreparationPreviewSpectrum(
         source_spectrum=spectrum,
         padding=padding,
+        original_support=original_support,
         support=support,
+        acceptance=acceptance,
         auto_padding_applied=auto_padding_applied,
+        pre_qc_integral=pre_qc_integral,
         normalization_integral=integral,
         normalization_factor=1.0 / integral,
+        signed_area_ratio=signed_area_ratio,
         diagnostics=tuple(diagnostics),
     )
 
 
-def prepare_measured_resolution(
+def _validate_mapping_indices(
+    values: Mapping[int, object],
+    *,
+    group_count: int,
+    code: str,
+    message: str,
+) -> None:
+    if any(
+        not isinstance(index, int)
+        or isinstance(index, bool)
+        or not 0 <= index < group_count
+        for index in values
+    ):
+        raise _error(code, message)
+
+
+def preview_measured_resolution(
     sample_dataset: ReducedDataset,
     resolution_dataset: ReducedDataset,
     *,
+    acceptance_decisions: Mapping[int, ResolutionAcceptance] | None = None,
     support_overrides: Mapping[int, ResolutionSupport] | None = None,
     apply_auto_padding: Mapping[int, bool] | None = None,
-) -> PreparedResolution:
-    """Validate exact Q identity and prepare independent unit-area kernels.
+) -> ResolutionPreparationPreview:
+    """Preview per-Q accepted raw kernels before confirmation authorizes use.
 
     Edge padding is always detected independently on the sample and measured
     resolution. ``AUTO`` padding is applied by default and may be disabled
@@ -575,36 +920,39 @@ def prepare_measured_resolution(
     """
 
     _validate_exact_q_association(sample_dataset, resolution_dataset)
+    acceptances = dict(acceptance_decisions or {})
     overrides = dict(support_overrides or {})
     auto_application = dict(apply_auto_padding or {})
-    invalid_override_indices = sorted(
-        index
-        for index in overrides
-        if not isinstance(index, int)
-        or isinstance(index, bool)
-        or not 0 <= index < len(resolution_dataset.spectra)
+    group_count = len(resolution_dataset.spectra)
+    _validate_mapping_indices(
+        acceptances,
+        group_count=group_count,
+        code="resolution_acceptance_group_invalid",
+        message="resolution acceptance references a group outside the dataset",
     )
-    if invalid_override_indices:
+    _validate_mapping_indices(
+        overrides,
+        group_count=group_count,
+        code="resolution_support_group_invalid",
+        message="resolution support override references a group outside the dataset",
+    )
+    _validate_mapping_indices(
+        auto_application,
+        group_count=group_count,
+        code="resolution_auto_application_group_invalid",
+        message="AUTO-padding application references a group outside the dataset",
+    )
+    if any(
+        not isinstance(value, ResolutionAcceptance) for value in acceptances.values()
+    ):
         raise _error(
-            "resolution_support_group_invalid",
-            "resolution support override references a group outside the dataset",
+            "resolution_acceptance_type_invalid",
+            "acceptance decisions must contain ResolutionAcceptance values",
         )
     if any(not isinstance(value, ResolutionSupport) for value in overrides.values()):
         raise _error(
             "resolution_support_type_invalid",
             "support overrides must contain ResolutionSupport values",
-        )
-    invalid_auto_indices = sorted(
-        index
-        for index in auto_application
-        if not isinstance(index, int)
-        or isinstance(index, bool)
-        or not 0 <= index < len(resolution_dataset.spectra)
-    )
-    if invalid_auto_indices:
-        raise _error(
-            "resolution_auto_application_group_invalid",
-            "AUTO-padding application references a group outside the dataset",
         )
     if any(not isinstance(value, bool) for value in auto_application.values()):
         raise _error(
@@ -621,7 +969,7 @@ def prepare_measured_resolution(
         resolution_padding,
     )
 
-    prepared_spectra: list[PreparedResolutionSpectrum] = []
+    preview_spectra: list[ResolutionPreparationPreviewSpectrum] = []
     for group_index, (spectrum, padding) in enumerate(
         zip(
             resolution_dataset.spectra,
@@ -629,30 +977,156 @@ def prepare_measured_resolution(
             strict=True,
         )
     ):
+        original_support = _default_support(spectrum)
+        acceptance = acceptances.get(group_index, ResolutionAcceptance())
         support = overrides.get(group_index)
-        if support is None:
-            support = _default_support(spectrum)
-        elif support.source is not ResolutionSupportSource.EXPLICIT_OVERRIDE:
+        if acceptance.decision is ResolutionAcceptanceDecision.KEEP:
+            if support is not None:
+                raise _error(
+                    "resolution_keep_support_override_invalid",
+                    "KEEP uses the unchanged pre-QC support; select EXCLUDE "
+                    "to supply a narrower contiguous support",
+                    group_index=group_index,
+                    group_identity=spectrum.group_label,
+                )
+            support = original_support
+        elif (
+            acceptance.decision
+            is ResolutionAcceptanceDecision.EXCLUDE_BY_CONTIGUOUS_SUPPORT
+        ):
+            if support is None:
+                raise _error(
+                    "resolution_exclusion_support_required",
+                    "EXCLUDE requires a narrower contiguous support",
+                    group_index=group_index,
+                    group_identity=spectrum.group_label,
+                )
+            if not _support_is_within(support, original_support):
+                raise _error(
+                    "resolution_exclusion_outside_original_support",
+                    "excluded resolution support must remain inside the pre-QC support",
+                    group_index=group_index,
+                    group_identity=spectrum.group_label,
+                )
+            if not _support_is_narrower(support, original_support):
+                raise _error(
+                    "resolution_exclusion_not_narrower",
+                    "EXCLUDE support must remove at least one outer boundary region",
+                    group_index=group_index,
+                    group_identity=spectrum.group_label,
+                )
+        elif support is not None:
+            raise _error(
+                "resolution_exclusion_decision_required",
+                "a support override requires an explicit EXCLUDE decision",
+                group_index=group_index,
+                group_identity=spectrum.group_label,
+            )
+        else:
+            support = original_support
+        if support.source is not ResolutionSupportSource.EXPLICIT_OVERRIDE and (
+            acceptance.decision
+            is ResolutionAcceptanceDecision.EXCLUDE_BY_CONTIGUOUS_SUPPORT
+        ):
             support = ResolutionSupport(
                 lower_energy=support.lower_energy,
                 upper_energy=support.upper_energy,
                 source=ResolutionSupportSource.EXPLICIT_OVERRIDE,
             )
-        prepared_spectra.append(
-            _prepare_spectrum(
+        preview_spectra.append(
+            _preview_spectrum(
                 spectrum,
                 padding,
+                original_support,
                 support,
+                acceptance,
                 auto_padding_applied=auto_application.get(group_index, True),
             )
         )
 
-    return PreparedResolution(
+    return ResolutionPreparationPreview(
         sample_dataset=sample_dataset,
         resolution_dataset=resolution_dataset,
         sample_padding=sample_padding,
         resolution_padding=resolution_padding,
-        spectra=tuple(prepared_spectra),
+        spectra=tuple(preview_spectra),
         padding_comparisons=comparisons,
         diagnostics=comparison_diagnostics,
+    )
+
+
+def prepare_measured_resolution(
+    sample_dataset: ReducedDataset,
+    resolution_dataset: ReducedDataset,
+    *,
+    acceptance_decisions: Mapping[int, ResolutionAcceptance] | None = None,
+    support_overrides: Mapping[int, ResolutionSupport] | None = None,
+    apply_auto_padding: Mapping[int, bool] | None = None,
+) -> PreparedResolution:
+    """Normalize only explicitly confirmed per-Q measured-resolution kernels."""
+
+    preview = preview_measured_resolution(
+        sample_dataset,
+        resolution_dataset,
+        acceptance_decisions=acceptance_decisions,
+        support_overrides=support_overrides,
+        apply_auto_padding=apply_auto_padding,
+    )
+    gate_diagnostics: list[ResolutionDiagnostic] = []
+    for group_index, spectrum in enumerate(preview.spectra):
+        acceptance = spectrum.acceptance
+        if acceptance.decision is None:
+            gate_diagnostics.append(
+                ResolutionDiagnostic(
+                    code="resolution_acceptance_required",
+                    severity=DiagnosticSeverity.ERROR,
+                    message=(
+                        "measured resolution must have an explicit per-Q KEEP or "
+                        "EXCLUDE decision before normalization and use"
+                    ),
+                    group_index=group_index,
+                    group_identity=spectrum.source_spectrum.group_label,
+                )
+            )
+        elif not acceptance.confirmed:
+            gate_diagnostics.append(
+                ResolutionDiagnostic(
+                    code="resolution_acceptance_unconfirmed",
+                    severity=DiagnosticSeverity.ERROR,
+                    message=(
+                        "measured-resolution review decision must be explicitly "
+                        "confirmed before normalization and use"
+                    ),
+                    group_index=group_index,
+                    group_identity=spectrum.source_spectrum.group_label,
+                )
+            )
+    if gate_diagnostics:
+        raise ResolutionPreparationError(tuple(gate_diagnostics))
+
+    prepared_spectra = tuple(
+        PreparedResolutionSpectrum(
+            source_spectrum=item.source_spectrum,
+            padding=item.padding,
+            original_support=item.original_support,
+            support=item.support,
+            acceptance=item.acceptance,
+            auto_padding_applied=item.auto_padding_applied,
+            pre_qc_integral=item.pre_qc_integral,
+            normalization_integral=item.normalization_integral,
+            normalization_factor=item.normalization_factor,
+            signed_area_ratio=item.signed_area_ratio,
+            normalization_method=item.normalization_method,
+            diagnostics=item.diagnostics,
+        )
+        for item in preview.spectra
+    )
+    return PreparedResolution(
+        sample_dataset=preview.sample_dataset,
+        resolution_dataset=preview.resolution_dataset,
+        sample_padding=preview.sample_padding,
+        resolution_padding=preview.resolution_padding,
+        spectra=prepared_spectra,
+        padding_comparisons=preview.padding_comparisons,
+        diagnostics=preview.diagnostics,
     )

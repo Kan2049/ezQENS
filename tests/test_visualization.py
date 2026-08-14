@@ -12,7 +12,11 @@ from matplotlib.patches import Rectangle
 
 from ezqens.domain import QBins, ReducedDataset, Spectrum, SpectrumRole
 from ezqens.preprocessing import FittingSelection, detect_edge_padding
-from ezqens.resolution import prepare_measured_resolution
+from ezqens.resolution import (
+    ResolutionAcceptance,
+    ResolutionAcceptanceDecision,
+    prepare_measured_resolution,
+)
 from ezqens.visualization import (
     plot_q_bins,
     plot_resolution_inspection,
@@ -151,7 +155,16 @@ def test_resolution_plot_consumes_prepared_state_without_mutation() -> None:
             resolution_spectrum.uncertainty,
         )
     )
-    prepared = prepare_measured_resolution(sample, resolution)
+    prepared = prepare_measured_resolution(
+        sample,
+        resolution,
+        acceptance_decisions={
+            0: ResolutionAcceptance(
+                decision=ResolutionAcceptanceDecision.KEEP,
+                confirmed=True,
+            )
+        },
+    )
 
     figure, axes = plot_resolution_inspection(prepared, 0)
 

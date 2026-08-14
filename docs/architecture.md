@@ -178,23 +178,32 @@ and a compact reason. Internal candidates and calculations are not public
 domain state. The service never shifts intensity values or treats an internal
 constant segment as edge padding.
 
-`resolution` implements the measured-resolution-only Milestone-3 boundary. It
+`resolution` implements the measured-resolution-only Milestone-3 boundary and
+the later corrective acceptance gate. It
 requires exact ordered sample/resolution Q identity, runs padding detection
 independently on both datasets, compares retained boundaries diagnostically,
 represents a distinct per-Q resolution support, validates accepted measured
-coordinates, and derives unit-area normalization on the original grid.
+coordinates, previews the exact raw kernel proposed for use, and derives
+unit-area normalization on the original grid only after explicit per-Q
+confirmation.
 
-The prepared result references the immutable source datasets and stores only
-support, normalization metadata, Q association by order, and diagnostics.
+The preview and prepared result reference the immutable source datasets and
+store only original/accepted support, KEEP or contiguous-EXCLUDE decision,
+neutral warning and confirmation state, signed-area-ratio diagnostics,
+normalization metadata, Q association by order, and diagnostics.
 Normalized energy/intensity/uncertainty and source-grid contribution are
 derived read-only properties. Resolution `AUTO` padding is applied by default
 but has an independent reversible per-group application state; changing support
 alone does not disable it. `REVIEW` remains accepted by default and invalid
 energy/intensity remains non-overridable. An internal invalid point inside the
 selected support blocks preparation rather than creating a trapezoidal bridge.
+KEEP preserves the measured support without classifying its structure.
+EXCLUDE can trim boundaries only and cannot express an arbitrary internal mask.
+Unconfirmed preview state does not expose a normalized kernel to convolution.
 Sample fitting ranges do not enter this state. There is no baseline operation,
-interpolation, convolution, recentering, nearest-Q association, caching, or
-analytic fallback in M3.
+automatic feature detection/correction, interpolation, convolution,
+recentring, nearest-Q association, caching, or analytic fallback in this
+preparation boundary.
 
 ### 3.4 Spectral models and convolution
 
@@ -322,7 +331,10 @@ uniform_q_bins(lower_q_edge, upper_q_edge, group_count) -> QBins
 parse_dave_q_bins(source) -> DAVEQBinsResult
 dataset.assign_q_bins(q_bins) -> ReducedDataset
 FittingSelection.uniform(dataset, padding, energy_bounds) -> FittingSelection
-prepare_measured_resolution(sample, resolution, support_overrides)
+preview_measured_resolution(sample, resolution, per_q_decisions, support_overrides)
+  -> ResolutionPreparationPreview
+prepare_measured_resolution(sample, resolution, confirmed_per_q_decisions,
+                            support_overrides)
   -> PreparedResolution
 fit_spectrum(spectrum, resolution, configuration) -> FitResult
 fit_batch(spectra, resolution_map, configuration, cancellation) -> BatchFitResult

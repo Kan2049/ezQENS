@@ -18,7 +18,12 @@ from ezqens.convolution import (
     cell_integrated_lorentzian,
 )
 from ezqens.domain import QBins, ReducedDataset, Spectrum, SpectrumRole
-from ezqens.resolution import PreparedResolution, prepare_measured_resolution
+from ezqens.resolution import (
+    PreparedResolution,
+    ResolutionAcceptance,
+    ResolutionAcceptanceDecision,
+    prepare_measured_resolution,
+)
 
 FloatArray = npt.NDArray[np.float64]
 
@@ -97,7 +102,16 @@ def make_prepared(
         spectra=(resolution_spectrum,),
         q_bins=q_bins,
     )
-    return prepare_measured_resolution(sample, resolution)
+    return prepare_measured_resolution(
+        sample,
+        resolution,
+        acceptance_decisions={
+            0: ResolutionAcceptance(
+                decision=ResolutionAcceptanceDecision.KEEP,
+                confirmed=True,
+            )
+        },
+    )
 
 
 def gaussian_plan(

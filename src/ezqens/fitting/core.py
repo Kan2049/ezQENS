@@ -876,6 +876,9 @@ def _fit_with_starts(
                 float(plan.convolution_energy[0]),
                 float(plan.convolution_energy[-1]),
             ),
+            resolution_acceptance=prepared_resolution.acceptance_provenance(
+                group_index
+            ),
         ),
     )
 

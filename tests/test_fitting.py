@@ -27,7 +27,12 @@ from ezqens.fitting import (
     generate_standard_candidates,
 )
 from ezqens.preprocessing import FittingSelection
-from ezqens.resolution import PreparedResolution, prepare_measured_resolution
+from ezqens.resolution import (
+    PreparedResolution,
+    ResolutionAcceptance,
+    ResolutionAcceptanceDecision,
+    prepare_measured_resolution,
+)
 
 FloatArray = npt.NDArray[np.float64]
 
@@ -151,7 +156,17 @@ def synthetic_problem(
         resolution_energy=resolution_coordinates,
         resolution_values=resolution_values,
     )
-    provisional = prepare_measured_resolution(placeholder, resolution)
+    acceptance = {
+        0: ResolutionAcceptance(
+            decision=ResolutionAcceptanceDecision.KEEP,
+            confirmed=True,
+        )
+    }
+    provisional = prepare_measured_resolution(
+        placeholder,
+        resolution,
+        acceptance_decisions=acceptance,
+    )
     plan = build_convolution_plan(provisional, 0)
     values = evaluate_spectral_model(plan, truth).total.copy()
     if noise_seed is not None:
@@ -163,7 +178,11 @@ def synthetic_problem(
         resolution_energy=resolution_coordinates,
         resolution_values=resolution_values,
     )
-    prepared = prepare_measured_resolution(sample, resolution)
+    prepared = prepare_measured_resolution(
+        sample,
+        resolution,
+        acceptance_decisions=acceptance,
+    )
     selection = FittingSelection.uniform(
         sample,
         prepared.sample_padding,
@@ -811,6 +830,26 @@ def test_different_sample_resolution_grids_and_retained_selection_are_used() -> 
         prepared.sample_dataset.spectra[0].energy[retained],
     )
     assert result.provenance.convolution_spacing < np.median(np.diff(sample_energy))
+    resolution_provenance = result.provenance.resolution_acceptance
+    assert resolution_provenance.group_index == 0
+    assert resolution_provenance.group_label == "resolution-0"
+    assert resolution_provenance.q_value == pytest.approx(0.75)
+    assert resolution_provenance.decision is ResolutionAcceptanceDecision.KEEP
+    assert resolution_provenance.confirmed
+    assert resolution_provenance.original_support == (
+        prepared.spectra[0].original_support.lower_energy,
+        prepared.spectra[0].original_support.upper_energy,
+    )
+    assert resolution_provenance.accepted_support == (
+        prepared.spectra[0].support.lower_energy,
+        prepared.spectra[0].support.upper_energy,
+    )
+    assert resolution_provenance.signed_area_ratio == (
+        prepared.spectra[0].signed_area_ratio
+    )
+    assert resolution_provenance.normalization_factor == (
+        prepared.spectra[0].normalization_factor
+    )
 
 
 def test_candidate_generation_counts_and_has_no_structural_count_ceiling() -> None:

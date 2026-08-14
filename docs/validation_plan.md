@@ -337,6 +337,19 @@ padding. Validate:
   support-only change does not alter AUTO application;
 - `REVIEW` retention by default;
 - explicit support overrides distinct from sample fitting ranges;
+- preview of original/accepted support and raw accepted values before use;
+- blocking missing or unconfirmed per-Q acceptance decisions;
+- confirmed KEEP equivalence to the frozen M3 normalization and downstream
+  convolution/fitting path;
+- confirmed low-, high-, and both-boundary contiguous exclusion before
+  normalization, including unit area, identically scaled uncertainty, and zero
+  source-grid contribution outside support;
+- rejection of unchanged/out-of-bounds/insufficient exclusion support and any
+  internal invalid hole without an arbitrary-mask escape hatch;
+- independent decisions, supports, warnings, and signed-area ratios by Q,
+  including a ratio above 1 after excluding a negative outer tail without any
+  automatic warning, block, clamp, or policy;
+- neutral retained-structure warning provenance without hidden correction;
 - unit-area trapezoidal normalization on uniform and nonuniform measured grids;
 - integrated-area rather than peak-height normalization;
 - explicit failure on nonfinite, zero, and negative areas;
@@ -483,7 +496,10 @@ and scientific inspection plots. Generic custom mapping remains deferred.
 
 Milestone 3 first gates exact Q association, independent resolution support and
 padding, original preservation, measured-grid validation, positive finite
-trapezoidal area, unit normalization, and inspectable diagnostics. Milestone 4
+trapezoidal area, unit normalization, and inspectable diagnostics. The
+corrective acceptance gate additionally requires an explicit confirmed per-Q
+KEEP or contiguous-EXCLUDE decision before normalization and records neutral
+warning and signed-area-ratio provenance. Milestone 4
 then separately gates independent direct/FFT agreement, interpolation policy,
 area preservation, and no wrap-around.
 

@@ -8,6 +8,8 @@ from enum import StrEnum
 import numpy as np
 import numpy.typing as npt
 
+from ezqens.resolution import ResolutionAcceptanceProvenance
+
 FloatArray = npt.NDArray[np.float64]
 
 
@@ -294,6 +296,7 @@ class FitProvenance:
     retained_energy_bounds: tuple[float, float]
     model_energy_bounds: tuple[float, float]
     convolution_energy_bounds: tuple[float, float]
+    resolution_acceptance: ResolutionAcceptanceProvenance
 
 
 @dataclass(frozen=True, slots=True)

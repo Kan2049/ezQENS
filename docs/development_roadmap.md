@@ -339,6 +339,14 @@ Lorentzian configuration, standard 0L/1L/2L multistart candidate evaluation,
 absolute-sigma covariance and threshold-free diagnostics. It intentionally
 does not finalize an Auto winner/adequacy rule.
 
+A corrective prerequisite now requires every measured-resolution Q group to be
+previewed and explicitly confirmed as unchanged KEEP or boundary-only
+contiguous EXCLUDE before normalization and scientific use. KEEP may carry a
+neutral user-retained-structure warning. The gate records signed-area-ratio and
+normalization provenance per Q without automatic feature detection,
+classification, correction, or a ratio threshold. M4 convolution
+mathematics and Phase-A fitting mathematics remain unchanged.
+
 The first useful free-fit model should support:
 
 * elastic contribution;

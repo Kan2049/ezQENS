@@ -309,22 +309,57 @@ in `Å^-1` allow harmless representation noise only. No reordering, nearest-Q
 matching, Q interpolation, or repair occurs.
 
 Padding detection runs independently on sample and resolution. Resolution
-`AUTO` points do not enter the prepared kernel or its normalization and have
+`AUTO` points do not enter a proposed kernel or its normalization and have
 conceptual zero kernel contribution by default. AUTO application is an
 independent per-group boolean state and is reversible: explicitly disabling it
 restores otherwise valid AUTO-marked points inside the selected support. A
 support change alone does not disable AUTO. `REVIEW` remains accepted by
 default. Invalid energy/intensity is non-overridable; invalid uncertainty
-remains visible and is never replaced with zero. The default support spans the
-valid measured bounds, independently of AUTO application. Resolution support is
-distinct from the sample fitting range.
+remains visible and is never replaced with zero. The original/pre-QC support
+spans the valid measured bounds, independently of AUTO application. Resolution
+support is distinct from the sample fitting range.
+
+Every resolution Q group requires an explicit reviewed and confirmed decision
+before normalization, convolution, or fitting. `KEEP` accepts the unchanged
+measured support and is scientifically neutral: it records user approval, not
+an ezQENS claim about the origin of any structure. A neutral
+`suspicious_structure_retained_by_user` warning may accompany KEEP when expert
+judgement accepts unresolved or overlapping structure without correction.
+`EXCLUDE_BY_CONTIGUOUS_SUPPORT` requires a strictly narrower inclusive interval
+inside the original/pre-QC support and can remove only low-energy, high-energy,
+or both outer boundary regions. It cannot represent an internal hole.
+
+The review preview exposes the original and proposed accepted supports, raw
+accepted energy/intensity/uncertainty, the proposed normalization factor,
+warning and confirmation states, and the accepted pre-normalization area. It
+also reports
+
+```text
+signed_area_ratio = accepted_signed_trapezoidal_area / pre_QC_signed_trapezoidal_area
+```
+
+when the pre-QC signed area is finite and positive. Both numerator and
+denominator retain the measured intensity signs after existing invalid/AUTO
+handling, so this dimensionless ratio is not constrained to `[0, 1]` and may
+legitimately exceed 1. It is not a probability, a physical resolution-
+containment fraction, or a measure of how much of the true instrumental
+response remains. It is diagnostic/provenance information only: it has no
+approval or rejection threshold, cannot certify that the accepted support is
+scientifically correct, and cannot determine the scientific origin of a
+feature.
+Unconfirmed groups cannot become prepared kernels. No automatic peak
+detection, classification, subtraction, clipping, reconstruction, or
+interpolation across suspicious internal structure is performed. If the user
+cannot justify retaining or boundary-excluding the measured structure, an
+independently expert-prepared resolution should be supplied instead.
 
 Sample and resolution AUTO-retained boundaries are compared per associated Q
 as a warning-only consistency diagnostic using fixed relative tolerance
 `1e-10` and absolute tolerance `1e-12` in the energy unit. A disagreement does
 not modify either mask.
 
-For accepted measured coordinates `(E_j, I_j)`, Milestone 3 uses trapezoidal
+After confirmation, for accepted measured coordinates `(E_j, I_j)`, the
+existing Milestone-3 calculation uses trapezoidal
 integration on the actual, possibly nonuniform grid:
 
 ```text
