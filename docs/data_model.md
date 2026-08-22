@@ -298,6 +298,67 @@ output, and canonical component-order mapping. Missing covariance remains
 distinct from zero uncertainty. `StandardModelCandidate` describes generated
 search structure; it does not contain a recommendation.
 
+AutoFitRecommendation is a GUI-independent policy result over existing
+CandidateFitResult references for the fixed 0L/1L/2L × NONE/B0/B1 scope. It
+does not duplicate FitResult arrays. It records the Most Recommended concrete
+candidate and Lorentzian count, primary-family support, selected-family
+residual adequacy and identifiability, Strong Alternative, Comparator, severe
+interpretation limitations, advisory scientific warnings, resolution-
+reliability provenance availability, the searched scope, and the complete
+candidate-result tuple. That tuple must contain every one of the nine fixed
+candidate keys exactly once; an explicit failed CandidateFitResult is retained,
+whereas an absent key is invalid provenance. Successful fit configuration and
+candidate count/background identity must agree. Numerical recommendation
+unavailability uses NOT_EVALUABLE residual adequacy rather than substituting an
+evaluated INADEQUATE classification.
+
+Family IC-envelope representatives are distinct from concrete recommendation
+candidates. A family envelope retains the unfiltered minimum-AICc/minimum-BIC
+evidence across numerically usable backgrounds. The concrete family candidate
+is chosen deterministically by AICc only among ADEQUATE or QUESTIONABLE
+residual fits. INADEQUATE candidates remain inspectable evidence but cannot be
+Most Recommended.
+
+`auto_search_exhausted` is derived from the terminal SEARCH_LIMIT_REACHED
+assessment, while `higher_complexity_manual_fit_available` exposes the existing
+arbitrary-N manual continuation seam after that fixed search is exhausted.
+These are workflow facts, not evidence that higher complexity is required. A
+supported 2L recommendation and a residual-inadequate 2L terminal result both
+exhaust the same Auto scope; the latter retains no Most Recommended candidate,
+reports NO_ADEQUATE_MODEL, and retains its evaluated 2L candidate as the
+comparator. Manual 3L-or-higher fits never become members of the Auto candidate
+tuple.
+
+AdditionalComplexityAssessment is separate from primary-family support. It
+records an adjacent family transition, family-envelope AICc/BIC improvement,
+matched-background comparisons, background robustness, transition disposition,
+proposed candidate, interpretation limitations, and reason. The recommendation
+retains all attempted transition assessments, including descriptively
+supported transitions;
+when evaluation reaches 2L it explicitly reports that the automatic search
+limit was reached. Terminal SEARCH_LIMIT_REACHED and NOT_EVALUABLE assessments
+contain no matched-background or candidate-specific interpretation evidence
+for an unsearched transition; evaluated historical transition evidence remains
+in the transition history. Thus a supported primary can coexist with marginal,
+background-confounded, or statistically supported but uninterpretable
+additional complexity.
+
+SUPPORTED_TRANSITION records descriptive support for traversing to the next
+observable family, not acceptance of a physical process.
+SUPPORTED_BUT_RESIDUALLY_INADEQUATE preserves strong/clear descriptive
+complexity evidence when no concrete candidate in the higher family has
+eligible residual structure; the inadequate candidate remains a Comparator and
+cannot replace an eligible primary. Severe multistart decomposition stability
+uses FWHM-canonicalized Lorentzian areas and linewidths rather than nuisance
+parameters.
+
+Structured warning and limitation values contain a small stable meaning code,
+message, and reference to the relevant candidate result. They are not
+confidence percentages, a scoring registry, or persistence entities.
+ResolutionReliabilityAssessment currently records that fit provenance lacks a
+structured scientific resolution-containment assessment; it does not parse
+free text or derive a threshold from support geometry or signed_area_ratio.
+
 ### 4.5 Batch and derived values — milestone 6
 
 `BatchFitResult` is an ordered set of independent per-Q results with traversal,
@@ -383,10 +444,12 @@ instrument protocols, plugin systems, generic reduction factories, GUI state,
 or current persistence classes.
 
 Still unresolved are detailed general DAVE grammar, explicit-list comment
-syntax, Milestone-4 convolution-grid/interpolation/centering policies, any
+syntax, any
 future explicit resolution baseline or energy-recentering operation,
 normalization-integral covariance propagation, analytic resolution sources,
-Auto model-recommendation weighting/decision rules, Bragg heuristics, and any
-future project format. Post-v1.0 motion equations also remain unresolved. None
-may be resolved from private benchmark values or by adding premature
-abstraction.
+structured resolution-containment assessment, Bragg heuristics, and any future
+project format. Post-v1.0 motion equations also remain unresolved. Production
+AutoFit has a fixed reviewed M5 recommendation policy; user-configurable
+thresholds and automatic search above 2L are not defined. None of the
+unresolved items may be resolved from private benchmark values or by adding
+premature abstraction.

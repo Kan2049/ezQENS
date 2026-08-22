@@ -336,8 +336,9 @@ Fit one selected QENS spectrum reliably using the validated measured-resolution 
 
 Phase A provides the reusable production single-Q engine, manual arbitrary-N
 Lorentzian configuration, standard 0L/1L/2L multistart candidate evaluation,
-absolute-sigma covariance and threshold-free diagnostics. It intentionally
-does not finalize an Auto winner/adequacy rule.
+absolute-sigma covariance and threshold-free diagnostics. The production
+AutoFit core now applies the reviewed deterministic M5 policy to that existing
+candidate evidence without changing candidate fitting.
 
 A corrective prerequisite now requires every measured-resolution Q group to be
 previewed and explicitly confirmed as unchanged KEEP or boundary-only
@@ -365,9 +366,34 @@ The first accepted implementation prioritizes:
 * physically meaningful FWHM output;
 * transparent failure behavior.
 
-Model-quality thresholds, containment severity, reference-Q policy, and the
-Auto recommendation/adequacy rule remain unresolved and must not be inferred
-from optimizer convergence or minimum AICc/BIC alone.
+AutoFit searches only 0L/1L/2L × NONE/B0/B1 and recommends the simplest
+adequately supported observable family. Its result separates primary-family
+support from assessment of additional complexity, retains candidate evidence,
+and distinguishes marginal, background-confounded, and statistically supported
+but uninterpretable transitions. Family IC envelopes remain separate from
+residual eligibility of the concrete recommendation candidate, so an
+INADEQUATE fit cannot replace an ADEQUATE or QUESTIONABLE primary even when it
+contributes strong descriptive IC evidence. SUPPORTED_TRANSITION describes
+model-family evidence, not proof of an added physical process. Severe multistart
+stability is assessed on FWHM-canonicalized Lorentzian areas and linewidths,
+excluding nuisance-only variation. The reviewed M5 residual, AICc/BIC, and severe
+identifiability calibration is fixed in the production policy and is not a
+universal physical constant or user-tunable threshold set. Minimum AICc/BIC
+alone never selects the recommendation, D_unique is absent, and a 2L result
+does not exclude higher unsearched complexity.
+
+Exhausting the fixed Auto scope is distinct from finding an adequate 2L model.
+When an evaluated 2L result remains inadequate, Auto returns no recommendation
+and exposes the existing user-configured arbitrary-N manual fit as an available
+continuation; it never starts or labels a 3L-or-higher fit as Auto. Availability
+after a supported 2L result likewise does not recommend escalation.
+
+Structured resolution-containment assessment and reference-Q policy remain
+unresolved. Existing provenance cannot distinguish scientific truncation of
+relevant resolution structure, so AutoFit records that capability gap and
+applies no geometric or signed-area threshold. Milestone 5 remains active
+until this production policy completes the required independent code and
+scientific reviews and is explicitly frozen.
 
 ### Scientific visualization
 

@@ -25,6 +25,12 @@ dev = [
 [tool.hatch.build.targets.wheel]
 packages = ["src/ezqens"]
 
+[tool.hatch.build.targets.sdist]
+exclude = [
+    "/AGENTS.md",
+    "/gptLongtermMd/",
+]
+
 [tool.mypy]
 python_version = "3.12"
 strict = true

@@ -224,6 +224,113 @@ AIC/AICc/BIC are supporting candidate evidence. No minimum-information-
 criterion result alone establishes an adequate model or a physically resolved
 component decomposition.
 
+### 6.1 Production AutoFit recommendation
+
+Production AutoFit recommends the simplest adequately supported **observable**
+spectral model. It does not establish microscopic truth, exclude arbitrarily
+weak unresolved physics, prove that each fitted Lorentzian is an independent
+physical process, or establish that complexity above the searched scope is
+absent. Manual arbitrary-N fitting remains separate.
+
+The fixed automatic search scope is 0L/1L/2L × NONE/B0/B1. Candidate fitting
+and recommendation are separate operations. The deterministic policy applies,
+in order:
+
+    numerical validity
+      -> standardized-residual adequacy
+      -> family-envelope AICc/BIC evidence
+      -> matched-background robustness
+      -> component identifiability
+      -> recommendation and interpretation information
+
+Family-level AICc/BIC envelopes and concrete recommendation eligibility are
+distinct. Envelope evidence continues to use the minimum relevant information
+criterion across every numerically usable allowed background. Within each
+Lorentzian-count family, however, the concrete candidate considered for Most
+Recommended is the minimum-AICc candidate, with deterministic background
+tie-breaking, among candidates whose residual adequacy is ADEQUATE or
+QUESTIONABLE. An INADEQUATE candidate may contribute to descriptive IC
+evidence but cannot become Most Recommended or displace an eligible simpler
+primary.
+
+The result separately reports (a) support for the selected primary family and
+(b) the evidence for moving from that family to the next searched Lorentzian
+family. Consequently, a supported primary can coexist with marginal additional
+complexity, a background-confounded rejected transition, or statistically
+supported but uninterpretable additional structure. A strong alternative and a
+comparator are references to existing candidate results rather than duplicated
+fits. Numerical unavailability and no adequate model within the current search
+scope are distinct outcomes. If no usable baseline fit exists, residual
+adequacy is reported as NOT_EVALUABLE rather than INADEQUATE; INADEQUATE is
+reserved for an evaluated fit with inadequate residual behavior.
+
+Strong or clear descriptive IC evidence may therefore coexist with a
+SUPPORTED_BUT_RESIDUALLY_INADEQUATE higher-family assessment. That state
+retains the higher-family evidence and comparator without treating the
+transition as a recommendation. SUPPORTED_TRANSITION means that descriptive
+evidence supports traversing to the next observable family; it does not prove
+that another physical relaxation process exists.
+
+Reaching the 2L automatic boundary records that the fixed Auto search was
+exhausted; it does not by itself establish either adequacy or inadequacy. If
+the selected 2L candidate remains inadequate, the result has no Most
+Recommended candidate, reports NO_ADEQUATE_MODEL, retains the evaluated 2L
+comparator, and exposes that user-configured higher-N manual fitting is
+available. The same capability remains technically available after a supported
+2L result, but availability is not a scientific recommendation to add another
+Lorentzian. Any 3L-or-higher result remains a manual result and is not
+retroactively part of the 0L–2L Auto recommendation.
+
+For an added-L transition, family-envelope evidence compares the best AICc in
+each family and, separately, the best BIC in each family. Evidence is strong
+for delta_AICc >= 10 and delta_BIC >= 6, clear for delta_AICc >= 6 and
+delta_BIC >= 2, and marginal/conflicting when delta_AICc >= 2,
+delta_BIC >= 0, or the signs disagree. The same evidence classification is
+evaluated for matched NONE, B0, and B1 backgrounds. If an added Lorentzian
+appears supported without background but that evidence disappears with allowed
+B0/B1 backgrounds, only that transition is rejected as background-confounded;
+an otherwise supported simpler primary is not demoted.
+
+Standardized-residual calibration uses moderate flags at RMS > 1.12, absolute
+lag-1 correlation > 0.12, same-sign run >= 12, absolute linear trend > 0.35,
+and maximum absolute residual > 3.8. Strong flags use, respectively, > 1.35,
+> 0.25, >= 18, > 0.8, and > 5.0. A fit is inadequate with at least two strong
+flags, RMS > 1.6, or absolute lag-1 correlation > 0.45; it is questionable
+with at least one strong or two moderate flags. These values and the
+information-criterion boundaries are reviewed M5 policy calibration choices,
+not universal physical constants.
+
+Severe component-interpretation limitations are covariance/rank failure,
+unavailable free-parameter uncertainty, a materially relevant active bound,
+Lorentzian area/standard-error below 1 or unavailable, component-relevant
+absolute parameter correlation at least 0.995, no successful multistart result,
+or relative Lorentzian-decomposition span at least 0.5 among successful starts
+within delta_chi_square <= 2. The multistart comparison canonicalizes components
+by increasing FWHM and evaluates Lorentzian integrated areas, total
+quasielastic area, and Lorentzian FWHMs. Variation confined to E0, elastic area,
+or background parameters does not create a severe decomposition limitation.
+Correlation is assessed with parameter identity; high
+correlation between unrelated nuisance parameters does not reject a component
+decomposition. A finite raw condition number at least 1e8 and adjacent
+intrinsic FWHM ratio at most 1.2 are advisory only and never standalone hard
+gates.
+
+Warnings are structured advisory results attached to candidate references.
+They can report accepted comparisons already present in fit diagnostics,
+background sensitivity, background-confounded rejected transitions, and
+within-family background ambiguity without becoming confidence percentages.
+No warning score or registry exists.
+
+Current fit provenance identifies accepted resolution support, confirmation,
+signed-area diagnostics, and neutral acceptance warnings, but it has no
+structured scientific assessment of whether relevant measured-resolution
+structure was truncated. AutoFit records this provenance capability gap and
+applies no resolution-containment gate. It does not derive one from
+signed_area_ratio, a support/FWHM ratio, user confirmation, or free text.
+
+D_unique is not part of production M5 AutoFit: it is neither a result field,
+recommendation input, warning input, nor threshold.
+
 ## 7. Batch fitting
 
 Batch fitting is sequential application of a shared model configuration to
