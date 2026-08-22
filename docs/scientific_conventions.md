@@ -114,10 +114,13 @@ Automatic initialization and recommendation above the currently validated
 standard candidate scope are not implied by this arbitrary-N scientific-model
 capability.
 
-For each Q spectrum, free fitting permits independent elastic integrated area,
-Lorentzian integrated area, Lorentzian FWHM, energy-center shift, and
-background parameters. Each parameter has an initial value, lower and upper
-bounds, and fixed/free status.
+For each Q spectrum, the shared-center default permits independent elastic
+integrated area, Lorentzian integrated area, Lorentzian FWHM, shared
+energy-center shift, and background parameters. Manual expert fitting may give
+any Lorentzian its own center `ParameterConfiguration`; absence means a true tie
+to the shared `E0`, not a separately initialized copy. An independent center has
+its own initial value, lower and upper bounds, and fixed/free status. Production
+AutoFit remains shared-center-only.
 
 Elastic and Lorentzian amplitude parameters used for EISF are integrated areas,
 not peak heights. Component identifiers and individual quasielastic areas must
@@ -140,13 +143,18 @@ normalization makes `A_elastic` the integrated elastic area.
 For each quasielastic component:
 
 ```text
-A_i * [R_Q convolved with L_i](E - E0)
+A_i * [R_Q convolved with L_i](E - E_i)
 ```
 
 `L_i` is a unit-area normalized Lorentzian, `A_i` is its integrated
-quasielastic area, and its linewidth parameter is FWHM. Numerical convolution
-must preserve this integrated-area meaning within a reviewed, documented
-finite-grid tolerance.
+quasielastic area, and its linewidth parameter is FWHM. The default true tie is
+`E_i = E0`; a manual expert configuration may instead fit or fix `E_i`
+independently. Independent centers and their uncertainties are retained as
+neutral component parameters so elastic-relative offsets remain inspectable.
+They do not by themselves identify INS or prove a microscopic assignment, and
+no automatic center-offset threshold is defined. Numerical convolution must
+preserve integrated-area meaning within a reviewed, documented finite-grid
+tolerance.
 
 ## 5. Experimental EISF
 
@@ -345,19 +353,20 @@ derived-quantity use are distinct states with recorded reasons.
 
 ## 8. Analysis-level masks and warnings
 
-The following current Milestone-2 concepts remain distinct:
+The following analysis-level concepts remain distinct:
 
 - automatically detected invalid values, including invalid sigma;
 - `AUTO` boundary-padding masks;
 - `REVIEW` boundary-padding masks;
+- explicit per-group manual point-exclusion masks;
 - the inclusive fitting-energy range selected independently for each group; and
 - the derived effective fitting-point mask.
 
-The derived Milestone-2 exclusion is exactly invalid measurement data OR
-`AUTO` padding OR points outside that group's inclusive fitting range. `REVIEW`
-padding remains retained unless excluded by another current rule. Manual
-single-point masks, whole-Q fitting exclusions, and derived-result exclusions
-are deferred until later workflows require them.
+The derived exclusion is exactly invalid measurement data OR `AUTO` padding OR
+manual exclusion OR points outside that group's inclusive fitting range.
+`REVIEW` padding remains retained unless excluded by another rule. Invalid and
+`AUTO` points cannot be re-enabled through manual state. Whole-Q fitting
+exclusions and derived-result exclusions remain separate later-workflow state.
 
 Possible Bragg contamination, including contamination near the elastic line at
 specific Q, may generate a warning. ezQENS must not silently delete the Q

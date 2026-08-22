@@ -219,11 +219,15 @@ fit range, resolution valid range, and Bragg warnings.
 
 ## 5. Spectral analysis capabilities
 
-Measured-resolution convolution must support an elastic component, one or more
-Lorentzians, and constant or linear background. Each Q spectrum has independent
+Measured-resolution convolution supports an elastic component, zero or more
+Lorentzians, and NONE/B0/B1 background. Each Q spectrum has independent
 free-fit values for elastic integrated area, each Lorentzian integrated area
-and FWHM, energy-center shift, and background parameters. Every parameter must
-have an initial value, lower and upper bounds, and a fixed/free state.
+and FWHM, shared energy-center shift, and background parameters. For manual
+expert fitting, each Lorentzian may instead carry an independent center
+parameter; absence of that parameter is a true tie to the shared shift. Every
+configured parameter has an initial value, lower and upper bounds, and a
+fixed/free state. Production AutoFit remains shared-center-only and retains its
+fixed 0L/1L/2L × NONE/B0/B1 scope.
 
 After accepted-support selection and unit-area normalization, let the measured
 resolution be `R_Q(E)`. Evaluate
@@ -241,12 +245,16 @@ unit integrated area, `A_elastic` is the integrated elastic area.
 Each quasielastic term is:
 
 ```text
-A_i * [R_Q convolved with L_i](E - E0)
+A_i * [R_Q convolved with L_i](E - E_i)
 ```
 
 where `L_i` is a unit-area Lorentzian, `A_i` is its integrated area, and its
-linewidth is FWHM. Numerical convolution preserves integrated-area semantics
-within a documented finite-grid tolerance.
+linewidth is FWHM. By default `E_i = E0` through a true shared-parameter tie;
+manual expert fitting may configure an independent `E_i` with its own bounds
+and fixed/free state. An independent center is neutral fitted information and
+must not be classified automatically as INS or another physical mechanism.
+Numerical convolution preserves integrated-area semantics within a documented
+finite-grid tolerance.
 
 The default optimizer is `scipy.optimize.least_squares`. The default residual
 is `(model - data) / sigma`, making weighted least squares the default
@@ -283,6 +291,10 @@ Automatic edge-padding masks are a further distinct point-level mask. `AUTO`
 may be default-on but remains reversible; `REVIEW` remains separate and
 requires a later user decision. Padding is not background subtraction and does
 not modify intensity values.
+
+An explicit per-group manual-exclusion mask is independently retained and
+combined only in the derived fitting exclusion: invalid OR `AUTO` OR manual OR
+outside the inclusive fitting range. It cannot restore invalid or `AUTO` points.
 
 A statistically valid uncertainty is finite and strictly greater than zero.
 NaN, positive/negative infinity, zero, and negative sigma values are flagged

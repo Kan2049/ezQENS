@@ -63,10 +63,11 @@ class ParameterConfiguration:
 
 @dataclass(frozen=True, slots=True)
 class LorentzianComponent:
-    """One unit-area intrinsic Lorentzian with integrated-area amplitude."""
+    """One unit-area Lorentzian, optionally centered independently for manual fit."""
 
     area: ParameterConfiguration
     fwhm: ParameterConfiguration
+    center: ParameterConfiguration | None = None
 
     def __post_init__(self) -> None:
         if self.area.lower_bound < 0.0 or self.area.initial_value < 0.0:
@@ -77,7 +78,7 @@ class LorentzianComponent:
 
 @dataclass(frozen=True, slots=True)
 class SpectralModelDefinition:
-    """One elastic component, variable Lorentzians, shared E0, and background."""
+    """Elastic plus variable Lorentzians, shared E0 by default, and background."""
 
     energy_shift: ParameterConfiguration
     elastic_area: ParameterConfiguration

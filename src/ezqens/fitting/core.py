@@ -83,6 +83,8 @@ def _parameter_slots(model: SpectralModelDefinition) -> tuple[_ParameterSlot, ..
                 _ParameterSlot(f"lorentzian_{index}_fwhm", component.fwhm),
             )
         )
+        if component.center is not None:
+            slots.append(_ParameterSlot(f"lorentzian_{index}_center", component.center))
     if model.b0 is not None:
         slots.append(_ParameterSlot("b0", model.b0))
     if model.b1 is not None:
@@ -113,14 +115,20 @@ def _model_from_values(
     elastic_area = configurations[position]
     position += 1
     components: list[LorentzianComponent] = []
-    for _ in template.lorentzians:
+    for template_component in template.lorentzians:
+        center = (
+            configurations[position + 2]
+            if template_component.center is not None
+            else None
+        )
         components.append(
             LorentzianComponent(
                 area=configurations[position],
                 fwhm=configurations[position + 1],
+                center=center,
             )
         )
-        position += 2
+        position += 3 if center is not None else 2
     b0 = configurations[position] if template.b0 is not None else None
     if b0 is not None:
         position += 1
@@ -166,6 +174,7 @@ def evaluate_spectral_model(
     elastic = np.asarray(model.elastic_area.initial_value * elastic_shape)
     lorentzian_contributions: list[FloatArray] = []
     for component in model.lorentzians:
+        center = e0 if component.center is None else component.center.initial_value
         intrinsic = cell_integrated_lorentzian(
             plan.model_energy,
             fwhm=component.fwhm.initial_value,
@@ -173,7 +182,7 @@ def evaluate_spectral_model(
         )
         profile = plan.convolve(intrinsic).evaluate(
             coordinates,
-            energy_shift=e0,
+            energy_shift=center,
         )
         lorentzian_contributions.append(
             np.asarray(component.area.initial_value * profile, dtype=np.float64)
@@ -298,19 +307,47 @@ def _expand_free_values(
     return values
 
 
+def _component_parameter_indices(
+    model: SpectralModelDefinition,
+) -> tuple[tuple[int, int, int | None], ...]:
+    indices: list[tuple[int, int, int | None]] = []
+    position = 2
+    for component in model.lorentzians:
+        center_index = position + 2 if component.center is not None else None
+        indices.append((position, position + 1, center_index))
+        position += 3 if center_index is not None else 2
+    return tuple(indices)
+
+
+def _canonical_component_order(
+    values: FloatArray,
+    model: SpectralModelDefinition,
+) -> tuple[int, ...]:
+    indices = _component_parameter_indices(model)
+    return tuple(
+        sorted(
+            range(model.lorentzian_count),
+            key=lambda index: float(values[indices[index][1]]),
+        )
+    )
+
+
 def _canonical_permutation(
     values: FloatArray,
-    lorentzian_count: int,
+    model: SpectralModelDefinition,
 ) -> tuple[int, ...]:
-    component_order = sorted(
-        range(lorentzian_count),
-        key=lambda index: float(values[3 + 2 * index]),
-    )
+    indices = _component_parameter_indices(model)
+    component_order = _canonical_component_order(values, model)
     permutation = [0, 1]
     for component_index in component_order:
-        start = 2 + 2 * component_index
-        permutation.extend((start, start + 1))
-    permutation.extend(range(2 + 2 * lorentzian_count, values.size))
+        area_index, fwhm_index, center_index = indices[component_index]
+        permutation.extend((area_index, fwhm_index))
+        if center_index is not None:
+            permutation.append(center_index)
+    component_parameter_count = sum(
+        3 if component.center is not None else 2 for component in model.lorentzians
+    )
+    permutation.extend(range(2 + component_parameter_count, values.size))
     return tuple(permutation)
 
 
@@ -444,6 +481,30 @@ def _correlation_from_covariance(
     return np.asarray(correlation, dtype=np.float64), maximum
 
 
+def _validate_center_coverage(
+    name: str,
+    configuration: ParameterConfiguration,
+    inputs: _FitInputs,
+    plan: ConvolutionPlan,
+) -> None:
+    allowed_lower = float(inputs.energy[-1] - plan.convolution_energy[-1])
+    allowed_upper = float(inputs.energy[0] - plan.convolution_energy[0])
+    if configuration.free and (
+        not np.isfinite(configuration.lower_bound)
+        or not np.isfinite(configuration.upper_bound)
+        or configuration.lower_bound < allowed_lower
+        or configuration.upper_bound > allowed_upper
+    ):
+        raise FittingError(
+            f"free {name} requires finite bounds inside the fixed "
+            "convolution-domain coverage"
+        )
+    if not allowed_lower <= configuration.initial_value <= allowed_upper:
+        raise FittingError(
+            f"{name} initial value falls outside fixed convolution-domain coverage"
+        )
+
+
 def _fit_with_starts(
     prepared_resolution: PreparedResolution,
     selection: FittingSelection,
@@ -485,25 +546,15 @@ def _fit_with_starts(
     free_count = sum(slot.configuration.free for slot in template_slots)
     inputs = _fit_inputs(prepared_resolution, selection, group_index, free_count)
     plan = inputs.plan
-    shift_configuration = template.energy_shift
-    allowed_shift_lower = float(inputs.energy[-1] - plan.convolution_energy[-1])
-    allowed_shift_upper = float(inputs.energy[0] - plan.convolution_energy[0])
-    if shift_configuration.free and (
-        not np.isfinite(shift_configuration.lower_bound)
-        or not np.isfinite(shift_configuration.upper_bound)
-        or shift_configuration.lower_bound < allowed_shift_lower
-        or shift_configuration.upper_bound > allowed_shift_upper
-    ):
-        raise FittingError(
-            "free energy_shift requires finite bounds inside the fixed "
-            "convolution-domain coverage"
-        )
-    if not (
-        allowed_shift_lower <= shift_configuration.initial_value <= allowed_shift_upper
-    ):
-        raise FittingError(
-            "energy_shift initial value falls outside fixed convolution-domain coverage"
-        )
+    _validate_center_coverage("energy_shift", template.energy_shift, inputs, plan)
+    for index, component in enumerate(template.lorentzians, start=1):
+        if component.center is not None:
+            _validate_center_coverage(
+                f"lorentzian_{index}_center",
+                component.center,
+                inputs,
+                plan,
+            )
     initial, lower, upper, free_indices = _free_problem(template)
     del initial
 
@@ -594,67 +645,26 @@ def _fit_with_starts(
     if np.any(active_lower | active_upper):
         free_covariance = None
     covariance = _full_covariance(free_covariance, len(template_slots), free_indices)
-    permutation = _canonical_permutation(full_values, template.lorentzian_count)
+    component_order = _canonical_component_order(full_values, best_model)
+    permutation = _canonical_permutation(full_values, best_model)
     full_values = full_values[np.asarray(permutation, dtype=np.int64)]
     active_lower = active_lower[np.asarray(permutation, dtype=np.int64)]
     active_upper = active_upper[np.asarray(permutation, dtype=np.int64)]
-    permuted_slots = tuple(template_slots[index] for index in permutation)
     if covariance is not None:
         covariance = covariance[np.ix_(permutation, permutation)]
-    canonical_configurations = tuple(slot.configuration for slot in permuted_slots)
-    # Values and their component-specific bounds/free states move together.
-    fitted_model = SpectralModelDefinition(
-        energy_shift=ParameterConfiguration(
-            full_values[0],
-            canonical_configurations[0].lower_bound,
-            canonical_configurations[0].upper_bound,
-            canonical_configurations[0].free,
-        ),
-        elastic_area=ParameterConfiguration(
-            full_values[1],
-            canonical_configurations[1].lower_bound,
-            canonical_configurations[1].upper_bound,
-            canonical_configurations[1].free,
-        ),
-        lorentzians=tuple(
-            LorentzianComponent(
-                area=ParameterConfiguration(
-                    full_values[2 + 2 * index],
-                    canonical_configurations[2 + 2 * index].lower_bound,
-                    canonical_configurations[2 + 2 * index].upper_bound,
-                    canonical_configurations[2 + 2 * index].free,
-                ),
-                fwhm=ParameterConfiguration(
-                    full_values[3 + 2 * index],
-                    canonical_configurations[3 + 2 * index].lower_bound,
-                    canonical_configurations[3 + 2 * index].upper_bound,
-                    canonical_configurations[3 + 2 * index].free,
-                ),
-            )
-            for index in range(template.lorentzian_count)
-        ),
-        background=template.background,
-        b0=(
-            ParameterConfiguration(
-                full_values[2 + 2 * template.lorentzian_count],
-                canonical_configurations[2 + 2 * template.lorentzian_count].lower_bound,
-                canonical_configurations[2 + 2 * template.lorentzian_count].upper_bound,
-                canonical_configurations[2 + 2 * template.lorentzian_count].free,
-            )
-            if template.b0 is not None
-            else None
-        ),
-        b1=(
-            ParameterConfiguration(
-                full_values[-1],
-                canonical_configurations[-1].lower_bound,
-                canonical_configurations[-1].upper_bound,
-                canonical_configurations[-1].free,
-            )
-            if template.b1 is not None
-            else None
-        ),
+    canonical_template = SpectralModelDefinition(
+        energy_shift=best_model.energy_shift,
+        elastic_area=best_model.elastic_area,
+        lorentzians=tuple(best_model.lorentzians[index] for index in component_order),
+        background=best_model.background,
+        b0=best_model.b0,
+        b1=best_model.b1,
     )
+    canonical_configurations = tuple(
+        slot.configuration for slot in _parameter_slots(canonical_template)
+    )
+    # Values and their component-specific bounds/free states move together.
+    fitted_model = _model_from_values(canonical_template, full_values)
     evaluation = evaluate_spectral_model(plan, fitted_model, inputs.energy)
     raw_residuals = np.asarray(evaluation.total - inputs.intensity)
     standardized = np.asarray(raw_residuals / inputs.sigma)
@@ -770,17 +780,17 @@ def _fit_with_starts(
             free_indices,
             solution.optimized.x,
         )
+        canonical_component_order = _canonical_component_order(
+            fitted_start_values,
+            start_model,
+        )
         start_permutation = _canonical_permutation(
             fitted_start_values,
-            template.lorentzian_count,
+            start_model,
         )
         fitted_start_values = fitted_start_values[
             np.asarray(start_permutation, dtype=np.int64)
         ]
-        canonical_component_order = tuple(
-            (start_permutation[2 + 2 * index] - 2) // 2
-            for index in range(template.lorentzian_count)
-        )
         alternative_starts.append(
             AlternativeStartResult(
                 start_index=solution.start_index,

@@ -123,8 +123,12 @@ Public synthetic text fixtures cover the following contracts.
 
 - Independent finite inclusive ranges for every group.
 - One initial common range with immutable group overrides.
-- Effective exclusion combines invalid measurement, `AUTO` padding, and
-  outside-range points while retaining `REVIEW` where otherwise usable.
+- Effective exclusion combines invalid measurement, `AUTO` padding, explicit
+  manual point exclusion, and outside-range points while retaining `REVIEW`
+  where otherwise usable.
+- Manual masks default to all false, are exact-length/read-only per group, can be
+  replaced or cleared immutably, cannot restore invalid or `AUTO` points, and
+  fail clearly if no usable point remains.
 - Empty usable selections fail clearly and no original array is modified.
 - Direct in-memory/source-independent datasets support the full milestone path.
 - Plot tests verify figures/axes, plotted scientific values, selected ranges,
@@ -230,9 +234,15 @@ without asserting that every noisy realization equals truth. Evaluate:
 
 - integrated elastic and Lorentzian areas;
 - Lorentzian FWHM;
-- energy-center shift;
+- shared energy-center shift and manual independent Lorentzian centers;
 - constant and linear background parameters;
 - one and multiple Lorentzians;
+- shared-center numerical backward compatibility and one/multiple independently
+  centered Lorentzians, including fixed/free/bounded centers;
+- parameter names/counts, covariance/correlation dimensions, nominal DOF, and
+  FWHM canonicalization with center state kept on its component;
+- exactly nine shared-center standard Auto candidates with unchanged nominal
+  parameter counts and no independent-center Auto candidate;
 - fixed/free states and active bounds;
 - per-Q independence and optional previous-fit seeding; and
 - derived tau and EISF.

@@ -934,6 +934,103 @@ def test_successful_fit_configuration_must_match_candidate_key(
         recommend_standard_candidates(tuple(evidence))
 
 
+def _with_independent_center_parameter(
+    fit: FitResult,
+    component_number: int,
+) -> FitResult:
+    insertion = next(
+        index + 1
+        for index, parameter in enumerate(fit.parameters)
+        if parameter.name == f"lorentzian_{component_number}_fwhm"
+    )
+    parameters = list(fit.parameters)
+    parameters.insert(
+        insertion,
+        ParameterEstimate(
+            name=f"lorentzian_{component_number}_center",
+            value=0.03,
+            standard_error=0.01,
+            lower_bound=-0.2,
+            upper_bound=0.2,
+            free=True,
+        ),
+    )
+    parameter_count = len(parameters)
+    return replace(
+        fit,
+        parameters=tuple(parameters),
+        covariance=np.eye(parameter_count),
+        correlation=np.eye(parameter_count),
+    )
+
+
+def test_independently_centered_1l_fit_is_rejected_as_standard_auto_evidence() -> None:
+    scores = _scores(((30.0, 31.0, 32.0), (10.0, 11.0, 12.0), (20.0, 21.0, 22.0)))
+    evidence = list(_results(scores))
+    target = StandardModelCandidate(1, BackgroundModel.NONE)
+    index = next(i for i, item in enumerate(evidence) if item.candidate == target)
+    item = evidence[index]
+    assert item.fit is not None
+    component = item.fit.configuration.lorentzians[0]
+    independent_configuration = replace(
+        item.fit.configuration,
+        lorentzians=(
+            replace(
+                component,
+                center=ParameterConfiguration(0.03, -0.2, 0.2),
+            ),
+        ),
+    )
+    independent_fit = replace(
+        _with_independent_center_parameter(item.fit, 1),
+        configuration=independent_configuration,
+    )
+    evidence[index] = replace(item, fit=independent_fit)
+
+    with pytest.raises(ValueError, match="must use the shared energy_shift"):
+        recommend_standard_candidates(tuple(evidence))
+
+
+def test_2l_center_parameter_schema_is_rejected_before_auto_interpretation() -> None:
+    scores = _scores(((30.0, 31.0, 32.0), (20.0, 21.0, 22.0), (10.0, 11.0, 12.0)))
+    evidence = list(_results(scores))
+    target = StandardModelCandidate(2, BackgroundModel.CONSTANT)
+    index = next(i for i, item in enumerate(evidence) if item.candidate == target)
+    item = evidence[index]
+    assert item.fit is not None
+    evidence[index] = replace(
+        item,
+        fit=_with_independent_center_parameter(item.fit, 2),
+    )
+
+    with pytest.raises(ValueError, match="parameter schema.*independent Lorentzian"):
+        recommend_standard_candidates(tuple(evidence))
+
+
+def test_complete_shared_center_lattice_remains_accepted_unchanged() -> None:
+    scores = _scores(((20.0, 10.0, 0.0), (40.0, 30.0, 20.0), (50.0, 40.0, 30.0)))
+    evidence = _results(scores)
+
+    recommendation = recommend_standard_candidates(evidence)
+
+    assert recommendation.recommended_candidate == StandardModelCandidate(
+        0,
+        BackgroundModel.LINEAR,
+    )
+    assert recommendation.candidate_results is evidence
+    assert len(recommendation.candidate_results) == 9
+    for item in recommendation.candidate_results:
+        assert item.fit is not None
+        assert all(
+            component.center is None for component in item.fit.configuration.lorentzians
+        )
+        assert not any(
+            parameter.name.startswith("lorentzian_")
+            and parameter.name.endswith("_center")
+            for parameter in item.fit.parameters
+        )
+
+
 def test_tied_background_alternative_is_fully_input_order_invariant() -> None:
     scores = _scores(
         (

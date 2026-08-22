@@ -194,13 +194,15 @@ reconstructed group counts is a warning rather than a parse failure.
 
 Each ordered group has its own finite inclusive `FittingRange`.
 `FittingSelection` associates the unchanged `ReducedDataset`, padding result,
-and ordered range tuple. It derives rather than stores invalid, in-range,
-excluded, and retained masks. Exclusion is invalid measurement OR `AUTO`
-padding OR outside the selected group range. `REVIEW` is not automatically
-excluded. A selection fails when a group retains no usable measured points.
+ordered range tuple, and one explicit read-only manual-exclusion mask per group.
+Manual masks default to all false, match the corresponding original spectrum
+length exactly, and can be replaced or cleared immutably per group. The model
+derives invalid, in-range, excluded, and retained masks without modifying source
+arrays. Exclusion is invalid measurement OR `AUTO` padding OR manual exclusion
+OR outside the selected group range. `REVIEW` is not automatically excluded. A
+selection fails when a group retains no usable measured points.
 
-Manual point masks, whole-Q fitting exclusions, and Bragg warnings remain
-separate future concepts and are not Milestone-2 state.
+Whole-Q fitting exclusions and Bragg warnings remain separate concepts.
 
 ### 4.3 ResolutionDataset and processing values — milestone 3
 
@@ -280,10 +282,14 @@ policy.
 
 `SpectralModelDefinition` minimally describes one elastic component, a
 variable-length collection of zero or more unit-area Lorentzians, NONE/B0/B1
-background, one shared `E0`, integrated-area amplitudes, and FWHM linewidths.
-`ParameterConfiguration` supplies initial value, bounds, and fixed/free state.
-The model has no software-level Lorentzian-count maximum; fitted components are
-canonicalized by increasing FWHM.
+background, a shared elastic `E0`, integrated-area amplitudes, and FWHM
+linewidths. Each Lorentzian has an optional center `ParameterConfiguration`;
+absence means a true tie to the shared `E0`, while presence defines an
+independent manual/expert parameter with its own initial value, bounds, and
+fixed/free state. `ParameterConfiguration` supplies those same fields for every
+parameter. The model has no software-level Lorentzian-count maximum; fitted
+components are canonicalized by increasing FWHM with their center state and
+estimates kept attached.
 
 `FitResult` preserves the submitted model configuration separately from fitted
 parameter estimates. It links both to retained original sample coordinates,

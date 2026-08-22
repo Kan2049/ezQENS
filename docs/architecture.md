@@ -163,10 +163,12 @@ never independently recomputes EISF, relaxation time, or other formulas.
 
 `preprocessing` expresses analysis-level masks and transformations as pure or
 side-effect-free operations returning new data plus minimal trace records.
-Milestone 2 distinguishes invalid values, per-group fit ranges, `AUTO` padding,
-and `REVIEW` padding; later fitting workflows add manual point, spectral, and
-derived-result exclusions as separate state. Sigma is valid only when finite
-and strictly positive; every other sigma is automatically invalid-masked without
+It keeps invalid values, per-group fit ranges, `AUTO` padding,
+`REVIEW` padding, and explicit manual point exclusions as separate immutable
+state. `FittingSelection` derives effective exclusion as invalid OR `AUTO` OR
+manual OR outside range while preserving original arrays; `REVIEW` remains
+retained unless another rule excludes it. Sigma is valid only when finite and
+strictly positive; every other sigma is automatically invalid-masked without
 changing original arrays.
 
 Boundary-padding detection is a separate preprocessing service, not importer
@@ -214,9 +216,10 @@ through a stable interface but know nothing about optimizers or UI.
 For unit-area processed resolution `R_Q`, the elastic evaluator returns
 `A_elastic * R_Q(E - E0)` directly; it never constructs a discrete numerical
 delta. Each quasielastic evaluator returns
-`A_i * [R_Q convolved with L_i](E - E0)` for a unit-area Lorentzian with FWHM
-linewidth. Convolution preserves integrated areas within reviewed finite-grid
-tolerance.
+`A_i * [R_Q convolved with L_i](E - E_i)` for a unit-area Lorentzian with FWHM
+linewidth. `E_i` is tied to shared `E0` when the Lorentzian has no independent
+center configuration; manual expert models may supply one. Convolution
+preserves integrated areas within reviewed finite-grid tolerance.
 
 `convolution` implements the Milestone-4 CPU numerical core as a reusable
 per-Q `ConvolutionPlan` plus a `ConvolvedProfile`. The plan is built from the
@@ -238,14 +241,16 @@ policy. Future `E0` shifts change evaluation coordinates, not the plan/grid.
 ### 3.5 Fitting, diagnostics, and batch execution
 
 `fitting` represents one elastic component, a variable-length Lorentzian
-collection, one shared energy shift, and NONE/B0/B1 background. It adapts this
+collection, shared energy shift by default, optional per-Lorentzian independent
+centers for manual expert fitting, and NONE/B0/B1 background. It adapts this
 manual configuration to `scipy.optimize.least_squares(method="trf")`, uses the
 existing fitting selection and prepared resolution, constructs weighted
 standardized residuals on retained original sample coordinates, honors
 fixed/free state and bounds, and returns raw optimizer facts without hiding
-failure. The scientific model has no Lorentzian-count ceiling; validated
-automatic multistart initialization is currently limited to standard 0L/1L/2L
-candidates.
+failure. Independent centers enter normal parameter, covariance, correlation,
+DOF/statistics, and component-canonicalization bookkeeping. The scientific model
+has no Lorentzian-count ceiling; production AutoFit remains shared-center-only
+and exactly 0L/1L/2L × NONE/B0/B1.
 
 Fit results expose component-resolved model values, raw/standardized residuals,
 chi-square, reduced chi-square, unscaled absolute-sigma covariance/error

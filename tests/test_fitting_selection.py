@@ -142,6 +142,80 @@ def test_effective_mask_combines_invalid_auto_and_outside_but_not_review() -> No
         assert not mask.flags.writeable
 
 
+def test_manual_exclusion_defaults_to_read_only_all_false_masks() -> None:
+    dataset = make_dataset(
+        [[1.0, 2.0, 4.0, 3.0], [2.0, 3.0, 5.0, 4.0]],
+    )
+    padding = detect_edge_padding(dataset)
+
+    selection = FittingSelection(
+        dataset=dataset,
+        padding=padding,
+        ranges=(FittingRange(-2.0, 2.0),) * 2,
+    )
+
+    for group_index in range(2):
+        manual = selection.manual_exclusion_mask(group_index)
+        assert manual.dtype == np.bool_
+        assert manual.size == dataset.spectra[group_index].energy.size
+        assert not manual.flags.writeable
+        assert not np.any(manual)
+
+
+def test_manual_exclusion_composes_without_overriding_other_mask_states() -> None:
+    dataset = make_dataset(
+        [[-2.0] * 5 + [3.0, 4.0, 2.0] + [-1.0] * 2],
+        energies=[np.arange(-5.0, 5.0).tolist()],
+        uncertainties=[[0.2] * 6 + [0.0] + [0.2] * 3],
+    )
+    padding = detect_edge_padding(dataset)
+    selection = FittingSelection.uniform(
+        dataset,
+        padding,
+        lower_energy=-3.0,
+        upper_energy=3.0,
+    )
+    manual = np.zeros(10, dtype=np.bool_)
+    manual[8] = True
+
+    updated = selection.with_group_manual_exclusion(0, manual)
+
+    assert selection.retained_mask(0)[8]
+    assert padding.spectra[0].review_mask[8]
+    assert updated.excluded_mask(0)[8]
+    assert updated.excluded_mask(0)[0]  # AUTO remains excluded.
+    assert updated.excluded_mask(0)[6]  # Invalid uncertainty remains excluded.
+    assert updated.excluded_mask(0)[9]  # Outside the range remains excluded.
+    assert not np.any(selection.manual_exclusion_mask(0))
+    assert not updated.manual_exclusion_mask(0).flags.writeable
+    cleared = updated.clear_group_manual_exclusion(0)
+    assert cleared.retained_mask(0)[8]
+    assert not np.any(cleared.manual_exclusion_mask(0))
+
+
+def test_manual_exclusion_is_boolean_length_validated_and_cannot_empty_group() -> None:
+    dataset = make_dataset([[1.0, 2.0, 4.0, 3.0]])
+    selection = FittingSelection.uniform(
+        dataset,
+        detect_edge_padding(dataset),
+        lower_energy=-2.0,
+        upper_energy=2.0,
+    )
+
+    with pytest.raises(ValueError, match="boolean vectors"):
+        selection.with_group_manual_exclusion(0, [0, 1, 0, 0])
+    with pytest.raises(ValueError, match="spectrum length"):
+        selection.with_group_manual_exclusion(
+            0,
+            np.zeros(3, dtype=np.bool_),
+        )
+    with pytest.raises(ValueError, match="no usable measured points"):
+        selection.with_group_manual_exclusion(
+            0,
+            np.ones(4, dtype=np.bool_),
+        )
+
+
 def test_range_count_and_padding_alignment_are_validated() -> None:
     dataset = make_dataset([[1.0, 2.0, 3.0], [2.0, 3.0, 4.0]])
     padding = detect_edge_padding(dataset)

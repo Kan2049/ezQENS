@@ -747,6 +747,19 @@ def _validate_successful_candidate_configuration(
             "successful fit configuration disagrees with candidate "
             f"{result.candidate.name}"
         )
+    if any(component.center is not None for component in fit.configuration.lorentzians):
+        raise ValueError(
+            "successful standard AutoFit candidate evidence must use the shared "
+            "energy_shift; independent Lorentzian centers are not allowed"
+        )
+    if any(
+        parameter.name.startswith("lorentzian_") and parameter.name.endswith("_center")
+        for parameter in fit.parameters
+    ):
+        raise ValueError(
+            "successful standard AutoFit candidate parameter schema must not "
+            "contain independent Lorentzian centers"
+        )
 
 
 def _validate_complete_candidate_results(
