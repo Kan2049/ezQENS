@@ -193,14 +193,18 @@ reconstructed group counts is a warning rather than a parse failure.
 ### 4.2 FittingRange and FittingSelection — milestone 2
 
 Each ordered group has its own finite inclusive `FittingRange`.
-`FittingSelection` associates the unchanged `ReducedDataset`, padding result,
-ordered range tuple, and one explicit read-only manual-exclusion mask per group.
-Manual masks default to all false, match the corresponding original spectrum
-length exactly, and can be replaced or cleared immutably per group. The model
-derives invalid, in-range, excluded, and retained masks without modifying source
-arrays. Exclusion is invalid measurement OR `AUTO` padding OR manual exclusion
-OR outside the selected group range. `REVIEW` is not automatically excluded. A
-selection fails when a group retains no usable measured points.
+`FittingSelection` associates the unchanged `ReducedDataset`, stored padding
+proposal, ordered range tuple, one read-only manual-exclusion mask per group, and
+one read-only manual-`AUTO`-reinclusion mask per group. Both manual masks default
+to all false, match the corresponding original spectrum length exactly, and can
+be replaced or cleared immutably per group. Re-inclusion may target only `AUTO`
+points, and manual exclusion and re-inclusion are mutually exclusive at a point.
+The model derives invalid, in-range, excluded, and retained masks without
+modifying source arrays or the padding proposal. Exclusion is invalid measurement
+OR (`AUTO` AND NOT manual `AUTO` re-inclusion) OR manual exclusion OR outside the
+selected group range. Invalid measurements remain non-overridable, and `REVIEW`
+is not automatically excluded. A selection fails when a group retains no usable
+measured points.
 
 Whole-Q fitting exclusions and Bragg warnings remain separate concepts.
 

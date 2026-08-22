@@ -287,14 +287,16 @@ contamination may trigger a warning but never silent deletion. Every exclusion
 is recorded in the analysis state. A complete append-only persistent history is
 not a v1.0 requirement.
 
-Automatic edge-padding masks are a further distinct point-level mask. `AUTO`
-may be default-on but remains reversible; `REVIEW` remains separate and
-requires a later user decision. Padding is not background subtraction and does
-not modify intensity values.
+Automatic edge-padding masks are a further distinct point-level proposal.
+`AUTO` is applied by default but is reversible per original sample point;
+`REVIEW` remains separate and retained unless another rule excludes it. Padding
+is not background subtraction and does not modify intensity values.
 
-An explicit per-group manual-exclusion mask is independently retained and
-combined only in the derived fitting exclusion: invalid OR `AUTO` OR manual OR
-outside the inclusive fitting range. It cannot restore invalid or `AUTO` points.
+Explicit per-group manual-exclusion and manual-`AUTO`-reinclusion masks are
+retained independently. Effective fitting exclusion is invalid OR (`AUTO` AND
+NOT manual `AUTO` re-inclusion) OR manual exclusion OR outside the inclusive
+fitting range. Invalid measurements cannot be re-enabled. Manual state modifies
+neither the stored automatic proposal nor original arrays.
 
 A statistically valid uncertainty is finite and strictly greater than zero.
 NaN, positive/negative infinity, zero, and negative sigma values are flagged

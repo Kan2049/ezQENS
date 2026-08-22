@@ -49,6 +49,10 @@ class FittingSelection:
     padding: EdgePaddingDetectionResult = field(repr=False)
     ranges: tuple[FittingRange, ...]
     manual_exclusion_masks: tuple[BoolArray, ...] = field(default=(), repr=False)
+    manual_auto_reinclusion_masks: tuple[BoolArray, ...] = field(
+        default=(),
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         ranges = tuple(self.ranges)
@@ -68,6 +72,16 @@ class FittingSelection:
             )
         elif len(manual_masks) != spectrum_count:
             raise ValueError("manual-exclusion-mask count must match spectrum count")
+        auto_reinclusion_masks = tuple(self.manual_auto_reinclusion_masks)
+        if not auto_reinclusion_masks:
+            auto_reinclusion_masks = tuple(
+                _readonly_mask(np.zeros(spectrum.energy.size, dtype=np.bool_))
+                for spectrum in self.dataset.spectra
+            )
+        elif len(auto_reinclusion_masks) != spectrum_count:
+            raise ValueError(
+                "manual-AUTO-reinclusion-mask count must match spectrum count"
+            )
         for spectrum, padding in zip(
             self.dataset.spectra, self.padding.spectra, strict=True
         ):
@@ -90,6 +104,35 @@ class FittingSelection:
             self,
             "manual_exclusion_masks",
             tuple(validated_manual_masks),
+        )
+        validated_auto_reinclusion_masks: list[BoolArray] = []
+        for spectrum, padding, manual, mask in zip(
+            self.dataset.spectra,
+            self.padding.spectra,
+            validated_manual_masks,
+            auto_reinclusion_masks,
+            strict=True,
+        ):
+            array = np.asarray(mask)
+            if array.ndim != 1 or array.dtype != np.bool_:
+                raise ValueError(
+                    "manual AUTO re-inclusion masks must be boolean vectors"
+                )
+            if array.size != spectrum.energy.size:
+                raise ValueError(
+                    "manual AUTO re-inclusion mask must match spectrum length"
+                )
+            if np.any(array & ~padding.auto_mask):
+                raise ValueError("manual AUTO re-inclusion may only target AUTO points")
+            if np.any(array & manual):
+                raise ValueError(
+                    "manual exclusion and AUTO re-inclusion must be mutually exclusive"
+                )
+            validated_auto_reinclusion_masks.append(_readonly_mask(array))
+        object.__setattr__(
+            self,
+            "manual_auto_reinclusion_masks",
+            tuple(validated_auto_reinclusion_masks),
         )
         for group_index, spectrum in enumerate(self.dataset.spectra):
             if not np.any(self.retained_mask(group_index)):
@@ -151,6 +194,30 @@ class FittingSelection:
             np.zeros(spectrum.energy.size, dtype=np.bool_),
         )
 
+    def with_group_manual_auto_reinclusion(
+        self,
+        group_index: int,
+        mask: npt.ArrayLike,
+    ) -> FittingSelection:
+        """Return a selection with one group's AUTO re-inclusions replaced."""
+
+        self._spectrum(group_index)
+        masks = list(self.manual_auto_reinclusion_masks)
+        masks[group_index] = np.asarray(mask)
+        return replace(self, manual_auto_reinclusion_masks=tuple(masks))
+
+    def clear_group_manual_auto_reinclusion(
+        self,
+        group_index: int,
+    ) -> FittingSelection:
+        """Return a selection with one group's AUTO re-inclusions cleared."""
+
+        spectrum = self._spectrum(group_index)
+        return self.with_group_manual_auto_reinclusion(
+            group_index,
+            np.zeros(spectrum.energy.size, dtype=np.bool_),
+        )
+
     def _spectrum(self, group_index: int) -> Spectrum:
         if not 0 <= group_index < len(self.dataset.spectra):
             raise IndexError("group_index is outside the dataset")
@@ -167,6 +234,12 @@ class FittingSelection:
         self._spectrum(group_index)
         return self.manual_exclusion_masks[group_index]
 
+    def manual_auto_reinclusion_mask(self, group_index: int) -> BoolArray:
+        """Return the explicit user re-inclusions of proposed AUTO points."""
+
+        self._spectrum(group_index)
+        return self.manual_auto_reinclusion_masks[group_index]
+
     def in_range_mask(self, group_index: int) -> BoolArray:
         """Return the inclusive selected-energy mask for one group."""
 
@@ -178,13 +251,16 @@ class FittingSelection:
         )
 
     def excluded_mask(self, group_index: int) -> BoolArray:
-        """Return invalid OR AUTO OR manual OR outside-range points."""
+        """Return the effective excluded-point mask for one group."""
 
         invalid = self.invalid_mask(group_index)
         in_range = self.in_range_mask(group_index)
         auto_padding = self.padding.spectra[group_index].auto_mask
+        auto_reinclusion = self.manual_auto_reinclusion_mask(group_index)
         manual = self.manual_exclusion_mask(group_index)
-        return _readonly_mask(invalid | auto_padding | manual | ~in_range)
+        return _readonly_mask(
+            invalid | (auto_padding & ~auto_reinclusion) | manual | ~in_range
+        )
 
     def retained_mask(self, group_index: int) -> BoolArray:
         """Return points retained for later fitting."""

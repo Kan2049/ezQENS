@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from types import SimpleNamespace
 
 import numpy as np
@@ -1090,6 +1091,80 @@ def test_manual_exclusion_is_applied_end_to_end_without_source_mutation() -> Non
         strict=True,
     ):
         np.testing.assert_array_equal(current, original)
+
+
+def test_auto_reinclusion_feeds_single_q_fit_without_source_mutation() -> None:
+    truth = model_definition(lorentzians=((0.4, 0.13),))
+    prepared, selection = synthetic_problem(truth)
+    spectrum = prepared.sample_dataset.spectra[0]
+    originals = tuple(
+        array.copy()
+        for array in (spectrum.energy, spectrum.intensity, spectrum.uncertainty)
+    )
+    auto = np.zeros(spectrum.energy.size, dtype=np.bool_)
+    auto[[0, 1]] = True
+    padding = replace(
+        selection.padding,
+        spectra=(replace(selection.padding.spectra[0], auto_mask=auto),),
+    )
+    auto_applied = FittingSelection(
+        dataset=selection.dataset,
+        padding=padding,
+        ranges=selection.ranges,
+    )
+    reinclusion = np.zeros(spectrum.energy.size, dtype=np.bool_)
+    reinclusion[0] = True
+    updated = auto_applied.with_group_manual_auto_reinclusion(0, reinclusion)
+
+    result = fit_single_q(prepared, updated, 0, perturbed(truth))
+
+    assert result.statistics.observations == spectrum.energy.size - 1
+    np.testing.assert_array_equal(
+        result.evaluation.energy,
+        spectrum.energy[updated.retained_mask(0)],
+    )
+    assert spectrum.energy[0] in result.evaluation.energy
+    assert spectrum.energy[1] not in result.evaluation.energy
+    for current, original in zip(
+        (spectrum.energy, spectrum.intensity, spectrum.uncertainty),
+        originals,
+        strict=True,
+    ):
+        np.testing.assert_array_equal(current, original)
+
+
+def test_all_standard_candidates_use_identical_auto_reincluded_selection() -> None:
+    truth = model_definition(
+        lorentzians=((0.5, 0.12),),
+        background=BackgroundModel.CONSTANT,
+        b0=0.02,
+    )
+    prepared, selection = synthetic_problem(truth, noise_seed=88)
+    spectrum = prepared.sample_dataset.spectra[0]
+    auto = np.zeros(spectrum.energy.size, dtype=np.bool_)
+    auto[[0, 1]] = True
+    padding = replace(
+        selection.padding,
+        spectra=(replace(selection.padding.spectra[0], auto_mask=auto),),
+    )
+    auto_applied = FittingSelection(
+        dataset=selection.dataset,
+        padding=padding,
+        ranges=selection.ranges,
+    )
+    reinclusion = np.zeros(spectrum.energy.size, dtype=np.bool_)
+    reinclusion[0] = True
+    updated = auto_applied.with_group_manual_auto_reinclusion(0, reinclusion)
+    expected_energy = spectrum.energy[updated.retained_mask(0)]
+
+    results = evaluate_standard_candidates(prepared, updated, 0)
+
+    assert len(results) == 9
+    assert all(item.fit is not None for item in results)
+    for item in results:
+        assert item.fit is not None
+        np.testing.assert_array_equal(item.fit.evaluation.energy, expected_energy)
+        assert item.fit.statistics.observations == expected_energy.size
 
 
 def test_different_sample_resolution_grids_and_retained_selection_are_used() -> None:

@@ -1,6 +1,7 @@
 """Tests for per-group fitting ranges and derived point masks."""
 
 from collections.abc import Sequence
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -156,10 +157,15 @@ def test_manual_exclusion_defaults_to_read_only_all_false_masks() -> None:
 
     for group_index in range(2):
         manual = selection.manual_exclusion_mask(group_index)
+        auto_reinclusion = selection.manual_auto_reinclusion_mask(group_index)
         assert manual.dtype == np.bool_
         assert manual.size == dataset.spectra[group_index].energy.size
         assert not manual.flags.writeable
         assert not np.any(manual)
+        assert auto_reinclusion.dtype == np.bool_
+        assert auto_reinclusion.size == dataset.spectra[group_index].energy.size
+        assert not auto_reinclusion.flags.writeable
+        assert not np.any(auto_reinclusion)
 
 
 def test_manual_exclusion_composes_without_overriding_other_mask_states() -> None:
@@ -214,6 +220,147 @@ def test_manual_exclusion_is_boolean_length_validated_and_cannot_empty_group() -
             0,
             np.ones(4, dtype=np.bool_),
         )
+
+
+def test_auto_reinclusion_is_per_group_read_only_and_preserves_proposal() -> None:
+    dataset = make_dataset(
+        [[-2.0] * 5 + [3.0, 4.0, 2.0], [-3.0] * 5 + [2.0, 5.0, 3.0]],
+    )
+    originals = tuple(spectrum.intensity.copy() for spectrum in dataset.spectra)
+    padding = detect_edge_padding(dataset)
+    original_auto = tuple(item.auto_mask.copy() for item in padding.spectra)
+    selection = FittingSelection.uniform(
+        dataset,
+        padding,
+        lower_energy=-4.0,
+        upper_energy=3.0,
+    )
+    group_zero = np.zeros(8, dtype=np.bool_)
+    group_zero[4] = True
+    one_reincluded = selection.with_group_manual_auto_reinclusion(0, group_zero)
+    group_one = np.zeros(8, dtype=np.bool_)
+    group_one[[3, 4]] = True
+    independently_reincluded = one_reincluded.with_group_manual_auto_reinclusion(
+        1,
+        group_one,
+    )
+
+    assert not selection.retained_mask(0)[4]
+    assert one_reincluded.retained_mask(0)[4]
+    np.testing.assert_array_equal(
+        one_reincluded.manual_auto_reinclusion_mask(1),
+        np.zeros(8, dtype=np.bool_),
+    )
+    assert independently_reincluded.retained_mask(1)[3]
+    assert independently_reincluded.retained_mask(1)[4]
+    assert not independently_reincluded.manual_auto_reinclusion_mask(0).flags.writeable
+    for spectrum, original, padding_result, auto in zip(
+        dataset.spectra,
+        originals,
+        padding.spectra,
+        original_auto,
+        strict=True,
+    ):
+        np.testing.assert_array_equal(spectrum.intensity, original)
+        np.testing.assert_array_equal(padding_result.auto_mask, auto)
+
+
+def test_invalid_measurement_remains_excluded_when_auto_reinclusion_is_requested() -> (
+    None
+):
+    dataset = make_dataset(
+        [[-2.0] * 5 + [3.0, 4.0, 2.0]],
+        uncertainties=[[0.2] * 5 + [0.0, 0.2, 0.2]],
+    )
+    detected = detect_edge_padding(dataset)
+    auto = detected.spectra[0].auto_mask.copy()
+    auto[5] = True
+    padding = replace(
+        detected,
+        spectra=(replace(detected.spectra[0], auto_mask=auto),),
+    )
+    selection = FittingSelection.uniform(
+        dataset,
+        padding,
+        lower_energy=-4.0,
+        upper_energy=3.0,
+    )
+    reinclusion = np.zeros(8, dtype=np.bool_)
+    reinclusion[5] = True
+
+    updated = selection.with_group_manual_auto_reinclusion(0, reinclusion)
+
+    assert updated.manual_auto_reinclusion_mask(0)[5]
+    assert updated.invalid_mask(0)[5]
+    assert updated.excluded_mask(0)[5]
+    assert not updated.retained_mask(0)[5]
+
+
+def test_manual_exclusion_and_auto_reinclusion_conflict_is_rejected() -> None:
+    dataset = make_dataset([[-2.0] * 5 + [3.0, 4.0, 2.0]])
+    selection = FittingSelection.uniform(
+        dataset,
+        detect_edge_padding(dataset),
+        lower_energy=-4.0,
+        upper_energy=3.0,
+    )
+    reinclusion = np.zeros(8, dtype=np.bool_)
+    reinclusion[4] = True
+    updated = selection.with_group_manual_auto_reinclusion(0, reinclusion)
+    manual = np.zeros(8, dtype=np.bool_)
+    manual[4] = True
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        updated.with_group_manual_exclusion(0, manual)
+
+    manual[4] = False
+    manual[6] = True
+    ordinary_exclusion = updated.with_group_manual_exclusion(0, manual)
+    assert ordinary_exclusion.retained_mask(0)[4]
+    assert ordinary_exclusion.excluded_mask(0)[6]
+
+
+def test_auto_reinclusion_validation_and_clear_workflows() -> None:
+    dataset = make_dataset([[-2.0] * 5 + [3.0, 4.0, 2.0]])
+    padding = detect_edge_padding(dataset)
+    selection = FittingSelection.uniform(
+        dataset,
+        padding,
+        lower_energy=-4.0,
+        upper_energy=3.0,
+    )
+    reinclusion = np.zeros(8, dtype=np.bool_)
+    reinclusion[4] = True
+    manual = np.zeros(8, dtype=np.bool_)
+    manual[6] = True
+    edited = selection.with_group_manual_auto_reinclusion(
+        0,
+        reinclusion,
+    ).with_group_manual_exclusion(0, manual)
+
+    clear_manual = edited.clear_group_manual_exclusion(0)
+    assert clear_manual.retained_mask(0)[4]
+    assert clear_manual.retained_mask(0)[6]
+    reset_to_auto = clear_manual.clear_group_manual_auto_reinclusion(0)
+    np.testing.assert_array_equal(
+        reset_to_auto.retained_mask(0), selection.retained_mask(0)
+    )
+    clear_reversible = edited.clear_group_manual_exclusion(
+        0
+    ).with_group_manual_auto_reinclusion(0, padding.spectra[0].auto_mask)
+    assert np.all(clear_reversible.retained_mask(0))
+
+    with pytest.raises(ValueError, match="boolean vectors"):
+        selection.with_group_manual_auto_reinclusion(0, [0, 0, 0, 0, 1, 0, 0, 0])
+    with pytest.raises(ValueError, match="spectrum length"):
+        selection.with_group_manual_auto_reinclusion(
+            0,
+            np.zeros(7, dtype=np.bool_),
+        )
+    outside_auto = np.zeros(8, dtype=np.bool_)
+    outside_auto[6] = True
+    with pytest.raises(ValueError, match="only target AUTO"):
+        selection.with_group_manual_auto_reinclusion(0, outside_auto)
 
 
 def test_range_count_and_padding_alignment_are_validated() -> None:

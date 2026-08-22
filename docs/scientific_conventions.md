@@ -359,14 +359,18 @@ The following analysis-level concepts remain distinct:
 - `AUTO` boundary-padding masks;
 - `REVIEW` boundary-padding masks;
 - explicit per-group manual point-exclusion masks;
+- explicit per-group manual `AUTO`-reinclusion masks;
 - the inclusive fitting-energy range selected independently for each group; and
 - the derived effective fitting-point mask.
 
-The derived exclusion is exactly invalid measurement data OR `AUTO` padding OR
-manual exclusion OR points outside that group's inclusive fitting range.
-`REVIEW` padding remains retained unless excluded by another rule. Invalid and
-`AUTO` points cannot be re-enabled through manual state. Whole-Q fitting
-exclusions and derived-result exclusions remain separate later-workflow state.
+The derived exclusion is exactly invalid measurement data OR (`AUTO` padding
+AND NOT manual `AUTO` re-inclusion) OR manual exclusion OR points outside that
+group's inclusive fitting range. `AUTO` is therefore a reversible default
+analysis proposal, while invalid data remain non-overridable. `REVIEW` padding
+remains retained unless excluded by another rule. Manual exclusion and manual
+`AUTO` re-inclusion are mutually exclusive at each point and never modify the
+stored padding proposal or original arrays. Whole-Q fitting exclusions and
+derived-result exclusions remain separate later-workflow state.
 
 Possible Bragg contamination, including contamination near the elastic line at
 specific Q, may generate a warning. ezQENS must not silently delete the Q

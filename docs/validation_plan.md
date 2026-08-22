@@ -123,12 +123,16 @@ Public synthetic text fixtures cover the following contracts.
 
 - Independent finite inclusive ranges for every group.
 - One initial common range with immutable group overrides.
-- Effective exclusion combines invalid measurement, `AUTO` padding, explicit
-  manual point exclusion, and outside-range points while retaining `REVIEW`
-  where otherwise usable.
-- Manual masks default to all false, are exact-length/read-only per group, can be
-  replaced or cleared immutably, cannot restore invalid or `AUTO` points, and
-  fail clearly if no usable point remains.
+- Effective exclusion combines invalid measurement, (`AUTO` padding AND NOT
+  manual `AUTO` re-inclusion), explicit manual point exclusion, and outside-range
+  points while retaining `REVIEW` where otherwise usable.
+- Manual exclusion and manual `AUTO`-reinclusion masks default to all false, are
+  exact-length/read-only per group, can be replaced or cleared immutably, and are
+  mutually exclusive. Re-inclusion targets only `AUTO` points and never restores
+  invalid data; selections fail clearly if no usable point remains.
+- Tests cover default `AUTO` application, single/multiple and per-Q re-inclusion,
+  reset/clear workflows, unchanged source/proposal arrays, and identical retained
+  inputs across all standard AutoFit candidates.
 - Empty usable selections fail clearly and no original array is modified.
 - Direct in-memory/source-independent datasets support the full milestone path.
 - Plot tests verify figures/axes, plotted scientific values, selected ranges,

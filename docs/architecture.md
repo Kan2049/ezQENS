@@ -164,10 +164,13 @@ never independently recomputes EISF, relaxation time, or other formulas.
 `preprocessing` expresses analysis-level masks and transformations as pure or
 side-effect-free operations returning new data plus minimal trace records.
 It keeps invalid values, per-group fit ranges, `AUTO` padding,
-`REVIEW` padding, and explicit manual point exclusions as separate immutable
-state. `FittingSelection` derives effective exclusion as invalid OR `AUTO` OR
-manual OR outside range while preserving original arrays; `REVIEW` remains
-retained unless another rule excludes it. Sigma is valid only when finite and
+`REVIEW` padding, explicit manual point exclusions, and manual `AUTO`
+re-inclusions as separate immutable state. `FittingSelection` derives effective
+exclusion as invalid OR (`AUTO` AND NOT manual `AUTO` re-inclusion) OR manual
+exclusion OR outside range while preserving original arrays; `REVIEW` remains
+retained unless another rule excludes it. Invalid measurements are never
+re-enabled, and user edits modify neither source arrays nor the stored automatic
+padding proposal. Sigma is valid only when finite and
 strictly positive; every other sigma is automatically invalid-masked without
 changing original arrays.
 
