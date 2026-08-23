@@ -16,6 +16,7 @@ from ezqens.resolution import (
     PreparedResolution,
     ResolutionAcceptance,
     ResolutionAcceptanceDecision,
+    ResolutionAcceptanceSource,
     ResolutionAcceptanceWarning,
     ResolutionPreparationError,
     ResolutionSupport,
@@ -529,7 +530,7 @@ def test_internal_invalid_intensity_hole_fails_without_trapezoid_bridge() -> Non
     )
 
     with pytest.raises(ResolutionPreparationError) as caught:
-        prepare_confirmed_resolution(sample, resolution)
+        prepare_measured_resolution(sample, resolution)
 
     assert diagnostic_code(caught.value) == (
         "resolution_support_contains_internal_invalid_hole"
@@ -582,9 +583,7 @@ def test_default_support_excludes_invalid_boundary_region_contiguously() -> None
     assert prepared.normalized_integral == pytest.approx(1.0)
 
 
-def test_preview_exposes_pending_keep_data_but_preparation_requires_confirmation() -> (
-    None
-):
+def test_preview_remains_pending_while_normal_preparation_is_automatic() -> None:
     sample, resolution = matched_pair()
 
     preview = preview_measured_resolution(sample, resolution)
@@ -615,9 +614,36 @@ def test_preview_exposes_pending_keep_data_but_preparation_requires_confirmation
         )
     )
 
-    with pytest.raises(ResolutionPreparationError) as missing:
-        prepare_measured_resolution(sample, resolution)
-    assert diagnostic_code(missing.value) == "resolution_acceptance_required"
+    prepared = prepare_measured_resolution(sample, resolution)
+    accepted = prepared.spectra[0].acceptance
+    provenance = prepared.acceptance_provenance(0)
+    assert accepted.decision is ResolutionAcceptanceDecision.KEEP
+    assert accepted.confirmed
+    assert accepted.source is ResolutionAcceptanceSource.AUTOMATIC_QC
+    assert provenance.acceptance_source is ResolutionAcceptanceSource.AUTOMATIC_QC
+    assert provenance.confirmed
+    assert prepared.spectra[0].support == prepared.spectra[0].original_support
+    assert prepared.spectra[0].auto_padding_applied
+
+    with pytest.raises(ResolutionPreparationError) as override_without_review:
+        prepare_measured_resolution(
+            sample,
+            resolution,
+            apply_auto_padding={0: False},
+        )
+    assert diagnostic_code(override_without_review.value) == (
+        "resolution_acceptance_required"
+    )
+
+    with pytest.raises(ResolutionPreparationError) as support_without_review:
+        prepare_measured_resolution(
+            sample,
+            resolution,
+            support_overrides={0: ResolutionSupport(-1.0, 1.0)},
+        )
+    assert diagnostic_code(support_without_review.value) == (
+        "resolution_exclusion_decision_required"
+    )
 
     with pytest.raises(ResolutionPreparationError) as unconfirmed:
         prepare_measured_resolution(
@@ -631,6 +657,33 @@ def test_preview_exposes_pending_keep_data_but_preparation_requires_confirmation
             },
         )
     assert diagnostic_code(unconfirmed.value) == "resolution_acceptance_unconfirmed"
+
+
+@pytest.mark.parametrize("override_auto_padding", [None, False])
+def test_callers_cannot_forge_automatic_qc_acceptance(
+    override_auto_padding: bool | None,
+) -> None:
+    sample, resolution = matched_pair()
+    acceptance = ResolutionAcceptance(
+        decision=ResolutionAcceptanceDecision.KEEP,
+        confirmed=True,
+        source=ResolutionAcceptanceSource.AUTOMATIC_QC,
+    )
+    auto_application = (
+        None if override_auto_padding is None else {0: override_auto_padding}
+    )
+
+    with pytest.raises(ResolutionPreparationError) as error:
+        prepare_measured_resolution(
+            sample,
+            resolution,
+            acceptance_decisions={0: acceptance},
+            apply_auto_padding=auto_application,
+        )
+
+    assert diagnostic_code(error.value) == (
+        "resolution_automatic_acceptance_source_reserved"
+    )
 
 
 def test_confirmed_keep_exactly_preserves_m3_normalization_semantics() -> None:
@@ -654,12 +707,14 @@ def test_confirmed_keep_exactly_preserves_m3_normalization_semantics() -> None:
             0: ResolutionAcceptance(
                 decision=ResolutionAcceptanceDecision.KEEP,
                 confirmed=True,
+                source=ResolutionAcceptanceSource.USER_REVIEW,
             )
         },
     ).spectra[0]
 
     assert prepared.acceptance.decision is ResolutionAcceptanceDecision.KEEP
     assert prepared.acceptance.confirmed
+    assert prepared.acceptance.source is ResolutionAcceptanceSource.USER_REVIEW
     assert prepared.support == prepared.original_support
     assert prepared.normalization_integral == expected_integral
     assert prepared.normalization_factor == 1.0 / expected_integral
@@ -713,6 +768,7 @@ def test_confirmed_contiguous_exclusion_trims_boundaries_before_normalization(
             0: ResolutionAcceptance(
                 decision=(ResolutionAcceptanceDecision.EXCLUDE_BY_CONTIGUOUS_SUPPORT),
                 confirmed=True,
+                source=ResolutionAcceptanceSource.USER_REVIEW,
             )
         },
         support_overrides={0: support},
@@ -739,6 +795,7 @@ def test_confirmed_contiguous_exclusion_trims_boundaries_before_normalization(
     assert prepared.signed_area_ratio == pytest.approx(
         expected_integral / full_integral
     )
+    assert prepared.acceptance.source is ResolutionAcceptanceSource.USER_REVIEW
 
 
 def test_signed_area_ratio_above_one_is_diagnostic_only() -> None:
@@ -895,6 +952,7 @@ def test_keep_with_warning_preserves_kernel_and_neutral_provenance() -> None:
     ]
     assert provenance.decision is ResolutionAcceptanceDecision.KEEP
     assert provenance.confirmed
+    assert provenance.acceptance_source is ResolutionAcceptanceSource.USER_REVIEW
     assert provenance.warnings == (warning,)
 
 

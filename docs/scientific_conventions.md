@@ -106,21 +106,27 @@ than a misleading number.
 
 The measured-resolution-convolved model supports:
 
-- an elastic component;
+- an optional elastic component;
 - zero or more Lorentzian components, with no software-level count ceiling;
 - a constant or linear background.
+
+At least one component is required. Background-only, Lorentzian-only,
+elastic-only, and supported combinations are valid; absent elastic is not
+represented as a hidden fixed-zero component.
 
 Automatic initialization and recommendation above the currently validated
 standard candidate scope are not implied by this arbitrary-N scientific-model
 capability.
 
-For each Q spectrum, the shared-center default permits independent elastic
-integrated area, Lorentzian integrated area, Lorentzian FWHM, shared
-energy-center shift, and background parameters. Manual expert fitting may give
-any Lorentzian its own center `ParameterConfiguration`; absence means a true tie
-to the shared `E0`, not a separately initialized copy. An independent center has
-its own initial value, lower and upper bounds, and fixed/free status. Production
-AutoFit remains shared-center-only.
+Manual center-to-center ties use stable named `CenterGroup` identities. Each
+group owns exactly one `ParameterConfiguration`—value, bounds, and fixed/free
+state—and every referencing elastic or Lorentzian component uses that one
+optimizer parameter. Multiple groups and single-member independent groups are
+supported; no GUI master component is scientific state. Legacy shared `E0` and
+per-Lorentzian independent-center construction remain supported. FWHM
+canonicalization must preserve group references, and shared centers count once
+in covariance and DOF bookkeeping. Production AutoFit remains elastic-containing
+and single-shared-center-only.
 
 Elastic and Lorentzian amplitude parameters used for EISF are integrated areas,
 not peak heights. Component identifiers and individual quasielastic areas must
@@ -329,7 +335,8 @@ background sensitivity, background-confounded rejected transitions, and
 within-family background ambiguity without becoming confidence percentages.
 No warning score or registry exists.
 
-Current fit provenance identifies accepted resolution support, confirmation,
+Current fit provenance identifies accepted resolution support, acceptance
+origin/authorization,
 signed-area diagnostics, and neutral acceptance warnings, but it has no
 structured scientific assessment of whether relevant measured-resolution
 structure was truncated. AutoFit records this provenance capability gap and
@@ -439,10 +446,15 @@ remains visible and is never replaced with zero. The original/pre-QC support
 spans the valid measured bounds, independently of AUTO application. Resolution
 support is distinct from the sample fitting range.
 
-Every resolution Q group requires an explicit reviewed and confirmed decision
-before normalization, convolution, or fitting. `KEEP` accepts the unchanged
-measured support and is scientifically neutral: it records user approval, not
-an ezQENS claim about the origin of any structure. A neutral
+A normal resolution Q group that passes existing structural/preparation QC is
+automatically accepted as default `KEEP`, with default support and default AUTO
+padding application, before normalization. Provenance records automatic QC rather
+than user confirmation. Explicit user-reviewed `KEEP`, AUTO-padding override, or
+`EXCLUDE_BY_CONTIGUOUS_SUPPORT` remains available; explicit review decisions must
+be confirmed. The `confirmed` flag authorizes scientific use but does not alone prove
+user confirmation; `source` carries the automatic-versus-user origin. KEEP is
+scientifically neutral and never identifies the origin of
+measured structure. A neutral
 `suspicious_structure_retained_by_user` warning may accompany KEEP when expert
 judgement accepts unresolved or overlapping structure without correction.
 `EXCLUDE_BY_CONTIGUOUS_SUPPORT` requires a strictly narrower inclusive interval
@@ -451,7 +463,8 @@ or both outer boundary regions. It cannot represent an internal hole.
 
 The review preview exposes the original and proposed accepted supports, raw
 accepted energy/intensity/uncertainty, the proposed normalization factor,
-warning and confirmation states, and the accepted pre-normalization area. It
+warning, authorization, and acceptance-origin states, and the accepted
+pre-normalization area. It
 also reports
 
 ```text
@@ -467,7 +480,8 @@ response remains. It is diagnostic/provenance information only: it has no
 approval or rejection threshold, cannot certify that the accepted support is
 scientifically correct, and cannot determine the scientific origin of a
 feature.
-Unconfirmed groups cannot become prepared kernels. No automatic peak
+Pending explicit-review groups cannot become prepared kernels. Automatically
+accepted normal groups require no second confirmation. No automatic peak
 detection, classification, subtraction, clipping, reconstruction, or
 interpolation across suspicious internal structure is performed. If the user
 cannot justify retaining or boundary-excluding the measured structure, an
@@ -478,7 +492,8 @@ as a warning-only consistency diagnostic using fixed relative tolerance
 `1e-10` and absolute tolerance `1e-12` in the energy unit. A disagreement does
 not modify either mask.
 
-After confirmation, for accepted measured coordinates `(E_j, I_j)`, the
+After automatic or explicit acceptance, for measured coordinates `(E_j, I_j)`,
+the
 existing Milestone-3 calculation uses trapezoidal
 integration on the actual, possibly nonuniform grid:
 

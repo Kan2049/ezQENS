@@ -219,15 +219,14 @@ fit range, resolution valid range, and Bragg warnings.
 
 ## 5. Spectral analysis capabilities
 
-Measured-resolution convolution supports an elastic component, zero or more
-Lorentzians, and NONE/B0/B1 background. Each Q spectrum has independent
-free-fit values for elastic integrated area, each Lorentzian integrated area
-and FWHM, shared energy-center shift, and background parameters. For manual
-expert fitting, each Lorentzian may instead carry an independent center
-parameter; absence of that parameter is a true tie to the shared shift. Every
-configured parameter has an initial value, lower and upper bounds, and a
-fixed/free state. Production AutoFit remains shared-center-only and retains its
-fixed 0L/1L/2L × NONE/B0/B1 scope.
+Measured-resolution convolution supports an optional elastic component, zero
+or more Lorentzians, and NONE/B0/B1 background; at least one scientific component
+is required. Manual models may therefore be elastic-only, Lorentzian-only,
+background-only, or supported combinations without representing absent elastic
+as fixed zero. Stable center groups own one value/bounds/free state shared by all
+referencing elastic/Lorentzian components, and multiple tied or single-member
+independent groups are supported. Production AutoFit remains the elastic-
+containing single-shared-center 0L/1L/2L × NONE/B0/B1 family.
 
 After accepted-support selection and unit-area normalization, let the measured
 resolution be `R_Q(E)`. Evaluate
@@ -324,10 +323,12 @@ support uses valid measured bounds and can be replaced by an explicit per-group
 resolution support during preview. It is not the sample fitting range. Sample/resolution
 retained boundaries are compared diagnostically without forcing either mask.
 
-Every resolution Q group must receive an explicit user-reviewed decision and
-confirmation before normalization, convolution, or fitting. KEEP accepts the
-unchanged measured support and makes no claim that ezQENS identified any
-structure as instrumental. A suspicious or overlapping structure may be kept
+A normal resolution Q group that passes existing structural/preparation QC uses
+automatic default KEEP with unchanged support and default AUTO-padding
+application. Acceptance provenance distinguishes this from explicitly reviewed
+KEEP or contiguous EXCLUDE; automatic acceptance does not claim user review or
+a physical origin for measured structure. Explicit AUTO override requires an
+authorized user decision. A suspicious or overlapping structure may be kept
 with a neutral expert-judgement warning; no automatic correction follows.
 EXCLUDE accepts only a narrower contiguous support inside the original valid
 support, so it can trim one or both boundaries but cannot create an internal
@@ -336,7 +337,7 @@ signed-area ratios.
 
 The pre-normalization preview exposes original and accepted supports, accepted
 raw coordinates and values, retained pre-normalization signed area and signed-
-area ratio, normalization factor, warnings, and confirmation state. The ratio
+area ratio, normalization factor, warnings, authorization state, and acceptance origin. The ratio
 uses signed trapezoidal areas, is not constrained to `[0, 1]`, may exceed 1,
 and is not a physical containment fraction or probability. It is diagnostic
 only; no threshold approves or blocks a kernel. Suspicious internal
@@ -345,7 +346,8 @@ subtracted, masked, interpolated, or reconstructed. When neither retaining the
 measurement nor a justified outer-support exclusion is acceptable, users must
 provide a better expert-prepared measured resolution.
 
-Each confirmed, accepted Q-specific resolution is normalized independently to unit
+Each automatically or explicitly accepted Q-specific resolution is normalized
+independently to unit
 integrated area by trapezoidal integration over its actual measured energy
 coordinates. The original grid is preserved; M3 does not interpolate sample or
 resolution data. Normalization fails on fewer than two usable points,

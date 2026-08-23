@@ -6,6 +6,7 @@ import math
 from collections.abc import Callable, Sequence
 from dataclasses import replace
 from types import SimpleNamespace
+from typing import cast
 
 import numpy as np
 import numpy.typing as npt
@@ -16,6 +17,7 @@ from ezqens.convolution import build_convolution_plan, cell_integrated_lorentzia
 from ezqens.domain import QBins, ReducedDataset, Spectrum, SpectrumRole
 from ezqens.fitting import (
     BackgroundModel,
+    CenterGroup,
     FittingError,
     LorentzianComponent,
     ParameterConfiguration,
@@ -55,6 +57,13 @@ def parameter(
     free: bool = True,
 ) -> ParameterConfiguration:
     return ParameterConfiguration(initial, lower, upper, free)
+
+
+def required_parameter(
+    value: ParameterConfiguration | None,
+) -> ParameterConfiguration:
+    assert value is not None
+    return value
 
 
 def model_definition(
@@ -195,8 +204,8 @@ def synthetic_problem(
 
 def perturbed(model: SpectralModelDefinition) -> SpectralModelDefinition:
     return model_definition(
-        energy_shift=model.energy_shift.initial_value + 0.004,
-        elastic_area=model.elastic_area.initial_value * 0.9,
+        energy_shift=required_parameter(model.energy_shift).initial_value + 0.004,
+        elastic_area=required_parameter(model.elastic_area).initial_value * 0.9,
         lorentzians=tuple(
             (component.area.initial_value * 1.1, component.fwhm.initial_value * 1.15)
             for component in model.lorentzians
@@ -281,6 +290,202 @@ def test_shared_e0_shifts_elastic_and_every_lorentzian_component() -> None:
     assert sum(parameter.name == "energy_shift" for parameter in result.parameters) == 1
 
 
+def test_lorentzian_only_fit_has_no_hidden_elastic_component() -> None:
+    truth = SpectralModelDefinition(
+        center_groups=(CenterGroup("qe", parameter(0.025, free=False)),),
+        lorentzians=(
+            LorentzianComponent(
+                area=parameter(0.55, 0.0, free=False),
+                fwhm=parameter(0.14, 1.0e-8, free=False),
+                center_group="qe",
+            ),
+        ),
+    )
+    prepared, selection = synthetic_problem(truth)
+    configured = SpectralModelDefinition(
+        center_groups=(CenterGroup("qe", parameter(0.025, free=False)),),
+        lorentzians=(
+            LorentzianComponent(
+                area=parameter(0.48, 0.0),
+                fwhm=parameter(0.17, 1.0e-8),
+                center_group="qe",
+            ),
+        ),
+    )
+
+    result = fit_single_q(prepared, selection, 0, configured)
+
+    assert result.configuration.elastic_area is None
+    assert result.configuration.energy_shift is None
+    assert not any(item.name == "elastic_area" for item in result.parameters)
+    assert not any(item.name == "energy_shift" for item in result.parameters)
+    assert np.all(result.evaluation.elastic == 0.0)
+    assert result.parameter("lorentzian_1_area").value == pytest.approx(
+        0.55, rel=2.0e-5
+    )
+    assert result.parameter("lorentzian_1_fwhm").value == pytest.approx(
+        0.14, rel=2.0e-5
+    )
+
+
+def test_background_only_fit_is_a_valid_nonempty_scientific_model() -> None:
+    truth = SpectralModelDefinition(
+        background=BackgroundModel.CONSTANT,
+        b0=parameter(0.12, free=False),
+    )
+    prepared, selection = synthetic_problem(truth)
+    configured = SpectralModelDefinition(
+        background=BackgroundModel.CONSTANT,
+        b0=parameter(0.08),
+    )
+
+    result = fit_single_q(prepared, selection, 0, configured)
+
+    assert tuple(item.name for item in result.parameters) == ("b0",)
+    assert result.parameter("b0").value == pytest.approx(0.12, abs=1.0e-10)
+    assert np.all(result.evaluation.elastic == 0.0)
+    assert result.evaluation.lorentzians == ()
+
+
+def test_elastic_and_lorentzian_share_one_explicit_center_parameter() -> None:
+    truth = SpectralModelDefinition(
+        elastic_area=parameter(0.70, 0.0, free=False),
+        center_groups=(CenterGroup("main", parameter(0.035, free=False)),),
+        elastic_center_group="main",
+        lorentzians=(
+            LorentzianComponent(
+                area=parameter(0.38, 0.0, free=False),
+                fwhm=parameter(0.13, 1.0e-8, free=False),
+                center_group="main",
+            ),
+        ),
+    )
+    prepared, selection = synthetic_problem(truth)
+    configured = SpectralModelDefinition(
+        elastic_area=parameter(0.70, 0.0, free=False),
+        center_groups=(CenterGroup("main", parameter(0.0, -0.12, 0.12)),),
+        elastic_center_group="main",
+        lorentzians=(
+            LorentzianComponent(
+                area=parameter(0.38, 0.0, free=False),
+                fwhm=parameter(0.13, 1.0e-8, free=False),
+                center_group="main",
+            ),
+        ),
+    )
+
+    result = fit_single_q(prepared, selection, 0, configured)
+
+    assert result.statistics.free_parameters == 1
+    assert len(result.parameters) == 4
+    assert result.covariance is not None
+    assert result.covariance.shape == (4, 4)
+    assert result.statistics.nominal_degrees_of_freedom == (
+        result.statistics.observations - 1
+    )
+    assert sum(item.name == "center_group_main" for item in result.parameters) == 1
+    assert result.parameter("center_group_main").value == pytest.approx(
+        0.035, abs=2.0e-7
+    )
+    assert result.configuration.elastic_center_group == "main"
+    assert result.configuration.lorentzians[0].center_group == "main"
+
+
+def test_tied_and_independent_center_groups_survive_canonicalization() -> None:
+    truth = SpectralModelDefinition(
+        center_groups=(
+            CenterGroup("tied", parameter(-0.03, free=False)),
+            CenterGroup("solo", parameter(0.08, free=False)),
+        ),
+        lorentzians=(
+            LorentzianComponent(
+                area=parameter(0.20, 0.0, free=False),
+                fwhm=parameter(0.30, 1.0e-8, free=False),
+                center_group="tied",
+            ),
+            LorentzianComponent(
+                area=parameter(0.32, 0.0, free=False),
+                fwhm=parameter(0.08, 1.0e-8, free=False),
+                center_group="tied",
+            ),
+            LorentzianComponent(
+                area=parameter(0.18, 0.0, free=False),
+                fwhm=parameter(0.16, 1.0e-8, free=False),
+                center_group="solo",
+            ),
+        ),
+    )
+    prepared, selection = synthetic_problem(truth)
+
+    result = fit_single_q(prepared, selection, 0, truth)
+
+    assert result.fitted_model is not None
+    assert [item.center_group for item in result.fitted_model.lorentzians] == [
+        "tied",
+        "solo",
+        "tied",
+    ]
+    assert result.diagnostics.lorentzian_fwhm == (0.08, 0.16, 0.30)
+    assert sum(item.name == "center_group_tied" for item in result.parameters) == 1
+    assert sum(item.name == "center_group_solo" for item in result.parameters) == 1
+    assert result.parameter("center_group_tied").value == -0.03
+    assert result.parameter("center_group_solo").value == 0.08
+
+
+def test_malformed_center_groups_and_empty_models_are_rejected() -> None:
+    component = LorentzianComponent(
+        area=parameter(0.2, 0.0),
+        fwhm=parameter(0.1, 1.0e-8),
+        center_group="missing",
+    )
+    with pytest.raises(ValueError, match="dangling"):
+        SpectralModelDefinition(lorentzians=(component,))
+    with pytest.raises(ValueError, match="unique"):
+        SpectralModelDefinition(
+            center_groups=(
+                CenterGroup("same", parameter(0.0)),
+                CenterGroup("same", parameter(0.1)),
+            ),
+            lorentzians=(
+                LorentzianComponent(
+                    area=parameter(0.2, 0.0),
+                    fwhm=parameter(0.1, 1.0e-8),
+                    center_group="same",
+                ),
+            ),
+        )
+    with pytest.raises(ValueError, match="at least one component"):
+        SpectralModelDefinition()
+
+
+@pytest.mark.parametrize(
+    "invalid_group",
+    [cast(str, 7), "", "   ", " main "],
+)
+def test_malformed_elastic_center_groups_fail_clearly(invalid_group: str) -> None:
+    with pytest.raises(ValueError, match="elastic_center_group"):
+        SpectralModelDefinition(
+            elastic_area=parameter(0.5, 0.0),
+            center_groups=(CenterGroup("main", parameter(0.0)),),
+            elastic_center_group=invalid_group,
+        )
+
+
+@pytest.mark.parametrize(
+    "invalid_group",
+    [cast(str, 7), "", "   ", " main "],
+)
+def test_malformed_lorentzian_center_groups_fail_clearly(
+    invalid_group: str,
+) -> None:
+    with pytest.raises(ValueError, match="Lorentzian center_group"):
+        LorentzianComponent(
+            area=parameter(0.2, 0.0),
+            fwhm=parameter(0.1, 1.0e-8),
+            center_group=invalid_group,
+        )
+
+
 def test_independent_component_centers_evaluate_separately_from_elastic_center() -> (
     None
 ):
@@ -357,7 +562,7 @@ def test_one_independent_center_can_start_at_shared_e0_and_fit_separately() -> N
     assert configured.lorentzians[0].center is not None
     assert (
         configured.lorentzians[0].center.initial_value
-        == configured.energy_shift.initial_value
+        == required_parameter(configured.energy_shift).initial_value
     )
     center = result.parameter("lorentzian_1_center")
     assert center.free
@@ -593,8 +798,8 @@ def test_arbitrary_three_lorentzian_manual_fit_has_no_engine_ceiling() -> None:
         truth, sample_energy=np.linspace(-1.0, 1.0, 241)
     )
     configured = model_definition(
-        energy_shift=truth.energy_shift.initial_value,
-        elastic_area=truth.elastic_area.initial_value,
+        energy_shift=required_parameter(truth.energy_shift).initial_value,
+        elastic_area=required_parameter(truth.elastic_area).initial_value,
         lorentzians=((0.20, 0.06), (0.29, 0.15), (0.20, 0.40)),
         background=BackgroundModel.CONSTANT,
         b0=0.02,
@@ -608,7 +813,7 @@ def test_arbitrary_three_lorentzian_manual_fit_has_no_engine_ceiling() -> None:
         sorted(result.diagnostics.lorentzian_fwhm)
     )
     assert result.parameter("energy_shift").value == pytest.approx(
-        truth.energy_shift.initial_value,
+        required_parameter(truth.energy_shift).initial_value,
         abs=2.0e-7,
     )
     assert result.parameter("b0").value == pytest.approx(0.025, abs=2.0e-7)
@@ -682,19 +887,20 @@ def test_manual_initial_configuration_survives_separately_from_fitted_values() -
 
     assert result.configuration is configured
     assert (
-        result.configuration.elastic_area.initial_value
-        == configured.elastic_area.initial_value
+        required_parameter(result.configuration.elastic_area).initial_value
+        == required_parameter(configured.elastic_area).initial_value
     )
     assert result.configuration.lorentzians[0].fwhm.initial_value == (
         configured.lorentzians[0].fwhm.initial_value
     )
     assert (
-        result.parameter("elastic_area").value != configured.elastic_area.initial_value
+        result.parameter("elastic_area").value
+        != required_parameter(configured.elastic_area).initial_value
     )
     start = result.diagnostics.alternative_starts[0]
     assert start.start_parameter_values == (
-        configured.energy_shift.initial_value,
-        configured.elastic_area.initial_value,
+        required_parameter(configured.energy_shift).initial_value,
+        required_parameter(configured.elastic_area).initial_value,
         configured.lorentzians[0].area.initial_value,
         configured.lorentzians[0].fwhm.initial_value,
     )
@@ -808,8 +1014,12 @@ def test_rank_deficient_fit_suppresses_covariance_and_standard_errors(
     truth = model_definition(lorentzians=((0.3, 0.12), (0.4, 0.12)))
     prepared, selection = synthetic_problem(truth)
     configured = SpectralModelDefinition(
-        energy_shift=parameter(truth.energy_shift.initial_value, free=False),
-        elastic_area=parameter(truth.elastic_area.initial_value, 0.0, free=False),
+        energy_shift=parameter(
+            required_parameter(truth.energy_shift).initial_value, free=False
+        ),
+        elastic_area=parameter(
+            required_parameter(truth.elastic_area).initial_value, 0.0, free=False
+        ),
         lorentzians=(
             LorentzianComponent(
                 area=parameter(0.25, 0.0),
@@ -1237,7 +1447,31 @@ def test_standard_candidate_results_expose_evidence_without_a_winner_rule() -> N
         assert np.isfinite(item.fit.statistics.chi_square)
         assert np.isfinite(item.fit.statistics.bic)
         assert not hasattr(item, "recommended")
+        assert item.fit.model.elastic_area is not None
+        assert item.fit.model.energy_shift is not None
+        assert item.fit.model.center_groups == ()
+        assert item.fit.model.elastic_center_group is None
         assert all(component.center is None for component in item.fit.model.lorentzians)
+        assert all(
+            component.center_group is None for component in item.fit.model.lorentzians
+        )
+
+
+def test_standard_candidate_keeps_elastic_identity_when_area_approaches_zero() -> None:
+    truth = model_definition(
+        elastic_area=0.0,
+        lorentzians=((0.7, 0.12),),
+        free=False,
+    )
+    prepared, selection = synthetic_problem(truth)
+    candidate = StandardModelCandidate(1, BackgroundModel.NONE)
+
+    result = fit_standard_candidate(prepared, selection, 0, candidate)
+
+    assert candidate.name == "E+L1"
+    assert result.configuration.elastic_area is not None
+    assert result.parameter("elastic_area").lower_bound == 0.0
+    assert result.parameter("elastic_area").value < 1.0e-4
 
 
 def test_standard_initialization_above_two_lorentzians_is_explicitly_unvalidated() -> (

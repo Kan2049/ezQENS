@@ -340,11 +340,13 @@ absolute-sigma covariance and threshold-free diagnostics. The production
 AutoFit core now applies the reviewed deterministic M5 policy to that existing
 candidate evidence without changing candidate fitting.
 
-A corrective prerequisite now requires every measured-resolution Q group to be
-previewed and explicitly confirmed as unchanged KEEP or boundary-only
-contiguous EXCLUDE before normalization and scientific use. KEEP may carry a
-neutral user-retained-structure warning. The gate records signed-area-ratio and
-normalization provenance per Q without automatic feature detection,
+A corrective prerequisite now requires every measured-resolution Q group to pass
+structural/preparation QC before normalization and scientific use. An untouched normal
+group is internally authorized as default KEEP with `AUTOMATIC_QC` source. Explicit
+user confirmation remains required for user-reviewed KEEP, any AUTO-padding override,
+and boundary-only contiguous EXCLUDE; these paths retain `USER_REVIEW` source. KEEP
+may carry a neutral user-retained-structure warning. The gate records
+signed-area-ratio and normalization provenance per Q without automatic feature detection,
 classification, correction, or a ratio threshold. M4 convolution
 mathematics and Phase-A fitting mathematics remain unchanged.
 

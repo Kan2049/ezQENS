@@ -739,18 +739,47 @@ def _validate_successful_candidate_configuration(
     fit = result.fit
     if fit is None:  # guarded by CandidateFitResult.success
         raise ValueError("successful candidate evidence must contain a fit")
-    if (
-        fit.configuration.lorentzian_count != result.candidate.lorentzian_count
-        or fit.configuration.background is not result.candidate.background
+    fitted_model = fit.fitted_model
+    if fitted_model is None:  # guarded by FitResult
+        raise ValueError("successful candidate evidence must contain a fitted model")
+    for label, configuration in (
+        ("fit configuration", fit.configuration),
+        ("fitted model", fitted_model),
     ):
+        if (
+            configuration.lorentzian_count != result.candidate.lorentzian_count
+            or configuration.background is not result.candidate.background
+        ):
+            raise ValueError(
+                f"successful {label} disagrees with candidate {result.candidate.name}"
+            )
+        if configuration.elastic_area is None or configuration.energy_shift is None:
+            raise ValueError(
+                "successful standard AutoFit candidate evidence must contain the "
+                "elastic component and shared energy_shift"
+            )
+        if (
+            configuration.center_groups
+            or configuration.elastic_center_group is not None
+            or any(
+                component.center_group is not None
+                for component in configuration.lorentzians
+            )
+        ):
+            raise ValueError(
+                "successful standard AutoFit candidate evidence must use exactly "
+                "one legacy shared energy_shift center group"
+            )
+        if any(component.center is not None for component in configuration.lorentzians):
+            raise ValueError(
+                "successful standard AutoFit candidate evidence must use the shared "
+                "energy_shift; independent Lorentzian centers are not allowed"
+            )
+    parameter_names = {parameter.name for parameter in fit.parameters}
+    if not {"energy_shift", "elastic_area"}.issubset(parameter_names):
         raise ValueError(
-            "successful fit configuration disagrees with candidate "
-            f"{result.candidate.name}"
-        )
-    if any(component.center is not None for component in fit.configuration.lorentzians):
-        raise ValueError(
-            "successful standard AutoFit candidate evidence must use the shared "
-            "energy_shift; independent Lorentzian centers are not allowed"
+            "successful standard AutoFit candidate parameter schema must contain "
+            "energy_shift and elastic_area"
         )
     if any(
         parameter.name.startswith("lorentzian_") and parameter.name.endswith("_center")
@@ -1386,7 +1415,8 @@ def recommend_standard_candidates(
         status=ResolutionReliabilityStatus.NOT_ASSESSED,
         provenance_gap=(
             "Current FitProvenance records accepted resolution support, decision, "
-            "confirmation, signed-area diagnostics, and neutral acceptance warnings, "
+            "acceptance origin/authorization, signed-area diagnostics, and neutral "
+            "acceptance warnings, "
             "but no structured scientific assessment of whether relevant measured-"
             "resolution structure is truncated. AutoFit therefore applies no "
             "resolution-containment gate."

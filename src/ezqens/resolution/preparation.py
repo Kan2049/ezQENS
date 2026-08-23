@@ -35,10 +35,17 @@ class ResolutionSupportSource(StrEnum):
 
 
 class ResolutionAcceptanceDecision(StrEnum):
-    """User-reviewed disposition of one measured-resolution Q group."""
+    """Accepted disposition of one measured-resolution Q group."""
 
     KEEP = "keep"
     EXCLUDE_BY_CONTIGUOUS_SUPPORT = "exclude_by_contiguous_support"
+
+
+class ResolutionAcceptanceSource(StrEnum):
+    """Origin of the accepted per-Q measured-resolution disposition."""
+
+    AUTOMATIC_QC = "automatic_qc"
+    USER_REVIEW = "user_review"
 
 
 class ResolutionAcceptanceWarning(StrEnum):
@@ -49,11 +56,12 @@ class ResolutionAcceptanceWarning(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class ResolutionAcceptance:
-    """Explicit per-Q review decision and confirmation state."""
+    """Per-Q disposition, authorization state, and truthful acceptance origin."""
 
     decision: ResolutionAcceptanceDecision | None = None
     confirmed: bool = False
     warnings: tuple[ResolutionAcceptanceWarning, ...] = ()
+    source: ResolutionAcceptanceSource | None = None
 
     def __post_init__(self) -> None:
         warnings = tuple(self.warnings)
@@ -63,15 +71,35 @@ class ResolutionAcceptance:
             raise ValueError("decision must be a ResolutionAcceptanceDecision or None")
         if not isinstance(self.confirmed, bool):
             raise ValueError("confirmed must be a boolean")
-        if self.confirmed and self.decision is None:
-            raise ValueError("a confirmed resolution acceptance requires a decision")
+        source = self.source
+        if source is not None and not isinstance(source, ResolutionAcceptanceSource):
+            raise ValueError("source must be a ResolutionAcceptanceSource or None")
+        if self.decision is None:
+            if self.confirmed or source is not None:
+                raise ValueError(
+                    "an accepted resolution disposition requires a decision"
+                )
+        elif source is None:
+            source = ResolutionAcceptanceSource.USER_REVIEW
         if any(
             not isinstance(warning, ResolutionAcceptanceWarning) for warning in warnings
         ):
             raise ValueError("warnings must contain ResolutionAcceptanceWarning values")
-        if warnings and self.decision is not ResolutionAcceptanceDecision.KEEP:
-            raise ValueError("resolution warnings may only accompany a KEEP decision")
+        if warnings and (
+            self.decision is not ResolutionAcceptanceDecision.KEEP
+            or source is not ResolutionAcceptanceSource.USER_REVIEW
+        ):
+            raise ValueError(
+                "resolution warnings may only accompany a user-reviewed KEEP decision"
+            )
+        if source is ResolutionAcceptanceSource.AUTOMATIC_QC and (
+            self.decision is not ResolutionAcceptanceDecision.KEEP or not self.confirmed
+        ):
+            raise ValueError(
+                "automatic QC acceptance requires an authorized default KEEP"
+            )
         object.__setattr__(self, "warnings", warnings)
+        object.__setattr__(self, "source", source)
 
 
 @dataclass(frozen=True, slots=True)
@@ -279,24 +307,22 @@ class ResolutionPreparationPreviewSpectrum:
 
 @dataclass(frozen=True, slots=True)
 class PreparedResolutionSpectrum(ResolutionPreparationPreviewSpectrum):
-    """One confirmed unit-area resolution linked to its measured spectrum."""
+    """One accepted unit-area resolution linked to its measured spectrum."""
 
     def __post_init__(self) -> None:
         super(PreparedResolutionSpectrum, self).__post_init__()
-        if not self.acceptance.confirmed:
-            raise ValueError("prepared resolution acceptance must be confirmed")
+        if not self.acceptance.confirmed or self.acceptance.source is None:
+            raise ValueError("prepared resolution acceptance must be authorized")
         if self.acceptance.decision is ResolutionAcceptanceDecision.KEEP:
             if self.support != self.original_support:
-                raise ValueError("confirmed KEEP must preserve the original support")
+                raise ValueError("accepted KEEP must preserve the original support")
         elif self.acceptance.decision is (
             ResolutionAcceptanceDecision.EXCLUDE_BY_CONTIGUOUS_SUPPORT
         ):
             if not _support_is_within(self.support, self.original_support):
-                raise ValueError(
-                    "confirmed EXCLUDE support must remain inside original"
-                )
+                raise ValueError("accepted EXCLUDE support must remain inside original")
             if not _support_is_narrower(self.support, self.original_support):
-                raise ValueError("confirmed EXCLUDE support must be narrower")
+                raise ValueError("accepted EXCLUDE support must be narrower")
         else:
             raise ValueError("prepared resolution requires an acceptance decision")
 
@@ -348,6 +374,9 @@ class ResolutionAcceptanceProvenance:
     confirmed: bool
     warnings: tuple[ResolutionAcceptanceWarning, ...]
     auto_padding_applied: bool
+    acceptance_source: ResolutionAcceptanceSource = (
+        ResolutionAcceptanceSource.USER_REVIEW
+    )
 
 
 def _validate_resolution_collection(
@@ -392,7 +421,7 @@ def _q_value(
 
 @dataclass(frozen=True, slots=True)
 class ResolutionPreparationPreview:
-    """Ordered per-Q review preview before normalization is authorized."""
+    """Ordered per-Q preview before normalization is authorized."""
 
     sample_dataset: ReducedDataset = field(repr=False)
     resolution_dataset: ReducedDataset = field(repr=False)
@@ -420,7 +449,7 @@ class ResolutionPreparationPreview:
 
 @dataclass(frozen=True, slots=True)
 class PreparedResolution:
-    """Ordered confirmed measured resolution associated exactly with sample Q."""
+    """Ordered accepted measured resolution associated exactly with sample Q."""
 
     sample_dataset: ReducedDataset = field(repr=False)
     resolution_dataset: ReducedDataset = field(repr=False)
@@ -451,8 +480,9 @@ class PreparedResolution:
         q_value = self.q_value(group_index)
         spectrum = self.spectra[group_index]
         decision = spectrum.acceptance.decision
-        if decision is None:  # guarded by PreparedResolutionSpectrum
-            raise RuntimeError("prepared resolution has no acceptance decision")
+        acceptance_source = spectrum.acceptance.source
+        if decision is None or acceptance_source is None:
+            raise RuntimeError("prepared resolution has no accepted disposition")
         return ResolutionAcceptanceProvenance(
             group_index=group_index,
             group_label=spectrum.source_spectrum.group_label,
@@ -474,6 +504,7 @@ class PreparedResolution:
             confirmed=spectrum.acceptance.confirmed,
             warnings=spectrum.acceptance.warnings,
             auto_padding_applied=spectrum.auto_padding_applied,
+            acceptance_source=acceptance_source,
         )
 
 
@@ -912,7 +943,7 @@ def preview_measured_resolution(
     support_overrides: Mapping[int, ResolutionSupport] | None = None,
     apply_auto_padding: Mapping[int, bool] | None = None,
 ) -> ResolutionPreparationPreview:
-    """Preview per-Q accepted raw kernels before confirmation authorizes use.
+    """Preview per-Q accepted raw kernels before acceptance authorizes use.
 
     Edge padding is always detected independently on the sample and measured
     resolution. ``AUTO`` padding is applied by default and may be disabled
@@ -948,6 +979,15 @@ def preview_measured_resolution(
         raise _error(
             "resolution_acceptance_type_invalid",
             "acceptance decisions must contain ResolutionAcceptance values",
+        )
+    if any(
+        value.source is ResolutionAcceptanceSource.AUTOMATIC_QC
+        for value in acceptances.values()
+    ):
+        raise _error(
+            "resolution_automatic_acceptance_source_reserved",
+            "AUTOMATIC_QC acceptance is reserved for untouched default "
+            "preparation and cannot be supplied by callers",
         )
     if any(not isinstance(value, ResolutionSupport) for value in overrides.values()):
         raise _error(
@@ -1063,8 +1103,16 @@ def prepare_measured_resolution(
     support_overrides: Mapping[int, ResolutionSupport] | None = None,
     apply_auto_padding: Mapping[int, bool] | None = None,
 ) -> PreparedResolution:
-    """Normalize only explicitly confirmed per-Q measured-resolution kernels."""
+    """Normalize accepted per-Q measured-resolution kernels.
 
+    Structurally valid groups use automatic default KEEP when no explicit review
+    state or AUTO-padding override is supplied. Explicit decisions retain their
+    existing confirmation gate.
+    """
+
+    provided_acceptances = dict(acceptance_decisions or {})
+    explicit_support_overrides = dict(support_overrides or {})
+    explicit_auto_application = dict(apply_auto_padding or {})
     preview = preview_measured_resolution(
         sample_dataset,
         resolution_dataset,
@@ -1073,15 +1121,27 @@ def prepare_measured_resolution(
         apply_auto_padding=apply_auto_padding,
     )
     gate_diagnostics: list[ResolutionDiagnostic] = []
+    accepted_states: list[ResolutionAcceptance] = []
     for group_index, spectrum in enumerate(preview.spectra):
         acceptance = spectrum.acceptance
-        if acceptance.decision is None:
+        if (
+            acceptance.decision is None
+            and group_index not in provided_acceptances
+            and group_index not in explicit_support_overrides
+            and group_index not in explicit_auto_application
+        ):
+            acceptance = ResolutionAcceptance(
+                decision=ResolutionAcceptanceDecision.KEEP,
+                confirmed=True,
+                source=ResolutionAcceptanceSource.AUTOMATIC_QC,
+            )
+        elif acceptance.decision is None:
             gate_diagnostics.append(
                 ResolutionDiagnostic(
                     code="resolution_acceptance_required",
                     severity=DiagnosticSeverity.ERROR,
                     message=(
-                        "measured resolution must have an explicit per-Q KEEP or "
+                        "an explicit resolution override requires a per-Q KEEP or "
                         "EXCLUDE decision before normalization and use"
                     ),
                     group_index=group_index,
@@ -1101,6 +1161,7 @@ def prepare_measured_resolution(
                     group_identity=spectrum.source_spectrum.group_label,
                 )
             )
+        accepted_states.append(acceptance)
     if gate_diagnostics:
         raise ResolutionPreparationError(tuple(gate_diagnostics))
 
@@ -1110,7 +1171,7 @@ def prepare_measured_resolution(
             padding=item.padding,
             original_support=item.original_support,
             support=item.support,
-            acceptance=item.acceptance,
+            acceptance=acceptance,
             auto_padding_applied=item.auto_padding_applied,
             pre_qc_integral=item.pre_qc_integral,
             normalization_integral=item.normalization_integral,
@@ -1119,7 +1180,7 @@ def prepare_measured_resolution(
             normalization_method=item.normalization_method,
             diagnostics=item.diagnostics,
         )
-        for item in preview.spectra
+        for item, acceptance in zip(preview.spectra, accepted_states, strict=True)
     )
     return PreparedResolution(
         sample_dataset=preview.sample_dataset,

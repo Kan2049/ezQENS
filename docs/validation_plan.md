@@ -238,15 +238,15 @@ without asserting that every noisy realization equals truth. Evaluate:
 
 - integrated elastic and Lorentzian areas;
 - Lorentzian FWHM;
-- shared energy-center shift and manual independent Lorentzian centers;
+- optional elastic, Lorentzian-only, background-only, and mixed manual models;
 - constant and linear background parameters;
-- one and multiple Lorentzians;
-- shared-center numerical backward compatibility and one/multiple independently
-  centered Lorentzians, including fixed/free/bounded centers;
+- one and multiple Lorentzians with legacy or stable named center groups;
+- elastic/Lorentzian and Lorentzian/Lorentzian ties, multiple independent/tied
+  groups, and fixed/free/bounded center parameters;
 - parameter names/counts, covariance/correlation dimensions, nominal DOF, and
-  FWHM canonicalization with center state kept on its component;
-- exactly nine shared-center standard Auto candidates with unchanged nominal
-  parameter counts and no independent-center Auto candidate;
+  FWHM canonicalization with stable tie-group membership preserved;
+- exactly nine elastic-containing single-shared-center standard Auto candidates
+  with unchanged nominal parameter counts and no manual-only candidate;
 - fixed/free states and active bounds;
 - per-Q independence and optional previous-fit seeding; and
 - derived tau and EISF.
@@ -352,9 +352,10 @@ padding. Validate:
 - `REVIEW` retention by default;
 - explicit support overrides distinct from sample fitting ranges;
 - preview of original/accepted support and raw accepted values before use;
-- blocking missing or unconfirmed per-Q acceptance decisions;
-- confirmed KEEP equivalence to the frozen M3 normalization and downstream
-  convolution/fitting path;
+- automatic default KEEP for structurally valid normal groups with truthful
+  automatic-QC provenance and no second confirmation;
+- explicit unconfirmed review/override state remains blocking, while reviewed KEEP
+  remains equivalent to automatic KEEP and the frozen M3 normalization path;
 - confirmed low-, high-, and both-boundary contiguous exclusion before
   normalization, including unit area, identically scaled uncertainty, and zero
   source-grid contribution outside support;
@@ -511,9 +512,10 @@ and scientific inspection plots. Generic custom mapping remains deferred.
 Milestone 3 first gates exact Q association, independent resolution support and
 padding, original preservation, measured-grid validation, positive finite
 trapezoidal area, unit normalization, and inspectable diagnostics. The
-corrective acceptance gate additionally requires an explicit confirmed per-Q
-KEEP or contiguous-EXCLUDE decision before normalization and records neutral
-warning and signed-area-ratio provenance. Milestone 4
+acceptance gate internally authorizes untouched normal default KEEP after existing QC,
+while user-reviewed KEEP, any AUTO override, and contiguous EXCLUDE require explicit
+confirmation; acceptance source distinguishes these origins and retains neutral warnings
+and signed-area-ratio diagnostics. Milestone 4
 then separately gates independent direct/FFT agreement, interpolation policy,
 area preservation, and no wrap-around.
 

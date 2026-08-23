@@ -62,39 +62,143 @@ class ParameterConfiguration:
 
 
 @dataclass(frozen=True, slots=True)
+class CenterGroup:
+    """One stable center identity owning one shared parameter configuration."""
+
+    group_id: str
+    parameter: ParameterConfiguration
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.group_id, str) or not self.group_id.strip():
+            raise ValueError("center group_id must be a nonempty string")
+        if self.group_id != self.group_id.strip():
+            raise ValueError("center group_id must not have surrounding whitespace")
+        if not isinstance(self.parameter, ParameterConfiguration):
+            raise ValueError("center group parameter must be a ParameterConfiguration")
+
+
+@dataclass(frozen=True, slots=True)
 class LorentzianComponent:
-    """One unit-area Lorentzian, optionally centered independently for manual fit."""
+    """One unit-area Lorentzian with an explicit or legacy center reference."""
 
     area: ParameterConfiguration
     fwhm: ParameterConfiguration
     center: ParameterConfiguration | None = None
+    center_group: str | None = None
 
     def __post_init__(self) -> None:
         if self.area.lower_bound < 0.0 or self.area.initial_value < 0.0:
             raise ValueError("Lorentzian integrated area must be nonnegative")
         if self.fwhm.lower_bound <= 0.0 or self.fwhm.initial_value <= 0.0:
             raise ValueError("Lorentzian FWHM must be strictly positive")
+        if self.center is not None and self.center_group is not None:
+            raise ValueError(
+                "Lorentzian center and center_group are mutually exclusive"
+            )
+        if self.center_group is not None and (
+            not isinstance(self.center_group, str) or not self.center_group.strip()
+        ):
+            raise ValueError("Lorentzian center_group must be a nonempty string")
+        if (
+            self.center_group is not None
+            and self.center_group != self.center_group.strip()
+        ):
+            raise ValueError(
+                "Lorentzian center_group must not have surrounding whitespace"
+            )
 
 
 @dataclass(frozen=True, slots=True)
 class SpectralModelDefinition:
-    """Elastic plus variable Lorentzians, shared E0 by default, and background."""
+    """Optional elastic, variable Lorentzians, center groups, and background."""
 
-    energy_shift: ParameterConfiguration
-    elastic_area: ParameterConfiguration
+    energy_shift: ParameterConfiguration | None = None
+    elastic_area: ParameterConfiguration | None = None
     lorentzians: tuple[LorentzianComponent, ...] = ()
     background: BackgroundModel = BackgroundModel.NONE
     b0: ParameterConfiguration | None = None
     b1: ParameterConfiguration | None = None
+    center_groups: tuple[CenterGroup, ...] = ()
+    elastic_center_group: str | None = None
 
     def __post_init__(self) -> None:
         lorentzians = tuple(self.lorentzians)
+        center_groups = tuple(self.center_groups)
         if any(not isinstance(item, LorentzianComponent) for item in lorentzians):
             raise ValueError("lorentzians must contain LorentzianComponent values")
+        if any(not isinstance(item, CenterGroup) for item in center_groups):
+            raise ValueError("center_groups must contain CenterGroup values")
+        if self.energy_shift is not None and not isinstance(
+            self.energy_shift, ParameterConfiguration
+        ):
+            raise ValueError("energy_shift must be a ParameterConfiguration or None")
+        if self.elastic_area is not None and not isinstance(
+            self.elastic_area, ParameterConfiguration
+        ):
+            raise ValueError("elastic_area must be a ParameterConfiguration or None")
         if not isinstance(self.background, BackgroundModel):
             raise ValueError("background must be a BackgroundModel")
-        if self.elastic_area.lower_bound < 0.0 or self.elastic_area.initial_value < 0.0:
-            raise ValueError("elastic integrated area must be nonnegative")
+        if self.elastic_center_group is not None and (
+            not isinstance(self.elastic_center_group, str)
+            or not self.elastic_center_group.strip()
+        ):
+            raise ValueError("elastic_center_group must be a nonempty string")
+        if (
+            self.elastic_center_group is not None
+            and self.elastic_center_group != self.elastic_center_group.strip()
+        ):
+            raise ValueError(
+                "elastic_center_group must not have surrounding whitespace"
+            )
+
+        group_ids = tuple(group.group_id for group in center_groups)
+        if len(set(group_ids)) != len(group_ids):
+            raise ValueError("center group identities must be unique")
+        groups_by_id = {group.group_id: group for group in center_groups}
+        referenced_groups: set[str] = set()
+        legacy_center_used = False
+
+        if self.elastic_area is not None:
+            if (
+                self.elastic_area.lower_bound < 0.0
+                or self.elastic_area.initial_value < 0.0
+            ):
+                raise ValueError("elastic integrated area must be nonnegative")
+            if self.elastic_center_group is None:
+                if self.energy_shift is None:
+                    raise ValueError(
+                        "elastic component requires energy_shift or "
+                        "elastic_center_group"
+                    )
+                legacy_center_used = True
+            else:
+                referenced_groups.add(self.elastic_center_group)
+        elif self.elastic_center_group is not None:
+            raise ValueError("elastic_center_group requires an elastic component")
+
+        for component in lorentzians:
+            if component.center_group is not None:
+                referenced_groups.add(component.center_group)
+            elif component.center is None:
+                if self.energy_shift is None:
+                    raise ValueError(
+                        "Lorentzian requires energy_shift, center, or center_group"
+                    )
+                legacy_center_used = True
+
+        dangling = referenced_groups - groups_by_id.keys()
+        if dangling:
+            raise ValueError(
+                "center group reference is dangling: " + ", ".join(sorted(dangling))
+            )
+        unused = groups_by_id.keys() - referenced_groups
+        if unused:
+            raise ValueError(
+                "center group is not referenced: " + ", ".join(sorted(unused))
+            )
+        if self.energy_shift is not None and not legacy_center_used:
+            raise ValueError("energy_shift is not referenced by any component")
+
         if self.background is BackgroundModel.NONE:
             if self.b0 is not None or self.b1 is not None:
                 raise ValueError("NONE background must not define b0 or b1")
@@ -103,13 +207,53 @@ class SpectralModelDefinition:
                 raise ValueError("B0 background requires b0 and no b1")
         elif self.b0 is None or self.b1 is None:
             raise ValueError("B1 background requires both b0 and b1")
+        if (
+            self.elastic_area is None
+            and not lorentzians
+            and self.background is BackgroundModel.NONE
+        ):
+            raise ValueError("spectral model must contain at least one component")
         object.__setattr__(self, "lorentzians", lorentzians)
+        object.__setattr__(self, "center_groups", center_groups)
 
     @property
     def lorentzian_count(self) -> int:
         """Return the unrestricted component count represented by this model."""
 
         return len(self.lorentzians)
+
+    def center_group_parameter(self, group_id: str) -> ParameterConfiguration:
+        """Return the one parameter owned by a stable center group."""
+
+        for group in self.center_groups:
+            if group.group_id == group_id:
+                return group.parameter
+        raise ValueError(f"unknown center group: {group_id}")
+
+    def elastic_center(self) -> ParameterConfiguration | None:
+        """Return the elastic center, or None when no elastic component exists."""
+
+        if self.elastic_area is None:
+            return None
+        if self.elastic_center_group is not None:
+            return self.center_group_parameter(self.elastic_center_group)
+        if self.energy_shift is None:  # guarded by validation
+            raise RuntimeError("elastic component has no center")
+        return self.energy_shift
+
+    def lorentzian_center(
+        self,
+        component: LorentzianComponent,
+    ) -> ParameterConfiguration:
+        """Resolve one Lorentzian center without duplicating tied parameters."""
+
+        if component.center_group is not None:
+            return self.center_group_parameter(component.center_group)
+        if component.center is not None:
+            return component.center
+        if self.energy_shift is None:  # guarded by validation
+            raise RuntimeError("Lorentzian component has no center")
+        return self.energy_shift
 
 
 @dataclass(frozen=True, slots=True)
@@ -314,6 +458,7 @@ class FitResult:
     statistics: FitStatistics
     diagnostics: FitDiagnostics
     provenance: FitProvenance
+    fitted_model: SpectralModelDefinition | None = None
 
     def __post_init__(self) -> None:
         parameter_count = len(self.parameters)
@@ -341,6 +486,8 @@ class FitResult:
         object.__setattr__(self, "correlation", correlation)
         object.__setattr__(self, "raw_residuals", raw)
         object.__setattr__(self, "standardized_residuals", standardized)
+        if self.fitted_model is None:
+            object.__setattr__(self, "fitted_model", self.configuration)
 
     def parameter(self, name: str) -> ParameterEstimate:
         """Return one estimate by its canonical result name."""

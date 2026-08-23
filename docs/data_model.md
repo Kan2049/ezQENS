@@ -218,22 +218,26 @@ energy/intensity/uncertainty, projected reciprocal normalization factor,
 accepted pre-normalization signed area, optional signed-area ratio, diagnostics,
 and explicit `ResolutionAcceptance`.
 
-`ResolutionAcceptance` records an optional decision, confirmation boolean, and
-neutral warnings. Decisions are `KEEP` or
-`EXCLUDE_BY_CONTIGUOUS_SUPPORT`. KEEP requires unchanged support. EXCLUDE
-requires a strictly narrower interval within the original support. Warnings can
-record suspicious structure retained by user judgement without identifying its
-physical origin. Absence of a decision or confirmation is valid preview state
-but cannot produce prepared resolution.
+`ResolutionAcceptance` records an optional decision, `confirmed` authorization
+boolean, truthful acceptance source, and neutral warnings. The boolean authorizes
+use but does not by itself prove explicit user confirmation; source distinguishes
+origin. Sources distinguish automatic structural-QC default KEEP from user-reviewed
+KEEP or contiguous EXCLUDE. KEEP
+requires unchanged support. EXCLUDE requires a strictly narrower interval within
+the original support and is always user-reviewed. Warnings can record suspicious
+structure retained by user judgement without identifying its physical origin.
+Absence of a decision/authorization is valid preview state but cannot produce a
+prepared resolution; omission of review state in the normal default path creates
+an automatically accepted KEEP only after all existing preparation checks pass.
 
-`PreparedResolution` is the confirmed measured-resolution-only dataset result. It
+`PreparedResolution` is the accepted measured-resolution-only dataset result. It
 references the immutable sample and resolution `ReducedDataset` values, their
 independently calculated `EdgePaddingDetectionResult` values, one ordered
 `PreparedResolutionSpectrum` per resolution group, per-Q padding comparisons,
 and privacy-safe diagnostics. Association is by exact existing group/Q order;
 Q values remain dataset-level and are not copied into `Spectrum`.
 
-`PreparedResolutionSpectrum` is the confirmed subtype of the preview spectrum.
+`PreparedResolutionSpectrum` is the accepted subtype of the preview spectrum.
 It references its original resolution `Spectrum`, its resolution-specific
 padding result, original and accepted `ResolutionSupport`, acceptance state,
 pre-QC and retained raw signed integrals, signed-area ratio, reciprocal factor,
@@ -284,25 +288,27 @@ Neither value stores sample intensity/uncertainty, modifies source arrays,
 duplicates M3 normalized source state for persistence, or owns fit/model/Q/GUI
 policy.
 
-`SpectralModelDefinition` minimally describes one elastic component, a
+`SpectralModelDefinition` minimally describes an optional elastic component, a
 variable-length collection of zero or more unit-area Lorentzians, NONE/B0/B1
-background, a shared elastic `E0`, integrated-area amplitudes, and FWHM
-linewidths. Each Lorentzian has an optional center `ParameterConfiguration`;
-absence means a true tie to the shared `E0`, while presence defines an
-independent manual/expert parameter with its own initial value, bounds, and
-fixed/free state. `ParameterConfiguration` supplies those same fields for every
-parameter. The model has no software-level Lorentzian-count maximum; fitted
-components are canonicalized by increasing FWHM with their center state and
-estimates kept attached.
+background, integrated-area amplitudes, FWHM linewidths, and stable named center
+groups. A `CenterGroup` owns one `ParameterConfiguration`; elastic and Lorentzian
+components reference its stable identity, so tied components share one optimizer
+parameter and one bounds/free state. A group referenced by one component is an
+independent center. Legacy shared `energy_shift` and per-Lorentzian independent
+center configuration remain supported. Dangling, duplicate, unused, or conflicting
+center references are invalid. A model may be elastic-only, Lorentzian-only,
+background-only, or any nonempty supported combination; absent elastic is not a
+fixed-zero component. The model has no software-level Lorentzian-count maximum.
 
-`FitResult` preserves the submitted model configuration separately from fitted
-parameter estimates. It links both to retained original sample coordinates,
+`FitResult` preserves the submitted model configuration separately from the
+canonical fitted model and fitted parameter estimates. It links both to retained original sample coordinates,
 component-resolved values, raw and standardized residuals, absolute-sigma
 covariance/correlation, chi-square, reduced chi-square, AIC/AICc/BIC,
 point/free-parameter counts, convergence, bound activity, Jacobian diagnostics,
 and provenance. Fit provenance embeds the accepted resolution group/source,
 original and accepted supports, decision, retained signed area/ratio,
-normalization method/factor, confirmation, warning, and AUTO-application state.
+normalization method/factor, acceptance origin/authorization, warning, and
+AUTO-application state.
 Each multistart record retains its submitted seed, fitted
 output, and canonical component-order mapping. Missing covariance remains
 distinct from zero uncertainty. `StandardModelCandidate` describes generated

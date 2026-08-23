@@ -24,6 +24,7 @@ from .models import (
     AlternativeStartResult,
     BackgroundModel,
     CandidateFitResult,
+    CenterGroup,
     FitDiagnostics,
     FitProvenance,
     FitResult,
@@ -71,11 +72,20 @@ class _Solution:
     start_index: int
 
 
+def _center_group_slot_name(group_id: str) -> str:
+    return f"center_group_{group_id}"
+
+
 def _parameter_slots(model: SpectralModelDefinition) -> tuple[_ParameterSlot, ...]:
-    slots = [
-        _ParameterSlot("energy_shift", model.energy_shift),
-        _ParameterSlot("elastic_area", model.elastic_area),
-    ]
+    slots: list[_ParameterSlot] = []
+    if model.energy_shift is not None:
+        slots.append(_ParameterSlot("energy_shift", model.energy_shift))
+    slots.extend(
+        _ParameterSlot(_center_group_slot_name(group.group_id), group.parameter)
+        for group in model.center_groups
+    )
+    if model.elastic_area is not None:
+        slots.append(_ParameterSlot("elastic_area", model.elastic_area))
     for index, component in enumerate(model.lorentzians, start=1):
         slots.extend(
             (
@@ -100,46 +110,51 @@ def _model_from_values(
     parameter_values = np.asarray(values, dtype=np.float64)
     if parameter_values.ndim != 1 or parameter_values.size != len(slots):
         raise FittingError("parameter value count does not match the spectral model")
-    configurations = [
-        ParameterConfiguration(
+    configurations = {
+        slot.name: ParameterConfiguration(
             initial_value=float(value),
             lower_bound=slot.configuration.lower_bound,
             upper_bound=slot.configuration.upper_bound,
             free=slot.configuration.free,
         )
         for slot, value in zip(slots, parameter_values, strict=True)
-    ]
-    position = 0
-    energy_shift = configurations[position]
-    position += 1
-    elastic_area = configurations[position]
-    position += 1
-    components: list[LorentzianComponent] = []
-    for template_component in template.lorentzians:
-        center = (
-            configurations[position + 2]
-            if template_component.center is not None
-            else None
+    }
+    components = tuple(
+        LorentzianComponent(
+            area=configurations[f"lorentzian_{index}_area"],
+            fwhm=configurations[f"lorentzian_{index}_fwhm"],
+            center=(
+                configurations[f"lorentzian_{index}_center"]
+                if component.center is not None
+                else None
+            ),
+            center_group=component.center_group,
         )
-        components.append(
-            LorentzianComponent(
-                area=configurations[position],
-                fwhm=configurations[position + 1],
-                center=center,
-            )
-        )
-        position += 3 if center is not None else 2
-    b0 = configurations[position] if template.b0 is not None else None
-    if b0 is not None:
-        position += 1
-    b1 = configurations[position] if template.b1 is not None else None
+        for index, component in enumerate(template.lorentzians, start=1)
+    )
     return SpectralModelDefinition(
-        energy_shift=energy_shift,
-        elastic_area=elastic_area,
-        lorentzians=tuple(components),
+        energy_shift=(
+            configurations["energy_shift"]
+            if template.energy_shift is not None
+            else None
+        ),
+        elastic_area=(
+            configurations["elastic_area"]
+            if template.elastic_area is not None
+            else None
+        ),
+        lorentzians=components,
         background=template.background,
-        b0=b0,
-        b1=b1,
+        b0=configurations.get("b0"),
+        b1=configurations.get("b1"),
+        center_groups=tuple(
+            CenterGroup(
+                group_id=group.group_id,
+                parameter=configurations[_center_group_slot_name(group.group_id)],
+            )
+            for group in template.center_groups
+        ),
+        elastic_center_group=template.elastic_center_group,
     )
 
 
@@ -163,18 +178,20 @@ def evaluate_spectral_model(
         raise FittingError("model evaluation energy must be a nonempty vector")
     if not np.all(np.isfinite(coordinates)):
         raise FittingError("model evaluation energy must be finite")
-    e0 = model.energy_shift.initial_value
-    elastic_shape = np.interp(
-        coordinates - e0,
-        plan.resolution_energy,
-        plan.resolution_values,
-        left=0.0,
-        right=0.0,
-    )
-    elastic = np.asarray(model.elastic_area.initial_value * elastic_shape)
+    elastic = np.zeros(coordinates.size, dtype=np.float64)
+    elastic_center = model.elastic_center()
+    if model.elastic_area is not None and elastic_center is not None:
+        elastic_shape = np.interp(
+            coordinates - elastic_center.initial_value,
+            plan.resolution_energy,
+            plan.resolution_values,
+            left=0.0,
+            right=0.0,
+        )
+        elastic = np.asarray(model.elastic_area.initial_value * elastic_shape)
     lorentzian_contributions: list[FloatArray] = []
     for component in model.lorentzians:
-        center = e0 if component.center is None else component.center.initial_value
+        center = model.lorentzian_center(component).initial_value
         intrinsic = cell_integrated_lorentzian(
             plan.model_energy,
             fwhm=component.fwhm.initial_value,
@@ -310,13 +327,20 @@ def _expand_free_values(
 def _component_parameter_indices(
     model: SpectralModelDefinition,
 ) -> tuple[tuple[int, int, int | None], ...]:
-    indices: list[tuple[int, int, int | None]] = []
-    position = 2
-    for component in model.lorentzians:
-        center_index = position + 2 if component.center is not None else None
-        indices.append((position, position + 1, center_index))
-        position += 3 if center_index is not None else 2
-    return tuple(indices)
+    names = tuple(slot.name for slot in _parameter_slots(model))
+    positions = {name: index for index, name in enumerate(names)}
+    return tuple(
+        (
+            positions[f"lorentzian_{index}_area"],
+            positions[f"lorentzian_{index}_fwhm"],
+            (
+                positions[f"lorentzian_{index}_center"]
+                if component.center is not None
+                else None
+            ),
+        )
+        for index, component in enumerate(model.lorentzians, start=1)
+    )
 
 
 def _canonical_component_order(
@@ -336,18 +360,27 @@ def _canonical_permutation(
     values: FloatArray,
     model: SpectralModelDefinition,
 ) -> tuple[int, ...]:
+    slots = _parameter_slots(model)
     indices = _component_parameter_indices(model)
-    component_order = _canonical_component_order(values, model)
-    permutation = [0, 1]
-    for component_index in component_order:
+    component_indices = {
+        index for component in indices for index in component if index is not None
+    }
+    background_indices = {
+        index for index, slot in enumerate(slots) if slot.name in {"b0", "b1"}
+    }
+    permutation = [
+        index
+        for index in range(len(slots))
+        if index not in component_indices and index not in background_indices
+    ]
+    for component_index in _canonical_component_order(values, model):
         area_index, fwhm_index, center_index = indices[component_index]
         permutation.extend((area_index, fwhm_index))
         if center_index is not None:
             permutation.append(center_index)
-    component_parameter_count = sum(
-        3 if component.center is not None else 2 for component in model.lorentzians
-    )
-    permutation.extend(range(2 + component_parameter_count, values.size))
+    permutation.extend(sorted(background_indices))
+    if sorted(permutation) != list(range(len(slots))):
+        raise FittingError("canonical parameter permutation is incomplete")
     return tuple(permutation)
 
 
@@ -538,6 +571,11 @@ def _fit_with_starts(
         )
         or model.background is not template.background
         or model.lorentzian_count != template.lorentzian_count
+        or model.elastic_center_group != template.elastic_center_group
+        or tuple(group.group_id for group in model.center_groups)
+        != tuple(group.group_id for group in template.center_groups)
+        or tuple(component.center_group for component in model.lorentzians)
+        != tuple(component.center_group for component in template.lorentzians)
         for model in models[1:]
     ):
         raise FittingError(
@@ -546,7 +584,15 @@ def _fit_with_starts(
     free_count = sum(slot.configuration.free for slot in template_slots)
     inputs = _fit_inputs(prepared_resolution, selection, group_index, free_count)
     plan = inputs.plan
-    _validate_center_coverage("energy_shift", template.energy_shift, inputs, plan)
+    if template.energy_shift is not None:
+        _validate_center_coverage("energy_shift", template.energy_shift, inputs, plan)
+    for group in template.center_groups:
+        _validate_center_coverage(
+            _center_group_slot_name(group.group_id),
+            group.parameter,
+            inputs,
+            plan,
+        )
     for index, component in enumerate(template.lorentzians, start=1):
         if component.center is not None:
             _validate_center_coverage(
@@ -659,6 +705,8 @@ def _fit_with_starts(
         background=best_model.background,
         b0=best_model.b0,
         b1=best_model.b1,
+        center_groups=best_model.center_groups,
+        elastic_center_group=best_model.elastic_center_group,
     )
     canonical_configurations = tuple(
         slot.configuration for slot in _parameter_slots(canonical_template)
@@ -890,6 +938,7 @@ def _fit_with_starts(
                 group_index
             ),
         ),
+        fitted_model=fitted_model,
     )
 
 

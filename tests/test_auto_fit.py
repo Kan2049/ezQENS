@@ -17,6 +17,7 @@ from ezqens.fitting import (
     AlternativeStartResult,
     BackgroundModel,
     CandidateFitResult,
+    CenterGroup,
     FitDiagnostics,
     FitProvenance,
     FitResult,
@@ -1004,6 +1005,59 @@ def test_2l_center_parameter_schema_is_rejected_before_auto_interpretation() -> 
     )
 
     with pytest.raises(ValueError, match="parameter schema.*independent Lorentzian"):
+        recommend_standard_candidates(tuple(evidence))
+
+
+def test_no_elastic_manual_fit_is_rejected_as_standard_auto_evidence() -> None:
+    scores = _scores(((30.0, 31.0, 32.0), (10.0, 11.0, 12.0), (20.0, 21.0, 22.0)))
+    evidence = list(_results(scores))
+    target = StandardModelCandidate(1, BackgroundModel.NONE)
+    index = next(i for i, item in enumerate(evidence) if item.candidate == target)
+    item = evidence[index]
+    assert item.fit is not None
+    manual = SpectralModelDefinition(
+        center_groups=(CenterGroup("qe", ParameterConfiguration(0.0)),),
+        lorentzians=(
+            LorentzianComponent(
+                area=ParameterConfiguration(1.0, 0.0, math.inf),
+                fwhm=ParameterConfiguration(0.1, 1.0e-8, math.inf),
+                center_group="qe",
+            ),
+        ),
+    )
+    evidence[index] = replace(item, fit=replace(item.fit, configuration=manual))
+
+    with pytest.raises(ValueError, match="elastic component and shared energy_shift"):
+        recommend_standard_candidates(tuple(evidence))
+
+
+def test_nonstandard_center_tie_groups_are_rejected_as_auto_evidence() -> None:
+    scores = _scores(((30.0, 31.0, 32.0), (20.0, 21.0, 22.0), (10.0, 11.0, 12.0)))
+    evidence = list(_results(scores))
+    target = StandardModelCandidate(2, BackgroundModel.NONE)
+    index = next(i for i, item in enumerate(evidence) if item.candidate == target)
+    item = evidence[index]
+    assert item.fit is not None
+    manual = SpectralModelDefinition(
+        energy_shift=ParameterConfiguration(0.0, -1.0, 1.0),
+        elastic_area=ParameterConfiguration(1.0, 0.0, math.inf),
+        center_groups=(CenterGroup("first", ParameterConfiguration(0.02)),),
+        elastic_center_group="first",
+        lorentzians=(
+            LorentzianComponent(
+                area=ParameterConfiguration(0.5, 0.0, math.inf),
+                fwhm=ParameterConfiguration(0.1, 1.0e-8, math.inf),
+                center_group="first",
+            ),
+            LorentzianComponent(
+                area=ParameterConfiguration(0.5, 0.0, math.inf),
+                fwhm=ParameterConfiguration(0.3, 1.0e-8, math.inf),
+            ),
+        ),
+    )
+    evidence[index] = replace(item, fit=replace(item.fit, configuration=manual))
+
+    with pytest.raises(ValueError, match="exactly one legacy shared energy_shift"):
         recommend_standard_candidates(tuple(evidence))
 
 

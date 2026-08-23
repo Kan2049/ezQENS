@@ -189,13 +189,13 @@ requires exact ordered sample/resolution Q identity, runs padding detection
 independently on both datasets, compares retained boundaries diagnostically,
 represents a distinct per-Q resolution support, validates accepted measured
 coordinates, previews the exact raw kernel proposed for use, and derives
-unit-area normalization on the original grid only after explicit per-Q
-confirmation.
+unit-area normalization on the original grid after internal automatic structural-QC
+authorization of an untouched default KEEP or an explicitly confirmed user review.
 
 The preview and prepared result reference the immutable source datasets and
 store only original/accepted support, KEEP or contiguous-EXCLUDE decision,
-neutral warning and confirmation state, signed-area-ratio diagnostics,
-normalization metadata, Q association by order, and diagnostics.
+acceptance origin, neutral warning and authorization state, signed-area-ratio
+diagnostics, normalization metadata, Q association by order, and diagnostics.
 Normalized energy/intensity/uncertainty and source-grid contribution are
 derived read-only properties. Resolution `AUTO` padding is applied by default
 but has an independent reversible per-group application state; changing support
@@ -204,7 +204,9 @@ energy/intensity remains non-overridable. An internal invalid point inside the
 selected support blocks preparation rather than creating a trapezoidal bridge.
 KEEP preserves the measured support without classifying its structure.
 EXCLUDE can trim boundaries only and cannot express an arbitrary internal mask.
-Unconfirmed preview state does not expose a normalized kernel to convolution.
+Pending explicit review state does not expose a normalized kernel to
+convolution; normal groups need no second confirmation after automatic QC
+acceptance.
 Sample fitting ranges do not enter this state. There is no baseline operation,
 automatic feature detection/correction, interpolation, convolution,
 recentring, nearest-Q association, caching, or analytic fallback in this
@@ -212,9 +214,11 @@ preparation boundary.
 
 ### 3.4 Spectral models and convolution
 
-`spectral` defines elastic, Lorentzian, and background components in terms of
-integrated areas and FWHM parameters. Components expose numerical evaluation
-through a stable interface but know nothing about optimizers or UI.
+`spectral` defines optional elastic, Lorentzian, and background components in
+terms of integrated areas and FWHM parameters. Stable named center groups own one
+`ParameterConfiguration` shared by every referencing component; single-member
+groups represent independent centers. Components expose numerical evaluation
+through a stable interface but know nothing about optimizers or UI-master state.
 
 For unit-area processed resolution `R_Q`, the elastic evaluator returns
 `A_elastic * R_Q(E - E0)` directly; it never constructs a discrete numerical
@@ -243,17 +247,19 @@ policy. Future `E0` shifts change evaluation coordinates, not the plan/grid.
 
 ### 3.5 Fitting, diagnostics, and batch execution
 
-`fitting` represents one elastic component, a variable-length Lorentzian
-collection, shared energy shift by default, optional per-Lorentzian independent
-centers for manual expert fitting, and NONE/B0/B1 background. It adapts this
+`fitting` represents an optional elastic component, a variable-length
+Lorentzian collection, explicit stable center tie groups or legacy shared/
+independent centers, and NONE/B0/B1 background. It adapts this
 manual configuration to `scipy.optimize.least_squares(method="trf")`, uses the
 existing fitting selection and prepared resolution, constructs weighted
 standardized residuals on retained original sample coordinates, honors
 fixed/free state and bounds, and returns raw optimizer facts without hiding
-failure. Independent centers enter normal parameter, covariance, correlation,
-DOF/statistics, and component-canonicalization bookkeeping. The scientific model
-has no Lorentzian-count ceiling; production AutoFit remains shared-center-only
-and exactly 0L/1L/2L × NONE/B0/B1.
+failure. Each center group enters optimizer, covariance, correlation, and DOF
+bookkeeping exactly once; FWHM canonicalization preserves stable group identity.
+The submitted configuration and canonical fitted model remain separately
+inspectable. The scientific model has no Lorentzian-count ceiling; production
+AutoFit remains elastic-containing, single-shared-center-only, and exactly
+0L/1L/2L × NONE/B0/B1.
 
 Fit results expose component-resolved model values, raw/standardized residuals,
 chi-square, reduced chi-square, unscaled absolute-sigma covariance/error
@@ -339,10 +345,11 @@ uniform_q_bins(lower_q_edge, upper_q_edge, group_count) -> QBins
 parse_dave_q_bins(source) -> DAVEQBinsResult
 dataset.assign_q_bins(q_bins) -> ReducedDataset
 FittingSelection.uniform(dataset, padding, energy_bounds) -> FittingSelection
-preview_measured_resolution(sample, resolution, per_q_decisions, support_overrides)
+preview_measured_resolution(sample, resolution, acceptance_decisions,
+                            support_overrides, auto_padding_overrides)
   -> ResolutionPreparationPreview
-prepare_measured_resolution(sample, resolution, confirmed_per_q_decisions,
-                            support_overrides)
+prepare_measured_resolution(sample, resolution, acceptance_decisions,
+                            support_overrides, auto_padding_overrides)
   -> PreparedResolution
 fit_spectrum(spectrum, resolution, configuration) -> FitResult
 fit_batch(spectra, resolution_map, configuration, cancellation) -> BatchFitResult
