@@ -11,8 +11,12 @@ requires-python = ">=3.12,<3.14"
 dependencies = [
     "matplotlib",
     "numpy",
+    "pyside6",
     "scipy",
 ]
+
+[project.gui-scripts]
+ezqens = "ezqens.gui.application:main"
 
 [dependency-groups]
 dev = [
