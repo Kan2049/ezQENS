@@ -434,7 +434,13 @@ The final GUI uses PySide6 and initially provides:
 It must be small, elegant, scientific, guided for non-experts, free of formulas
 and optimizer logic, and responsive during cancellable long-running fits
 executed outside the GUI thread. It calls the same scientific core used by
-Python workflows; no scientific operation is duplicated in GUI code.
+Python workflows; no scientific operation is duplicated in GUI code. Component
+interaction hints are converted into convolution-aware initial seeds by the core.
+A mouse-drag Lorentzian width is approximate observed/convolved geometry: the core
+chooses a deterministic positive intrinsic-width seed by forward convolution, not
+an exact or physical deconvolution. Live Manual curves and standardized residuals
+come from a core preview API on the current retained measured coordinates.
+Temporary draft/history state remains application-owned.
 
 The GUI exposes complexity progressively rather than requiring literal
 “beginner” and “advanced” modes. Safe defaults, clear choices, basic outputs,

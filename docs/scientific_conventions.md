@@ -128,6 +128,18 @@ canonicalization must preserve group references, and shared centers count once
 in covariance and DOF bookkeeping. Production AutoFit remains elastic-containing
 and single-shared-center-only.
 
+Manual interaction geometry is initial-guess information only. Elastic component
+height is converted to integrated area using the selected unit-area measured
+resolution. A Lorentzian horizontal-width hint is approximate
+observed/convolved FWHM geometry, not an intrinsic linewidth. A deterministic forward-convolution search
+selects a positive intrinsic-FWHM initial seed whose internally represented
+convolved main-peak width is a useful approximate match. Discrete, asymmetric, or
+structured measured resolution can make this inverse non-unique or discontinuous;
+exact reproduction of the interaction hint is neither required nor claimed. The
+optimizer-fitted FWHM is the scientific linewidth. No physical deconvolution, INS
+classification, or mechanism inference follows from these seeds. User limits
+remain distinct from current preview values and core numerical/scientific bounds.
+
 Elastic and Lorentzian amplitude parameters used for EISF are integrated areas,
 not peak heights. Component identifiers and individual quasielastic areas must
 be retained even when an aggregate is displayed.

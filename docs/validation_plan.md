@@ -251,6 +251,15 @@ without asserting that every noisy realization equals truth. Evaluate:
 - per-Q independence and optional previous-fit seeding; and
 - derived tau and EISF.
 
+The pre-GUI Manual bridge additionally verifies measured-resolution-based elastic
+and Lorentzian interaction seeds, including deterministic approximate width seeding
+for symmetric, asymmetric, and structured/discontinuous profiles without assuming
+a unique inverse. It verifies user-limit/core-bound materialization without
+mutating current draft values, one materialization per tied center group, and live
+component/standardized-residual previews on exact retained sample coordinates.
+These tests assert that no optimizer, adequacy, recommendation, or physical
+classification is invoked.
+
 Acceptance ranges are defined before looking at benchmark outcomes. Tests must
 also verify bound-hit, covariance/Jacobian, and scientific-quality warnings.
 Parameter recovery is not declared successful solely because the optimizer

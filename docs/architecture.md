@@ -261,6 +261,16 @@ inspectable. The scientific model has no Lorentzian-count ceiling; production
 AutoFit remains elastic-containing, single-shared-center-only, and exactly
 0L/1L/2L × NONE/B0/B1.
 
+A thin Manual bridge converts component-only peak/width interaction hints into
+initial integrated-area, intrinsic-FWHM, and center seeds through the selected
+measured-resolution convolution. Lorentzian width initialization uses a local,
+deterministic coarse-to-fine forward search; it does not require or claim a unique
+inverse for asymmetric, discrete, or structured measured-resolution profiles. It
+separately materializes caller-owned current values and optional user limits into strict preview/fit parameter configurations,
+and evaluates live component curves plus standardized residuals on exact retained
+sample coordinates. It owns no GUI draft, history, interaction events, optimizer,
+adequacy judgement, or AutoFit policy.
+
 Fit results expose component-resolved model values, raw/standardized residuals,
 chi-square, reduced chi-square, unscaled absolute-sigma covariance/error
 status, Jacobian singular values/rank/condition, bound activity, residual
