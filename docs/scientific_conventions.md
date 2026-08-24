@@ -128,10 +128,17 @@ canonicalization must preserve group references, and shared centers count once
 in covariance and DOF bookkeeping. Production AutoFit remains elastic-containing
 and single-shared-center-only.
 
-Manual interaction geometry is initial-guess information only. Elastic component
-height is converted to integrated area using the selected unit-area measured
-resolution. A Lorentzian horizontal-width hint is approximate
-observed/convolved FWHM geometry, not an intrinsic linewidth. A deterministic forward-convolution search
+Manual interaction geometry is initial-guess information only. Background
+press-release interaction always initializes B1. A nondegenerate gesture creates
+the unique line through both supplied points; a horizontal gesture or coincident
+click seeds `b1 = 0`. Zero initial slope is neither fixed slope nor B0: explicit
+later Manual model/parameter action is required to select B0 or constrain slope.
+Click-versus-drag classification belongs to GUI/application interaction state; the
+scientific helper uses exact supplied coordinates and no snapping tolerance. No
+positivity constraint or physical baseline interpretation is introduced. Elastic component height is converted to integrated area
+using the selected unit-area measured resolution. A Lorentzian horizontal-width
+hint is approximate observed/convolved FWHM geometry, not an intrinsic linewidth.
+A deterministic forward-convolution search
 selects a positive intrinsic-FWHM initial seed whose internally represented
 convolved main-peak width is a useful approximate match. Discrete, asymmetric, or
 structured measured resolution can make this inverse non-unique or discontinuous;
@@ -369,6 +376,12 @@ Using the previous successful fit as the next initial guess is optional and
 recorded. Failure at one Q does not erase other results. A failed Q can be
 manually refitted. Exclusion from spectral fitting and exclusion from later
 derived-quantity use are distinct states with recorded reasons.
+
+Future Multi-Q Lorentzian component identity must consider both FWHM continuity
+and integrated-area continuity across neighboring Q. When similar linewidths make
+width-based identity ambiguous, area continuity receives greater relative weight.
+This future scientific/core policy is not implemented here, and GUI/application
+code must not invent an independent component-matching heuristic.
 
 ## 8. Analysis-level masks and warnings
 

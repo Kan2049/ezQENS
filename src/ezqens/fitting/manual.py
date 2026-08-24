@@ -20,7 +20,12 @@ from ezqens.preprocessing import FittingSelection
 from ezqens.resolution import PreparedResolution
 
 from .core import FittingError, _fit_inputs, _profile_fwhm, evaluate_spectral_model
-from .models import ModelEvaluation, ParameterConfiguration, SpectralModelDefinition
+from .models import (
+    BackgroundModel,
+    ModelEvaluation,
+    ParameterConfiguration,
+    SpectralModelDefinition,
+)
 
 FloatArray = npt.NDArray[np.float64]
 _BOUND_INTERIOR_FRACTION: Final[float] = 1.0e-10
@@ -53,6 +58,15 @@ class ElasticInteractionSeed:
 
     integrated_area: float
     center_parameter_value: float
+
+
+@dataclass(frozen=True, slots=True)
+class BackgroundInteractionSeed:
+    """Background model and initial coefficients from two visual points."""
+
+    background: BackgroundModel
+    b0_initial_value: float
+    b1_initial_value: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,6 +178,41 @@ def _finite_hint(value: float, *, name: str) -> float:
     if not np.isfinite(numeric):
         raise ManualInitializationError(f"{name} must be finite")
     return numeric
+
+
+def initialize_background_from_interaction(
+    *,
+    first_energy: float,
+    first_height: float,
+    second_energy: float,
+    second_height: float,
+) -> BackgroundInteractionSeed:
+    """Convert press-release geometry into an unconstrained B1 initial seed."""
+
+    energy_1 = _finite_hint(first_energy, name="first_energy")
+    height_1 = _finite_hint(first_height, name="first_height")
+    energy_2 = _finite_hint(second_energy, name="second_energy")
+    height_2 = _finite_hint(second_height, name="second_height")
+    if energy_1 == energy_2:
+        if height_1 != height_2:
+            raise ManualInitializationError(
+                "different background heights at equal energies do not define a "
+                "finite linear background"
+            )
+        b1 = 0.0
+        b0 = height_1
+    else:
+        b1 = (height_2 - height_1) / (energy_2 - energy_1)
+        b0 = height_1 - b1 * energy_1
+    if not np.isfinite(b0) or not np.isfinite(b1):
+        raise ManualInitializationError(
+            "two-point interaction does not define finite background coefficients"
+        )
+    return BackgroundInteractionSeed(
+        background=BackgroundModel.LINEAR,
+        b0_initial_value=b0,
+        b1_initial_value=b1,
+    )
 
 
 def _center_coverage(

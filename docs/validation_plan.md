@@ -118,6 +118,10 @@ Public synthetic text fixtures cover the following contracts.
   between stored and reconstructed group counts warns without failing parsing.
 - Regression tests explicitly distinguish DAVE step-driven bins from
   count-driven exact-coverage `uniform_q_bins()` results.
+- Representative-Q plus explicit-step edge proposals preserve supplied values,
+  tolerate step-scaled roundoff only, reject materially inconsistent spacing even
+  at large coordinate magnitude, reject numerically unverifiable coordinate/step
+  combinations, and require finite strictly increasing genuinely centered edges.
 
 #### 3.2.5 Fitting selection and visualization
 
@@ -251,9 +255,9 @@ without asserting that every noisy realization equals truth. Evaluate:
 - per-Q independence and optional previous-fit seeding; and
 - derived tau and EISF.
 
-The pre-GUI Manual bridge additionally verifies measured-resolution-based elastic
-and Lorentzian interaction seeds, including deterministic approximate width seeding
-for symmetric, asymmetric, and structured/discontinuous profiles without assuming
+The pre-GUI Manual bridge additionally verifies two-point B1 background seeds,
+including horizontal and coincident zero-slope initialization without implicit B0 and measured-resolution-based elastic and Lorentzian interaction seeds,
+including deterministic approximate width seeding for symmetric, asymmetric, and structured/discontinuous profiles without assuming
 a unique inverse. It verifies user-limit/core-bound materialization without
 mutating current draft values, one materialization per tied center group, and live
 component/standardized-residual previews on exact retained sample coordinates.

@@ -30,6 +30,7 @@ from ezqens.fitting.core import (
     generate_standard_candidates,
 )
 from ezqens.fitting.manual import (
+    BackgroundInteractionSeed,
     ElasticInteractionSeed,
     LorentzianInteractionSeed,
     ManualInitializationError,
@@ -38,6 +39,7 @@ from ezqens.fitting.manual import (
     ManualParameterIntent,
     ManualParameterKind,
     ManualParameterMaterialization,
+    initialize_background_from_interaction,
     initialize_elastic_from_interaction,
     initialize_lorentzian_from_interaction,
     materialize_manual_parameter,
@@ -67,6 +69,7 @@ __all__ = [
     "AlternativeStartResult",
     "AutoFitRecommendation",
     "AutoFitSearchScope",
+    "BackgroundInteractionSeed",
     "BackgroundModel",
     "BackgroundRobustness",
     "CandidateFitResult",
@@ -109,6 +112,7 @@ __all__ = [
     "fit_single_q",
     "fit_standard_candidate",
     "generate_standard_candidates",
+    "initialize_background_from_interaction",
     "initialize_elastic_from_interaction",
     "initialize_lorentzian_from_interaction",
     "materialize_manual_parameter",

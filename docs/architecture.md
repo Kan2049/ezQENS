@@ -135,8 +135,11 @@ fixed-width bins from the source lower limit, upper limit, and step, so its
 source upper limit may exceed the final actual edge. It retains the stored group
 count as source metadata and warns if it differs from the reconstructed count.
 Both edge-defined paths produce midpoint representatives; explicit values leave
-edges unknown. Source-specific metadata and diagnostics stay in `io`, while the
-scientific object contains no parser, confirmation, or GUI state.
+edges unknown. The explicit representative-values plus uniform-step constructor
+preserves the supplied representative values and proposes centered uniform edges
+only for that selected assignment mode; it creates no general midpoint assumption.
+Source-specific metadata and diagnostics stay in `io`, while the scientific object
+contains no parser, confirmation, or GUI state.
 
 Reduced-data import and any future raw reduction remain distinct internal
 responsibilities even if a later GUI presents both under “Import Data”:
@@ -263,10 +266,13 @@ AutoFit remains elastic-containing, single-shared-center-only, and exactly
 
 A thin Manual bridge converts component-only peak/width interaction hints into
 initial integrated-area, intrinsic-FWHM, and center seeds through the selected
-measured-resolution convolution. Lorentzian width initialization uses a local,
+measured-resolution convolution, and converts press-release background geometry
+into B1 coefficient seeds. Horizontal drags and application-classified clicks seed
+`b1 = 0` without fixing the slope or selecting B0. Lorentzian width initialization uses a local,
 deterministic coarse-to-fine forward search; it does not require or claim a unique
 inverse for asymmetric, discrete, or structured measured-resolution profiles. It
-separately materializes caller-owned current values and optional user limits into strict preview/fit parameter configurations,
+separately materializes caller-owned current values and optional user limits into
+strict preview/fit parameter configurations,
 and evaluates live component curves plus standardized residuals on exact retained
 sample coordinates. It owns no GUI draft, history, interaction events, optimizer,
 adequacy judgement, or AutoFit policy.
@@ -352,6 +358,7 @@ detect_reduced_data_format(source, optional_override) -> FormatDetectionResult
 import_reduced_data(source, role, units) -> ReducedDataset
 QBins.from_edges(edges) / QBins.from_q_values(values) -> QBins
 uniform_q_bins(lower_q_edge, upper_q_edge, group_count) -> QBins
+QBins.from_q_values_and_uniform_step(q_values, step) -> QBins
 parse_dave_q_bins(source) -> DAVEQBinsResult
 dataset.assign_q_bins(q_bins) -> ReducedDataset
 FittingSelection.uniform(dataset, padding, energy_bounds) -> FittingSelection

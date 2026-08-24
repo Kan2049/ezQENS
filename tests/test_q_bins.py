@@ -1,5 +1,6 @@
 """Behavior tests for dataset-level Q bins and DAVE parameters."""
 
+import math
 from pathlib import Path
 
 import numpy as np
@@ -102,6 +103,100 @@ def test_explicit_q_values_preserve_nonlinear_order_without_edges() -> None:
 
     np.testing.assert_array_equal(q_bins.q_values, supplied)
     assert q_bins.edges is None
+
+
+def test_one_representative_q_value_and_step_propose_two_centered_edges() -> None:
+    q_bins = QBins.from_q_values_and_uniform_step([0.75], 0.2)
+
+    np.testing.assert_array_equal(q_bins.q_values, [0.75])
+    assert q_bins.group_count == 1
+    assert q_bins.edges is not None
+    np.testing.assert_allclose(q_bins.edges, [0.65, 0.85])
+    assert q_bins.edges.size == q_bins.group_count + 1
+
+
+def test_uniform_representative_values_and_step_preserve_supplied_values() -> None:
+    supplied = np.array([0.45, 0.60, 0.75, 0.90], dtype=np.float64)
+
+    q_bins = QBins.from_q_values_and_uniform_step(supplied, 0.15)
+
+    np.testing.assert_array_equal(q_bins.q_values, supplied)
+    assert q_bins.edges is not None
+    np.testing.assert_allclose(q_bins.edges, [0.375, 0.525, 0.675, 0.825, 0.975])
+    assert q_bins.edges.size == supplied.size + 1
+
+
+def test_uniform_step_accepts_ordinary_floating_point_representation_noise() -> None:
+    supplied = np.array([0.1, 0.2, 0.30000000000000004])
+
+    q_bins = QBins.from_q_values_and_uniform_step(supplied, 0.1)
+
+    np.testing.assert_array_equal(q_bins.q_values, supplied)
+    assert q_bins.edges is not None
+    np.testing.assert_allclose(q_bins.edges, [0.05, 0.15, 0.25, 0.35])
+
+
+def test_uniform_step_accepts_long_decimal_grid_subtraction_roundoff() -> None:
+    supplied = 0.1 + 0.1 * np.arange(30)
+
+    q_bins = QBins.from_q_values_and_uniform_step(supplied, 0.1)
+
+    np.testing.assert_array_equal(q_bins.q_values, supplied)
+    assert q_bins.edges is not None
+    assert q_bins.edges.size == supplied.size + 1
+    assert np.all(np.diff(q_bins.edges) > 0.0)
+    assert np.all(q_bins.edges[:-1] < q_bins.q_values)
+    assert np.all(q_bins.q_values < q_bins.edges[1:])
+
+
+def test_large_coordinate_nonuniform_spacings_are_rejected() -> None:
+    supplied = [1.0e16, 1.0e16 + 8.0, 1.0e16 + 32.0]
+
+    with pytest.raises(ValueError, match="precision is too coarse"):
+        QBins.from_q_values_and_uniform_step(supplied, 16.0)
+
+
+def test_coordinate_precision_too_coarse_to_verify_step_is_rejected() -> None:
+    supplied = [1.0e16, 1.0e16 + 16.0, 1.0e16 + 32.0]
+
+    with pytest.raises(ValueError, match="precision is too coarse"):
+        QBins.from_q_values_and_uniform_step(supplied, 16.0)
+
+
+def test_underflowed_half_step_cannot_create_centered_edges() -> None:
+    smallest_positive = float(np.nextafter(0.0, 1.0))
+
+    with pytest.raises(ValueError, match="half-width is not representable"):
+        QBins.from_q_values_and_uniform_step([0.0], smallest_positive)
+
+
+@pytest.mark.parametrize("step", [math.nan, math.inf, -math.inf, 0.0, -0.1, True])
+def test_representative_q_uniform_step_must_be_finite_and_positive(
+    step: float,
+) -> None:
+    with pytest.raises(ValueError, match="step"):
+        QBins.from_q_values_and_uniform_step([0.5], step)
+
+
+@pytest.mark.parametrize(
+    ("values", "step"),
+    [
+        ([0.4, 0.6, 0.9], 0.2),
+        ([0.4, 0.7, 0.9], 0.2),
+        ([0.8, 0.6, 0.4], 0.2),
+        ([0.4, 0.6, 0.8], 0.25),
+    ],
+)
+def test_representative_q_values_are_not_repaired_or_reordered(
+    values: list[float],
+    step: float,
+) -> None:
+    original = list(values)
+
+    with pytest.raises(ValueError, match="must match"):
+        QBins.from_q_values_and_uniform_step(values, step)
+
+    assert values == original
 
 
 def test_known_edges_do_not_permanently_require_midpoint_representatives() -> None:

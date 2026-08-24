@@ -23,6 +23,7 @@ from ezqens.fitting import (
     ParameterConfiguration,
     SpectralModelDefinition,
     evaluate_spectral_model,
+    initialize_background_from_interaction,
     initialize_elastic_from_interaction,
     initialize_lorentzian_from_interaction,
     materialize_manual_parameter,
@@ -109,6 +110,126 @@ def parameter(
     free: bool = False,
 ) -> ParameterConfiguration:
     return ParameterConfiguration(value, lower, upper, free)
+
+
+def test_background_horizontal_drag_creates_b1_with_free_zero_slope_seed() -> None:
+    seed = initialize_background_from_interaction(
+        first_energy=-0.4,
+        first_height=-0.25,
+        second_energy=0.7,
+        second_height=-0.25,
+    )
+    slope = materialize_manual_parameter(
+        ManualParameterIntent(seed.b1_initial_value),
+        ManualParameterKind.UNCONSTRAINED,
+    )
+
+    assert seed.background is BackgroundModel.LINEAR
+    assert seed.b0_initial_value == -0.25
+    assert seed.b1_initial_value == 0.0
+    assert slope.fit_configuration.free
+    assert np.isneginf(slope.fit_configuration.lower_bound)
+    assert np.isposinf(slope.fit_configuration.upper_bound)
+
+
+def test_background_coincident_click_creates_b1_with_zero_slope_seed() -> None:
+    seed = initialize_background_from_interaction(
+        first_energy=0.35,
+        first_height=-0.4,
+        second_energy=0.35,
+        second_height=-0.4,
+    )
+
+    assert seed.background is BackgroundModel.LINEAR
+    assert seed.b0_initial_value == -0.4
+    assert seed.b1_initial_value == 0.0
+
+
+@pytest.mark.parametrize(
+    ("first_height", "second_height", "expected_slope"),
+    [(1.0, 2.5, 0.75), (2.5, 1.0, -0.75)],
+)
+def test_background_interaction_different_heights_create_b1(
+    first_height: float,
+    second_height: float,
+    expected_slope: float,
+) -> None:
+    first_energy = -1.0
+    second_energy = 1.0
+
+    seed = initialize_background_from_interaction(
+        first_energy=first_energy,
+        first_height=first_height,
+        second_energy=second_energy,
+        second_height=second_height,
+    )
+
+    assert seed.background is BackgroundModel.LINEAR
+    assert seed.b1_initial_value == expected_slope
+    assert seed.b0_initial_value + expected_slope * first_energy == pytest.approx(
+        first_height
+    )
+    assert seed.b0_initial_value + expected_slope * second_energy == pytest.approx(
+        second_height
+    )
+
+
+def test_background_interaction_accepts_negative_linear_values() -> None:
+    seed = initialize_background_from_interaction(
+        first_energy=-2.0,
+        first_height=-3.0,
+        second_energy=2.0,
+        second_height=-1.0,
+    )
+
+    assert seed.background is BackgroundModel.LINEAR
+    assert seed.b0_initial_value == -2.0
+    assert seed.b1_initial_value == 0.5
+
+
+def test_background_interaction_rejects_equal_energy_with_different_heights() -> None:
+    with pytest.raises(ManualInitializationError, match="equal energies"):
+        initialize_background_from_interaction(
+            first_energy=0.1,
+            first_height=1.0,
+            second_energy=0.1,
+            second_height=2.0,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("first_energy", math.nan),
+        ("first_height", math.inf),
+        ("second_energy", -math.inf),
+        ("second_height", math.nan),
+    ],
+)
+def test_background_interaction_rejects_nonfinite_inputs(
+    field: str,
+    value: float,
+) -> None:
+    arguments = {
+        "first_energy": -1.0,
+        "first_height": 0.0,
+        "second_energy": 1.0,
+        "second_height": 1.0,
+    }
+    arguments[field] = value
+
+    with pytest.raises(ManualInitializationError, match="finite"):
+        initialize_background_from_interaction(**arguments)
+
+
+def test_background_interaction_rejects_nonfinite_derived_coefficients() -> None:
+    with pytest.raises(ManualInitializationError, match="finite background"):
+        initialize_background_from_interaction(
+            first_energy=-1.0,
+            first_height=1.0e308,
+            second_energy=1.0,
+            second_height=-1.0e308,
+        )
 
 
 def test_elastic_interaction_height_uses_actual_measured_resolution() -> None:

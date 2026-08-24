@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
+from numbers import Real
 
 import numpy as np
 import numpy.typing as npt
@@ -114,6 +115,94 @@ class QBins:
             representative_q_values, name="representative_q_values"
         )
         return cls(q_values=q_values)
+
+    @classmethod
+    def from_q_values_and_uniform_step(
+        cls,
+        representative_q_values: npt.ArrayLike,
+        step: float,
+    ) -> QBins:
+        """Preserve representatives and propose centered edges for explicit step."""
+
+        if isinstance(step, bool) or not isinstance(step, Real):
+            raise ValueError("step must be a finite positive number")
+        numeric_step = float(step)
+        if not np.isfinite(numeric_step) or numeric_step <= 0.0:
+            raise ValueError("step must be finite and strictly positive")
+        half_step = numeric_step / 2.0
+        if not np.isfinite(half_step) or half_step <= 0.0:
+            raise ValueError("step half-width is not representable as a positive float")
+        explicit = cls.from_q_values(representative_q_values)
+        epsilon = np.finfo(np.float64).eps
+        coordinate_ulp = float(np.max(np.spacing(np.abs(explicit.q_values))))
+        if coordinate_ulp / numeric_step > np.sqrt(epsilon):
+            raise ValueError(
+                "representative Q coordinate precision is too coarse to verify "
+                "the supplied uniform step"
+            )
+        step_roundoff = 8.0 * max(
+            epsilon * numeric_step,
+            float(np.spacing(numeric_step)),
+        )
+        q_spacing_tolerance = step_roundoff + 4.0 * coordinate_ulp
+
+        def matches_step(
+            values: FloatArray,
+            expected: float,
+            absolute_tolerance: float,
+        ) -> bool:
+            return bool(
+                np.all(
+                    np.isclose(
+                        values,
+                        expected,
+                        rtol=8.0 * epsilon,
+                        atol=absolute_tolerance,
+                    )
+                )
+            )
+
+        if explicit.group_count > 1 and not matches_step(
+            np.diff(explicit.q_values),
+            numeric_step,
+            q_spacing_tolerance,
+        ):
+            raise ValueError(
+                "adjacent representative Q differences must match the "
+                "supplied uniform step"
+            )
+        first_edge = float(explicit.q_values[0]) - half_step
+        with np.errstate(over="ignore", invalid="ignore"):
+            edges = first_edge + numeric_step * np.arange(
+                explicit.group_count + 1,
+                dtype=np.float64,
+            )
+        if not np.all(np.isfinite(edges)):
+            raise ValueError("centered Q-bin edges must be finite")
+        if not np.all(np.diff(edges) > 0.0):
+            raise ValueError(
+                "uniform step is not representable as strictly increasing Q-bin edges"
+            )
+        edge_ulp = float(np.max(np.spacing(np.abs(edges))))
+        geometry_tolerance = step_roundoff + 4.0 * max(coordinate_ulp, edge_ulp)
+        left_distance = explicit.q_values - edges[:-1]
+        right_distance = edges[1:] - explicit.q_values
+        if (
+            not np.all(left_distance > 0.0)
+            or not np.all(right_distance > 0.0)
+            or not matches_step(left_distance, half_step, geometry_tolerance)
+            or not matches_step(right_distance, half_step, geometry_tolerance)
+            or not matches_step(
+                np.diff(edges),
+                numeric_step,
+                geometry_tolerance,
+            )
+        ):
+            raise ValueError(
+                "representative Q values and step do not define representable "
+                "centered uniform edges"
+            )
+        return cls(q_values=explicit.q_values, edges=edges)
 
     @property
     def group_count(self) -> int:

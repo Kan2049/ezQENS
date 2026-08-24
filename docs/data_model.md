@@ -179,10 +179,18 @@ one additional value and are finite and strictly increasing.
 `QBins.from_edges(...)` derives Milestone-2 midpoint representatives while the
 base value permits a future reducer to supply a scientifically justified
 weighted/effective representative with known edges. `QBins.from_q_values(...)`
-preserves explicit nonlinear order and leaves edges unknown. Count-driven
-`uniform_q_bins(...)` uses authoritative inclusive outer edges and group count
-and covers the range exactly. No Q state is copied onto `Spectrum`, and no
-mapping provenance or GUI confirmation state is stored in the scientific value.
+preserves explicit nonlinear order and leaves edges unknown.
+`QBins.from_q_values_and_uniform_step(...)` preserves supplied representatives
+exactly and validates represented spacing using only step-scaled machine
+roundoff. It rejects coordinate magnitudes whose floating-point ULP is too coarse
+to verify the requested step. Centered edge construction additionally requires a
+positive representable half-step, finite strictly increasing edges, and each
+representative strictly inside its numerically centered bin. It proposes those
+edges only for that explicit assignment mode. It does not establish a general midpoint
+meaning for representative Q. Count-driven `uniform_q_bins(...)` uses
+authoritative inclusive outer edges and group count and covers the range exactly. No Q state is
+copied onto `Spectrum`, and no mapping provenance or GUI confirmation state is
+stored in the scientific value.
 
 `DAVEQBinsResult` keeps DAVE source metadata outside `QBins`: lower limit,
 upper limit, step, reported group count, and diagnostics. The parser rebuilds
