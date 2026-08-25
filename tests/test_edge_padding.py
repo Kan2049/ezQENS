@@ -341,3 +341,46 @@ def test_structural_summary_is_privacy_safe() -> None:
     assert "array(" not in representation
     assert "intensity=" not in representation
     assert "uncertainty=" not in representation
+
+
+def test_singleton_negative_left_edge_drop_is_auto() -> None:
+    dataset = make_dataset([[-3.0, 2.0, 3.0, 4.0]])
+
+    result = detect_edge_padding(dataset).spectra[0]
+
+    assert result.left.status is PaddingStatus.AUTO
+    assert result.left.reason == "singleton_negative_edge_drop"
+    assert result.left.run_length == 1
+    np.testing.assert_array_equal(result.auto_mask, [True, False, False, False])
+    assert result.total_review_mask_count == 0
+
+
+def test_singleton_negative_right_edge_drop_is_auto() -> None:
+    dataset = make_dataset([[4.0, 3.0, 2.0, -3.0]])
+
+    result = detect_edge_padding(dataset).spectra[0]
+
+    assert result.right.status is PaddingStatus.AUTO
+    assert result.right.reason == "singleton_negative_edge_drop"
+    assert result.right.run_length == 1
+    np.testing.assert_array_equal(result.auto_mask, [False, False, False, True])
+    assert result.total_review_mask_count == 0
+
+
+def test_singleton_negative_edge_without_clear_upward_transition_is_not_auto() -> None:
+    dataset = make_dataset([[-1.0, -0.99, 2.0, 3.0]])
+
+    result = detect_edge_padding(dataset).spectra[0]
+
+    assert result.left.status is PaddingStatus.NONE
+    assert result.left.reason == "no_repeated_boundary_pair"
+    assert result.total_auto_mask_count == 0
+
+
+def test_singleton_rule_never_masks_an_interior_negative_point() -> None:
+    dataset = make_dataset([[2.0, -4.0, 3.0, 4.0]])
+
+    result = detect_edge_padding(dataset).spectra[0]
+
+    assert not result.auto_mask[1]
+    assert result.total_auto_mask_count == 0

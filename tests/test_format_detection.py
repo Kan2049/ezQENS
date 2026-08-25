@@ -145,3 +145,12 @@ def test_detection_result_has_no_gui_confirmation_or_confidence_state() -> None:
     assert not hasattr(result, "confidence")
     assert not hasattr(result, "requires_confirmation")
     assert not hasattr(result, "explicit_override")
+
+
+def test_formal_rich_dave_group_syntax_is_detected() -> None:
+    result = detect_reduced_data_format(FIXTURES / "dave_rich_metadata.dat")
+
+    assert result.proposed_format is ReducedDataFormat.DAVE_GROUP_BLOCKS
+    assert result.detected_count == 2
+    assert result.detected_required_columns == ("x", "y", "yerr")
+    assert not result.has_errors

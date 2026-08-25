@@ -409,31 +409,40 @@ specific Q, may generate a warning. ezQENS must not silently delete the Q
 spectrum or affected points. The detection heuristic is unresolved.
 
 The importer preserves every repeated value. Edge-padding detection runs
-separately and examines boundary-connected constant `(intensity, uncertainty)`
-runs only. It does not mask an identical plateau occurring solely inside the
-spectrum, infer padding from intensity sign alone, or hard-code a sentinel.
+separately and primarily examines boundary-connected constant
+`(intensity, uncertainty)` runs. It does not mask an identical plateau occurring
+solely inside the spectrum or hard-code a sentinel. The sole sign-specific
+version-2.1 extension is the explicitly bounded singleton rule below; intensity
+sign alone is otherwise insufficient.
 
-The approved `edge-padding-v2.0.0` rule is deliberately behavior-oriented:
+The approved `edge-padding-v2.1.0` rule is deliberately behavior-oriented:
 
 - repeated-pair equality uses relative tolerance `1e-7` and absolute tolerance
   `1e-12` for intensity and uncertainty;
-- a candidate requires at least two boundary-connected repeated pairs;
-- `AUTO` requires a finite adjacent interior point with strictly positive
-  uncertainty and an intensity or uncertainty transition greater than
-  `1e-12 + 0.05 * max(abs(plateau), abs(interior))`;
+- repeated-run candidates require at least two boundary-connected pairs;
+- a repeated-run `AUTO` candidate requires a finite adjacent interior point with
+  strictly positive uncertainty and an intensity or uncertainty transition
+  greater than `1e-12 + 0.05 * max(abs(plateau), abs(interior))`;
+- independently of repeated-run classification, one outermost point is `AUTO`
+  with reason `singleton_negative_edge_drop` only when its energy, intensity,
+  and strictly positive uncertainty are valid, its intensity is strictly
+  negative, the immediately inward point is valid, the inward intensity is
+  greater, and that intensity rise passes the same transition criterion; no
+  interior point or second point is included by this singleton rule;
 - a clear run of at least five points is `AUTO`;
 - a shorter clear run is `AUTO` only when the same boundary signature is
   corroborated by clear runs of at least five points in at least two other
   spectra;
 - other usable repeated boundary runs are `REVIEW`; and
-- a boundary without a usable repeated-pair candidate is `NONE`.
+- a boundary with neither a usable repeated-pair candidate nor a qualifying
+  singleton is `NONE`.
 
 These labels are actions, not statistical confidence. `AUTO` points enter an
 exact reversible default-on mask; `REVIEW` points enter a mutually exclusive
-review mask; `NONE` masks nothing. The rule has no sigma-jump test,
-nonpositive-intensity support, relative-length criterion, or hard-coded
-sentinel. Otherwise identical positive, zero, and negative plateau values are
-classified by the same run and transition rules.
+review mask; `NONE` masks nothing. The repeated-run rule has no sigma-jump test, intensity-sign support,
+relative-length criterion, or hard-coded sentinel; the singleton exception adds
+no generalized sign heuristic. Otherwise identical positive, zero, and negative
+plateau values are classified by the same run and transition rules.
 
 Padding masks never modify or baseline-shift intensity arrays. All plateau
 points are included exactly, including the point immediately adjacent to the

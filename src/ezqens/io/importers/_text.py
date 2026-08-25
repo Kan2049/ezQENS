@@ -12,7 +12,18 @@ from ezqens.domain import (
     ImportValidationError,
 )
 
-_GROUP_PATTERN = re.compile(r"^\s*#\s*group\s+(.+?)\s*$", re.IGNORECASE)
+_FORMAL_GROUP_PATTERN = re.compile(
+    r"^\s*#\s*group\s+number\s*:\s*(.+?)\s*$",
+    re.IGNORECASE,
+)
+_GROUP_PATTERN = re.compile(
+    r"^\s*#\s*group\s+(?!(?:number|value|units|label)\s*:)(.+?)\s*$",
+    re.IGNORECASE,
+)
+_FORMAL_DAVE_HEADER_PATTERN = re.compile(
+    r"^\s*#\s*x\s+value\s+intensity\s+dintensity(?P<extras>\s+.*?)?\s*$",
+    re.IGNORECASE,
+)
 _WIDE_INTENSITY_PATTERN = re.compile(r"^y(\d+)$", re.IGNORECASE)
 _WIDE_UNCERTAINTY_PATTERN = re.compile(r"^yerr(\d+)$", re.IGNORECASE)
 
@@ -100,12 +111,21 @@ def normalized_columns(columns: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(column.casefold() for column in columns)
 
 
+def normalized_dave_columns(columns: tuple[str, ...]) -> tuple[str, ...]:
+    """Map supported formal DAVE scientific headings to core column identities."""
+
+    aliases = {"x value": "x", "intensity": "y", "dintensity": "yerr"}
+    return tuple(
+        aliases.get(column.casefold(), column.casefold()) for column in columns
+    )
+
+
 def find_group_markers(lines: tuple[str, ...]) -> tuple[GroupMarker, ...]:
     """Return DAVE-style group markers in source order."""
 
     markers: list[GroupMarker] = []
     for line_index, line in enumerate(lines):
-        match = _GROUP_PATTERN.match(line)
+        match = _FORMAL_GROUP_PATTERN.match(line) or _GROUP_PATTERN.match(line)
         if match is not None:
             markers.append(
                 GroupMarker(
@@ -119,6 +139,8 @@ def find_group_markers(lines: tuple[str, ...]) -> tuple[GroupMarker, ...]:
 
 def _looks_like_header(columns: tuple[str, ...]) -> bool:
     normalized = normalized_columns(columns)
+    if all(column in normalized_dave_columns(columns) for column in ("x", "y", "yerr")):
+        return True
     if any(column in {"x", "y", "yerr"} for column in normalized):
         return True
     return any(
@@ -142,7 +164,17 @@ def find_table_header(
         stripped = line.strip()
         if not stripped or _GROUP_PATTERN.match(line):
             continue
-        columns = split_columns(line)
+        formal_dave_header = _FORMAL_DAVE_HEADER_PATTERN.match(line)
+        columns = (
+            (
+                "X Value",
+                "Intensity",
+                "dIntensity",
+                *split_columns(formal_dave_header.group("extras") or ""),
+            )
+            if formal_dave_header is not None
+            else split_columns(line)
+        )
         if not columns:
             continue
         if stripped.startswith("#") and not _looks_like_header(columns):

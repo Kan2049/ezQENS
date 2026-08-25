@@ -855,7 +855,9 @@ def test_signed_area_ratio_above_one_is_diagnostic_only() -> None:
     assert ratio is not None
     assert ratio == pytest.approx(expected_ratio)
     assert ratio > 1.0
-    assert result.diagnostics == ()
+    assert tuple(diagnostic.code for diagnostic in result.diagnostics) == (
+        "padding_boundary_mismatch",
+    )
     assert prepared.diagnostics == ()
     np.testing.assert_array_equal(prepared.accepted_mask, expected_mask)
     np.testing.assert_array_equal(prepared.energy, energy[expected_mask])

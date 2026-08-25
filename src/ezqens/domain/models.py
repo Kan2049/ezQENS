@@ -284,6 +284,41 @@ class Spectrum:
 
 
 @dataclass(frozen=True, slots=True)
+class SourceMetadata:
+    """Small typed source provenance with lossless ordered header lines."""
+
+    source_filename: str
+    raw_header_lines: tuple[str, ...] = field(default=(), repr=False)
+    instrument: str | None = None
+    sample: str | None = None
+    title: str | None = None
+    temperature_kelvin: float | None = None
+    wavelength_angstrom: float | None = None
+
+    def __post_init__(self) -> None:
+        if not self.source_filename:
+            raise ValueError("source_filename must not be empty")
+        if any(not isinstance(line, str) for line in self.raw_header_lines):
+            raise ValueError("raw_header_lines must contain only strings")
+        for name in ("instrument", "sample", "title"):
+            value = getattr(self, name)
+            if value is not None and not value:
+                raise ValueError(f"{name} must be nonempty when supplied")
+        if self.temperature_kelvin is not None and (
+            not np.isfinite(self.temperature_kelvin) or self.temperature_kelvin < 0.0
+        ):
+            raise ValueError(
+                "temperature_kelvin must be finite and nonnegative when supplied"
+            )
+        if self.wavelength_angstrom is not None and (
+            not np.isfinite(self.wavelength_angstrom) or self.wavelength_angstrom <= 0.0
+        ):
+            raise ValueError(
+                "wavelength_angstrom must be finite and positive when supplied"
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class SourceColumnMetadata:
     """Text-column traceability kept at the dataset import boundary."""
 
@@ -328,6 +363,7 @@ class ReducedDataset:
     source_layout: ReducedDataFormat | None = None
     diagnostics: tuple[ImportDiagnostic, ...] = ()
     source_columns: tuple[SourceColumnMetadata, ...] = field(default=(), repr=False)
+    source_metadata: SourceMetadata | None = None
     q_bins: QBins | None = None
 
     def __post_init__(self) -> None:
@@ -337,6 +373,10 @@ class ReducedDataset:
             self.source_layout, ReducedDataFormat
         ):
             raise ValueError("source_layout must be a ReducedDataFormat or None")
+        if self.source_metadata is not None and not isinstance(
+            self.source_metadata, SourceMetadata
+        ):
+            raise ValueError("source_metadata must be SourceMetadata or None")
         if not self.spectra:
             raise ValueError("a reduced dataset requires at least one spectrum")
         if any(spectrum.role is not self.role for spectrum in self.spectra):

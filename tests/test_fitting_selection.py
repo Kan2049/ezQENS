@@ -429,3 +429,22 @@ def test_future_source_independent_dataset_runs_milestone_2_operations() -> None
     np.testing.assert_array_equal(
         selection.retained_mask(0), [False, True, True, False]
     )
+
+
+def test_singleton_negative_auto_point_remains_manually_reversible() -> None:
+    dataset = make_dataset([[-3.0, 2.0, 3.0, 4.0]])
+    padding = detect_edge_padding(dataset)
+    selection = FittingSelection.uniform(
+        dataset,
+        padding,
+        lower_energy=-2.0,
+        upper_energy=1.0,
+    )
+    reinclusion = np.array([True, False, False, False], dtype=np.bool_)
+
+    updated = selection.with_group_manual_auto_reinclusion(0, reinclusion)
+
+    assert padding.spectra[0].left.reason == "singleton_negative_edge_drop"
+    assert not selection.retained_mask(0)[0]
+    assert updated.retained_mask(0)[0]
+    assert padding.spectra[0].auto_mask[0]

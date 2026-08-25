@@ -142,6 +142,29 @@ Public synthetic text fixtures cover the following contracts.
 - Plot tests verify figures/axes, plotted scientific values, selected ranges,
   and non-mutation without pixel-perfect comparisons.
 
+#### 3.2.5a Rich DAVE group-block metadata
+
+- Formal `#Group Number`, `#Group Value`, and
+  `#X Value Intensity dIntensity` syntax imports alongside existing legacy DAVE
+  blocks.
+- Ordered header lines before `#Begin`, including repeated keys and free-form
+  text, are preserved losslessly; typed source metadata promotes only reviewed
+  fields and uses the source basename.
+- Every nonempty explicit energy-unit declaration must be recognized and
+  canonically agree; recognized/unsupported mixtures, sole unsupported values,
+  recognized conflicts, and authoritative-header/explicit-caller conflicts fail.
+- A declared DAVE Y unit is authoritative for both intensity and uncertainty,
+  including when caller fallback units differ.
+- Complete Q label/unit/value metadata assigns exact representative Q values
+  with no inferred edges. Missing, malformed, or inconsistent Q metadata warns
+  and leaves Q unassigned.
+- Reported group-count mismatch warns. Reported channel count remains
+  informational, and unequal group grids/row counts are retained.
+- Formal DAVE headers retain trailing fitting-result columns as metadata-only;
+  they never become measured intensity or uncertainty or cause row-width drift.
+- Invalid optional temperature/wavelength metadata remains raw, leaves typed
+  fields unset, and warns without blocking otherwise valid spectra.
+
 #### 3.2.6 Edge-padding detection and custom input
 
 - Long repeated pairs at left, right, and both boundaries.
@@ -154,6 +177,11 @@ Public synthetic text fixtures cover the following contracts.
 - Invalid uncertainty remains solely in its invalid-data mask.
 - Isolated negative interior points and noisy negative physical tails remain
   unmasked.
+- A single strictly negative outermost point with a clear upward transition to
+  a valid inward neighbor is `AUTO` on both left and right boundaries; weak
+  transitions, invalid neighbors, and interior negative points are not promoted.
+- Singleton `AUTO` remains exactly one point, distinct from repeated-run reasons,
+  and remains reversible through manual AUTO re-inclusion.
 - Repeated values inside a physical region are not automatically removed.
 - Weak transitions are `REVIEW`, not default-on masks.
 - Otherwise identical positive, zero, and negative plateaus receive equivalent
@@ -390,7 +418,7 @@ padding. Validate:
   with invalid uncertainty never replaced by zero; and
 - inspection plots consuming the authoritative prepared state.
 
-No fixed padding value is approved. The `edge-padding-v2.0.0` detector uses the
+No fixed padding value is approved. The `edge-padding-v2.1.0` detector uses the
 small explicit rule in `scientific_conventions.md`; changes require versioned
 tests and scientific-owner review. M3 performs no baseline treatment,
 recentring, or interpolation. Milestone 4 validates the common numerical grid,

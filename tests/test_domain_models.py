@@ -5,7 +5,7 @@ from typing import cast
 import numpy as np
 import pytest
 
-from ezqens.domain import ReducedDataset, Spectrum, SpectrumRole
+from ezqens.domain import ReducedDataset, SourceMetadata, Spectrum, SpectrumRole
 
 
 def make_spectrum(
@@ -138,3 +138,10 @@ def test_spectrum_repr_does_not_include_arrays() -> None:
 
     assert "array(" not in representation
     assert "2.5" not in representation
+
+
+def test_source_metadata_rejects_invalid_promoted_physical_values() -> None:
+    with pytest.raises(ValueError, match="nonnegative"):
+        SourceMetadata(source_filename="synthetic.dat", temperature_kelvin=-1.0)
+    with pytest.raises(ValueError, match="positive"):
+        SourceMetadata(source_filename="synthetic.dat", wavelength_angstrom=0.0)

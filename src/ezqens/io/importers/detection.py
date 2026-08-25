@@ -16,6 +16,7 @@ from ezqens.io.importers._text import (
     find_group_markers,
     find_table_header,
     normalized_columns,
+    normalized_dave_columns,
     read_text_lines,
 )
 
@@ -74,7 +75,7 @@ def _dave_detection(lines: tuple[str, ...]) -> FormatDetectionResult:
                 )
             )
             continue
-        normalized = normalized_columns(header.columns)
+        normalized = normalized_dave_columns(header.columns)
         missing = tuple(
             column for column in _REQUIRED_COLUMNS if column not in normalized
         )

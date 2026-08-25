@@ -90,13 +90,32 @@ No shared energy-axis copy or shared-grid boolean is stored. An optimized
 matrix representation may be introduced only after profiling and must remain
 hidden behind the per-spectrum interface without interpolation or data loss.
 
-### 2.3 Text source-column metadata
+### 2.3 Source and text-column metadata
 
-For each imported text spectrum, the dataset may retain group identity, mapped
-energy/intensity/uncertainty column names, ignored extra columns, and original
-source row numbers. This metadata supports basic traceability and importer
-tests. It belongs to the dataset import operation, not `Spectrum`, and is not a
-general public provenance framework.
+`ReducedDataset.source_metadata` may contain a small typed `SourceMetadata`
+value at an import boundary. For rich DAVE input it preserves the source
+basename and the complete ordered header lines before `#Begin` without
+normalizing, deduplicating, or dropping repeated/free-form lines. Instrument,
+sample, and title are promoted when unambiguous. Temperature in K is promoted
+only when finite and nonnegative; wavelength in Å only when finite and positive.
+Invalid optional values remain in the raw header, leave the typed field unset,
+and produce an import warning without blocking valid spectra. The lossless
+header remains authoritative for other fields. Absolute source paths and full
+data rows are not stored there.
+
+For each imported text spectrum, the dataset may separately retain group
+identity, mapped energy/intensity/uncertainty column names, ignored extra
+columns, and original source row numbers. This metadata supports basic
+traceability and importer tests. It belongs to the dataset import operation,
+not `Spectrum`, and is not a general public provenance framework.
+
+Formal DAVE Q metadata may create dataset-level `QBins` only when `Group Label`
+identifies Q, `Group Units` identifies inverse angstrom, and every group has one
+finite `Group Value`. Those values are ordered representatives and `edges`
+remain `None`. Missing, malformed, or inconsistent metadata produces a warning
+and leaves Q unassigned rather than inferring or repairing it. `Number of
+Groups` is consistency metadata; `Number of Channels` is informational and
+does not force equal row counts.
 
 ### 2.4 FormatDetectionResult
 
@@ -134,7 +153,7 @@ Edge padding is preprocessing output, separate from import and invalid masks.
 Each left/right result contains only:
 
 - boundary side;
-- repeated-pair run length;
+- boundary run length (one for a qualifying singleton);
 - energy bounds when a usable candidate exists;
 - behavioral status: `AUTO`, `REVIEW`, or `NONE`; and
 - a compact reason code.

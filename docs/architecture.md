@@ -123,10 +123,20 @@ blocks, wide `x/yN/yerrN`, single `x/y/yerr`, then custom mapping. Extensions
 do not determine layout; later application workflow owns confirmation.
 
 DAVE group blocks, wide shared-grid tables, and single-spectrum tables convert
-to the common spectrum interface. Recognized DAVE fit-result columns are
-recorded and excluded from measured data. Generic ASCII uses explicit mapping
-when ambiguous. Import preserves order, per-group grids/lengths, original
-arrays, and source layout; it never interpolates.
+to the common spectrum interface. The DAVE path accepts both the established
+legacy group blocks and formal `#Group Number` / `#Group Value` /
+`#X Value Intensity dIntensity` syntax. It losslessly retains ordered header
+lines before `#Begin`, promotes a small typed source-metadata subset only when
+its physical values are valid, reads authoritative energy and Y-unit metadata,
+and assigns header-declared per-group Q values as representatives without
+inventing bin edges. Every explicit energy-unit declaration must be recognized
+and canonically consistent, and any explicit non-default caller energy unit must
+agree. A DAVE Y unit applies identically to measured intensity and uncertainty.
+Incomplete or inconsistent Q metadata remains diagnostic and leaves Q
+unassigned. Formal trailing fit-result columns and recognized legacy DAVE
+fit-result columns are recorded and excluded from measured data. Generic ASCII uses
+explicit mapping when ambiguous. Import preserves order, per-group
+grids/lengths, original arrays, and source layout; it never interpolates.
 
 Q identity is dataset-level `QBins`: one ordered representative value per
 spectrum plus optional explicit edges. Count-driven `uniform_q_bins()` exactly
@@ -179,7 +189,10 @@ changing original arrays.
 
 Boundary-padding detection is a separate preprocessing service, not importer
 logic. It examines boundary-connected repeated intensity/uncertainty pairs per
-spectrum and compares signatures across the dataset. `AUTO` and `REVIEW`
+spectrum and compares signatures across the dataset. It also recognizes the
+versioned one-point case where a strictly negative outermost intensity rises
+clearly to a valid inward neighbor; only that edge point becomes `AUTO`. `AUTO`
+and `REVIEW`
 produce distinct, mutually exclusive immutable point masks; `NONE` masks
 nothing. Boundary results retain only side, run length, energy bounds, status,
 and a compact reason. Internal candidates and calculations are not public

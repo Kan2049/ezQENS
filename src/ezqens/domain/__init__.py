@@ -10,6 +10,7 @@ from ezqens.domain.models import (
     QBins,
     ReducedDataFormat,
     ReducedDataset,
+    SourceMetadata,
     Spectrum,
     SpectrumRole,
     uniform_q_bins,
@@ -25,5 +26,6 @@ __all__ = [
     "ReducedDataFormat",
     "Spectrum",
     "SpectrumRole",
+    "SourceMetadata",
     "uniform_q_bins",
 ]

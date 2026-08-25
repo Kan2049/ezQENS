@@ -1,0 +1,27 @@
+#DAVE ASCII OUTPUT
+#Instrument: SYNTHETIC-SPECTROMETER
+#Sample: public synthetic sample
+#Title: Rich DAVE metadata fixture
+#Temperature / K: 301.19300
+#X Units: Energy / meV
+#Y Units: I (arbitrary units)
+#Group Units: wavevector:A-1
+#Group Label: Q
+#Number of Groups: 2
+#Number of Channels: 99
+#Wavelength / A: 4.0605450
+#Comment: first repeated-key value
+#Comment: second repeated-key value
+# free-form header text retained exactly
+#Begin
+#Group Number: 1
+#Group Value: 0.57500000
+#X Value    Intensity dIntensity
+-1.0 2.0 0.10
+0.0 3.0 0.20
+#Group Number: 2
+#Group Value: 0.82500000
+#X Value    Intensity dIntensity
+-1.5 4.0 0.20
+0.0 5.0 0.30
+1.5 4.0 0.20

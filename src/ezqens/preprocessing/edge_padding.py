@@ -12,7 +12,7 @@ from ezqens.domain import ReducedDataset, Spectrum
 
 BoolArray = npt.NDArray[np.bool_]
 
-ALGORITHM_VERSION = "edge-padding-v2.0.0"
+ALGORITHM_VERSION = "edge-padding-v2.1.0"
 
 # The v2 rule intentionally has a small, fixed numerical surface. A new
 # scientific validation is required before changing these values.
@@ -195,6 +195,7 @@ class _BoundaryCandidate:
     has_valid_adjacent_interior: bool
     transition_is_clear: bool
     unavailable_reason: str | None = None
+    singleton_negative_drop: bool = False
 
 
 def _pair_matches(first: tuple[float, float], second: tuple[float, float]) -> bool:
@@ -270,15 +271,39 @@ def _inspect_boundary(
         current += step
 
     if len(indices) < 2:
+        adjacent_is_valid = False
+        singleton_negative_drop = False
+        energy_bounds: tuple[float, float] | None = None
+        if 0 <= current < point_count:
+            adjacent = (
+                float(spectrum.intensity[current]),
+                float(spectrum.uncertainty[current]),
+            )
+            adjacent_is_valid = bool(
+                np.isfinite(spectrum.energy[current])
+                and np.isfinite(adjacent[0])
+                and np.isfinite(adjacent[1])
+                and adjacent[1] > 0.0
+            )
+            singleton_negative_drop = bool(
+                adjacent_is_valid
+                and edge[0] < 0.0
+                and adjacent[0] > edge[0]
+                and _value_transition_is_clear(edge[0], adjacent[0])
+            )
+            if singleton_negative_drop:
+                singleton_energy = float(spectrum.energy[edge_index])
+                energy_bounds = (singleton_energy, singleton_energy)
         return _BoundaryCandidate(
             spectrum_index=spectrum_index,
             side=side,
             run_length=len(indices),
-            energy_bounds=None,
+            energy_bounds=energy_bounds,
             signature=None,
-            has_valid_adjacent_interior=False,
-            transition_is_clear=False,
+            has_valid_adjacent_interior=adjacent_is_valid,
+            transition_is_clear=singleton_negative_drop,
             unavailable_reason="no_repeated_boundary_pair",
+            singleton_negative_drop=singleton_negative_drop,
         )
 
     ordered_indices = sorted(indices)
@@ -351,6 +376,14 @@ def _classify(
     candidate: _BoundaryCandidate,
     candidates: tuple[_BoundaryCandidate, ...],
 ) -> BoundaryPaddingResult:
+    if candidate.singleton_negative_drop:
+        return BoundaryPaddingResult(
+            side=candidate.side,
+            run_length=1,
+            energy_bounds=candidate.energy_bounds,
+            status=PaddingStatus.AUTO,
+            reason="singleton_negative_edge_drop",
+        )
     if candidate.signature is None:
         return BoundaryPaddingResult(
             side=candidate.side,

@@ -260,3 +260,255 @@ def test_privacy_safe_summary_contains_only_structural_information() -> None:
     assert "array(" not in representation
     assert "[4.0" not in representation
     assert "dave_multiple_groups.dat" not in representation
+
+
+def test_rich_dave_metadata_units_q_and_unequal_groups_are_preserved() -> None:
+    source = FIXTURES / "dave_rich_metadata.dat"
+    dataset = import_reduced_data(source, role=SpectrumRole.SAMPLE)
+
+    assert dataset.source_layout is ReducedDataFormat.DAVE_GROUP_BLOCKS
+    assert tuple(spectrum.group_label for spectrum in dataset.spectra) == ("1", "2")
+    assert tuple(spectrum.energy.size for spectrum in dataset.spectra) == (2, 3)
+    assert not dataset.shared_energy_grid
+    assert all(spectrum.energy_unit == "meV" for spectrum in dataset.spectra)
+    assert all(
+        spectrum.intensity_unit == "arbitrary units"
+        and spectrum.uncertainty_unit == "arbitrary units"
+        for spectrum in dataset.spectra
+    )
+    assert dataset.q_bins is not None
+    np.testing.assert_array_equal(dataset.q_bins.q_values, [0.575, 0.825])
+    assert dataset.q_bins.edges is None
+
+    metadata = dataset.source_metadata
+    assert metadata is not None
+    assert metadata.source_filename == source.name
+    assert metadata.instrument == "SYNTHETIC-SPECTROMETER"
+    assert metadata.sample == "public synthetic sample"
+    assert metadata.title == "Rich DAVE metadata fixture"
+    assert metadata.temperature_kelvin == pytest.approx(301.193)
+    assert metadata.wavelength_angstrom == pytest.approx(4.060545)
+    expected_header = tuple(
+        source.read_text(encoding="utf-8").split("#Begin", maxsplit=1)[0].splitlines()
+    )
+    assert metadata.raw_header_lines == expected_header
+    assert metadata.raw_header_lines[-3:] == (
+        "#Comment: first repeated-key value",
+        "#Comment: second repeated-key value",
+        "# free-form header text retained exactly",
+    )
+    assert dataset.source_columns[0].energy == "X Value"
+    assert dataset.source_columns[0].intensity == "Intensity"
+    assert dataset.source_columns[0].uncertainty == "dIntensity"
+    assert "dave_number_channels_reported" in {
+        diagnostic.code for diagnostic in dataset.diagnostics
+    }
+
+
+def test_conflicting_explicit_dave_energy_units_fail(tmp_path: Path) -> None:
+    source = tmp_path / "conflicting-units.dat"
+    source.write_text(
+        "#X Units: Energy / meV\n"
+        "#Energy Units = eV\n"
+        "#Begin\n"
+        "#Group Number: 1\n"
+        "#X Value Intensity dIntensity\n"
+        "0.0 1.0 0.1\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ImportValidationError) as caught:
+        import_reduced_data(source, role="sample")
+
+    assert "dave_energy_unit_conflict" in diagnostic_codes(caught.value)
+
+
+def test_incomplete_dave_q_metadata_warns_without_inventing_q(tmp_path: Path) -> None:
+    source = tmp_path / "incomplete-q.dat"
+    source.write_text(
+        "#Group Label: Q\n"
+        "#Group Units: wavevector:A-1\n"
+        "#Number of Groups: 2\n"
+        "#Begin\n"
+        "#Group Number: 1\n"
+        "#Group Value: 0.5\n"
+        "#X Value Intensity dIntensity\n"
+        "0.0 1.0 0.1\n"
+        "#Group Number: 2\n"
+        "#Group Value: not-a-number\n"
+        "#X Value Intensity dIntensity\n"
+        "0.0 2.0 0.2\n",
+        encoding="utf-8",
+    )
+
+    dataset = import_reduced_data(source, role="sample")
+
+    assert len(dataset.spectra) == 2
+    assert dataset.q_bins is None
+    codes = {diagnostic.code for diagnostic in dataset.diagnostics}
+    assert "dave_q_group_value_invalid" in codes
+    assert "dave_q_values_incomplete" in codes
+
+
+def test_dave_reported_group_count_mismatch_is_warning_only(tmp_path: Path) -> None:
+    source = tmp_path / "group-count.dat"
+    source.write_text(
+        "#Number of Groups: 3\n"
+        "#Begin\n"
+        "#Group Number: 1\n"
+        "#X Value Intensity dIntensity\n"
+        "0.0 1.0 0.1\n"
+        "#Group Number: 2\n"
+        "#X Value Intensity dIntensity\n"
+        "0.0 2.0 0.2\n",
+        encoding="utf-8",
+    )
+
+    dataset = import_reduced_data(source, role="resolution")
+
+    assert len(dataset.spectra) == 2
+    assert "dave_group_count_mismatch" in {
+        diagnostic.code for diagnostic in dataset.diagnostics
+    }
+
+
+def test_dave_y_units_are_authoritative_for_intensity_and_uncertainty(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "authoritative-y-units.dat"
+    source.write_text(
+        "#X Units: Energy / meV\n"
+        "#Y Units: counts\n"
+        "#Begin\n"
+        "#Group Number: 1\n"
+        "#X Value Intensity dIntensity\n"
+        "0.0 3.0 0.2\n",
+        encoding="utf-8",
+    )
+
+    dataset = import_reduced_data(
+        source,
+        role="sample",
+        intensity_unit="arb. unit",
+        uncertainty_unit="arb. unit",
+    )
+
+    spectrum = dataset.spectra[0]
+    assert spectrum.intensity_unit == "counts"
+    assert spectrum.uncertainty_unit == "counts"
+
+
+@pytest.mark.parametrize(
+    ("declarations", "expected_code"),
+    [
+        (
+            "#X Units: Energy / meV\n#Energy Units = unsupported\n",
+            "dave_energy_unit_unrecognized",
+        ),
+        (
+            "#X Units: Energy / meV\n#Energy Units = eV\n",
+            "dave_energy_unit_conflict",
+        ),
+        (
+            "#Energy Units = unsupported\n",
+            "dave_energy_unit_unrecognized",
+        ),
+    ],
+)
+def test_invalid_explicit_dave_energy_declarations_fail_without_fallback(
+    tmp_path: Path,
+    declarations: str,
+    expected_code: str,
+) -> None:
+    source = tmp_path / "invalid-energy-unit.dat"
+    source.write_text(
+        declarations + "#Begin\n"
+        "#Group Number: 1\n"
+        "#X Value Intensity dIntensity\n"
+        "0.0 1.0 0.1\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ImportValidationError) as caught:
+        import_reduced_data(source, role="sample", energy_unit="meV")
+
+    assert expected_code in diagnostic_codes(caught.value)
+
+
+def test_authoritative_dave_energy_unit_must_agree_with_explicit_caller(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "caller-unit-conflict.dat"
+    source.write_text(
+        "#X Units: Energy / meV\n"
+        "#Begin\n"
+        "#Group Number: 1\n"
+        "#X Value Intensity dIntensity\n"
+        "0.0 1.0 0.1\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ImportValidationError) as caught:
+        import_reduced_data(source, role="sample", energy_unit="eV")
+
+    assert "dave_energy_unit_caller_conflict" in diagnostic_codes(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("extra_header", "extra_values", "expected_extras"),
+    [
+        ("ModelFit", "9.0", ("ModelFit",)),
+        ("ModelFit Func", "9.0 8.0", ("ModelFit", "Func")),
+    ],
+)
+def test_formal_dave_header_preserves_extra_fit_columns_without_importing_them(
+    tmp_path: Path,
+    extra_header: str,
+    extra_values: str,
+    expected_extras: tuple[str, ...],
+) -> None:
+    source = tmp_path / "formal-extra-columns.dat"
+    source.write_text(
+        "#Begin\n"
+        "#Group Number: 1\n"
+        f"#X Value Intensity dIntensity {extra_header}\n"
+        f"-1.0 2.0 0.1 {extra_values}\n"
+        f"0.0 3.0 0.2 {extra_values}\n",
+        encoding="utf-8",
+    )
+
+    dataset = import_reduced_data(source, role="sample")
+
+    spectrum = dataset.spectra[0]
+    np.testing.assert_array_equal(spectrum.energy, [-1.0, 0.0])
+    np.testing.assert_array_equal(spectrum.intensity, [2.0, 3.0])
+    np.testing.assert_array_equal(spectrum.uncertainty, [0.1, 0.2])
+    assert dataset.source_columns[0].extra_columns == expected_extras
+    assert dataset.detected_extra_columns == expected_extras
+
+
+def test_invalid_optional_dave_metadata_warns_and_remains_raw(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "invalid-optional-metadata.dat"
+    source.write_text(
+        "#Temperature / K: -1\n"
+        "#Wavelength / A: 0\n"
+        "#Begin\n"
+        "#Group Number: 1\n"
+        "#X Value Intensity dIntensity\n"
+        "0.0 1.0 0.1\n",
+        encoding="utf-8",
+    )
+
+    dataset = import_reduced_data(source, role="sample")
+
+    metadata = dataset.source_metadata
+    assert metadata is not None
+    assert metadata.temperature_kelvin is None
+    assert metadata.wavelength_angstrom is None
+    assert "#Temperature / K: -1" in metadata.raw_header_lines
+    assert "#Wavelength / A: 0" in metadata.raw_header_lines
+    codes = {diagnostic.code for diagnostic in dataset.diagnostics}
+    assert "dave_temperature_invalid" in codes
+    assert "dave_wavelength_invalid" in codes
