@@ -292,6 +292,7 @@ def test_rich_dave_metadata_units_q_and_unequal_groups_are_preserved() -> None:
         source.read_text(encoding="utf-8").split("#Begin", maxsplit=1)[0].splitlines()
     )
     assert metadata.raw_header_lines == expected_header
+    assert "#Group Type: Points" in metadata.raw_header_lines
     assert metadata.raw_header_lines[-3:] == (
         "#Comment: first repeated-key value",
         "#Comment: second repeated-key value",

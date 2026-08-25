@@ -17,7 +17,7 @@ _FORMAL_GROUP_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _GROUP_PATTERN = re.compile(
-    r"^\s*#\s*group\s+(?!(?:number|value|units|label)\s*:)(.+?)\s*$",
+    r"^\s*#\s*group\s+(?!(?:number|value|units|label|type)\s*:)(.+?)\s*$",
     re.IGNORECASE,
 )
 _FORMAL_DAVE_HEADER_PATTERN = re.compile(
@@ -123,8 +123,18 @@ def normalized_dave_columns(columns: tuple[str, ...]) -> tuple[str, ...]:
 def find_group_markers(lines: tuple[str, ...]) -> tuple[GroupMarker, ...]:
     """Return DAVE-style group markers in source order."""
 
+    begin_index = next(
+        (
+            index
+            for index, line in enumerate(lines)
+            if line.strip().casefold() == "#begin"
+        ),
+        None,
+    )
     markers: list[GroupMarker] = []
     for line_index, line in enumerate(lines):
+        if begin_index is not None and line_index <= begin_index:
+            continue
         match = _FORMAL_GROUP_PATTERN.match(line) or _GROUP_PATTERN.match(line)
         if match is not None:
             markers.append(
