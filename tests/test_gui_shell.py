@@ -22,7 +22,9 @@ from ezqens.gui.main_window import (
 from ezqens.gui.scientific_canvas import SCIENTIFIC_BACKGROUND
 from ezqens.gui.theme import (
     DARK_TOKENS,
+    DEFAULT_LAYOUT_TOKENS,
     LIGHT_TOKENS,
+    TYPOGRAPHY,
     Appearance,
     application_appearance_controller,
 )
@@ -64,7 +66,7 @@ def test_main_window_constructs_with_expected_shell_regions(
     assert window.splitter.widget(1) is window.central_workspace
     assert window.splitter.widget(2) is window.inspector
     assert window.central_header.parentWidget() is window.central_workspace
-    assert all(label.text() != "ezQENS" for label in window.findChildren(QLabel))
+    assert any(label.text() == "ezQENS" for label in window.findChildren(QLabel))
     window.close()
 
 
@@ -147,6 +149,70 @@ def test_scientific_canvas_wrapper_is_not_forced_white(
         SCIENTIFIC_BACKGROUND
     )
     window.close()
+
+
+@pytest.mark.parametrize("appearance", [Appearance.LIGHT, Appearance.DARK])
+def test_shared_control_chrome_and_action_icons_follow_appearance(
+    application: QApplication,
+    appearance: Appearance,
+) -> None:
+    application_appearance_controller(application).set_appearance(appearance)
+    window = MainWindow()
+
+    stylesheet = application.styleSheet()
+    assert "QComboBox:hover" in stylesheet
+    assert "QLineEdit:focus" in stylesheet
+    assert 'QToolButton[controlKind="split"]::menu-button:hover' in stylesheet
+    assert not window.workspace.new_project_button.icon().isNull()
+    assert not window.workspace.import_data_button.icon().isNull()
+    assert (
+        window.workspace.import_data_button.toolButtonStyle()
+        is Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+    )
+    assert not window.mask_undo_button.icon().isNull()
+    assert not window.mask_redo_button.icon().isNull()
+    assert (
+        window.mask_undo_button.toolButtonStyle()
+        is Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+    )
+    window.close()
+
+
+def test_theme_uses_one_shared_typography_hierarchy_for_task_and_controls(
+    application: QApplication,
+) -> None:
+    stylesheet = application.styleSheet()
+
+    assert "#maskTaskTitle, #qAssignmentTitle" in stylesheet
+    assert f"font-size: {TYPOGRAPHY.task_title_size}px;" in stylesheet
+    assert f"font-size: {TYPOGRAPHY.control_size}px;" in stylesheet
+    assert f"font-weight: {TYPOGRAPHY.control_weight};" in stylesheet
+    assert f"font-size: {TYPOGRAPHY.secondary_size}px;" in stylesheet
+    assert "QToolTip" in stylesheet
+    assert "qproperty-iconSize: 14px;" in stylesheet
+    assert "#newProjectButton, #importDataButton" in stylesheet
+    assert "text-align: center;" in stylesheet
+
+
+def test_main_window_uses_static_layout_defaults_without_runtime_tuner_hooks(
+    application: QApplication,
+) -> None:
+    window = MainWindow()
+
+    assert not hasattr(window, "_layout_controller")
+    assert "Developer" not in {
+        action.text().replace("&", "") for action in window.menuBar().actions()
+    }
+    assert window.workspace.new_project_button.iconSize().width() == (
+        DEFAULT_LAYOUT_TOKENS.control_icon_size
+    )
+    assert window.workspace._layout.spacing() == DEFAULT_LAYOUT_TOKENS.section_spacing
+    assert window.dataset_view._navigation_layout.spacing() == (
+        DEFAULT_LAYOUT_TOKENS.row_spacing
+    )
+    assert window._mask_task_layout.spacing() == (DEFAULT_LAYOUT_TOKENS.toolbar_spacing)
+    window.close()
+    assert not window._appearance_listener_connected
 
 
 @pytest.mark.parametrize(

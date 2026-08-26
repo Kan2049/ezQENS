@@ -26,6 +26,37 @@ class Appearance(Enum):
 
 
 @dataclass(frozen=True)
+class TypographyTokens:
+    """Small shared hierarchy for application chrome typography."""
+
+    task_title_size: int = 13
+    control_size: int = 13
+    secondary_size: int = 11
+    tooltip_size: int = 11
+    task_title_weight: int = 600
+    control_weight: int = 400
+
+
+TYPOGRAPHY = TypographyTokens()
+
+
+@dataclass(frozen=True)
+class LayoutTokens:
+    """Small set of static production dimensions for application chrome."""
+
+    control_height: int = 28
+    control_horizontal_padding: int = 8
+    control_icon_left_inset: int = 11
+    control_icon_size: int = 14
+    row_spacing: int = 5
+    section_spacing: int = 8
+    toolbar_spacing: int = 4
+
+
+DEFAULT_LAYOUT_TOKENS = LayoutTokens()
+
+
+@dataclass(frozen=True)
 class DesignTokens:
     """Small semantic token set for integrated application chrome."""
 
@@ -131,6 +162,8 @@ def tokens_for(scheme: ColorScheme) -> DesignTokens:
 
 def application_stylesheet(tokens: DesignTokens) -> str:
     """Build the restrained stylesheet for application chrome only."""
+
+    layout = DEFAULT_LAYOUT_TOKENS
     return f"""
 QMainWindow, #applicationShell, QSplitter {{
     background: {tokens.surface};
@@ -154,16 +187,21 @@ QLabel[secondary="true"] {{
 QLabel[muted="true"] {{
     color: {tokens.text_muted};
 }}
-#workspaceTitle, #inspectorTitle {{
-    font-size: 13px;
-    font-weight: 600;
+#workspaceTitle, #inspectorTitle, #maskTaskTitle, #qAssignmentTitle,
+#ezqensDialogTitle {{
+    font-size: {TYPOGRAPHY.task_title_size}px;
+    font-weight: {TYPOGRAPHY.task_title_weight};
 }}
 QPushButton, QToolButton {{
     background: transparent;
     border: 1px solid {tokens.border_subtle};
     border-radius: {tokens.control_radius}px;
     color: {tokens.text_primary};
-    padding: 4px 8px;
+    font-size: {TYPOGRAPHY.control_size}px;
+    font-weight: {TYPOGRAPHY.control_weight};
+    min-height: {layout.control_height - 4}px;
+    padding: 4px {layout.control_horizontal_padding}px;
+    qproperty-iconSize: {layout.control_icon_size}px;
 }}
 QPushButton:hover, QToolButton:hover {{
     background: {tokens.surface_hover};
@@ -175,33 +213,66 @@ QPushButton:focus, QToolButton:focus {{
     border-color: {tokens.border_focus};
 }}
 QPushButton:disabled, QToolButton:disabled {{
+    background: transparent;
+    border-color: {tokens.canvas_boundary};
     color: {tokens.disabled};
+}}
+QComboBox, QLineEdit, QPlainTextEdit, QSpinBox {{
+    background: {tokens.surface_input};
+    border: 1px solid {tokens.border_subtle};
+    border-radius: {tokens.control_radius}px;
+    color: {tokens.text_primary};
+    font-size: {TYPOGRAPHY.control_size}px;
+    font-weight: {TYPOGRAPHY.control_weight};
+    padding: 3px {layout.control_horizontal_padding - 2}px;
+}}
+QComboBox:hover, QLineEdit:hover, QPlainTextEdit:hover, QSpinBox:hover {{
+    border-color: {tokens.border_focus};
+}}
+QComboBox:focus, QLineEdit:focus, QPlainTextEdit:focus, QSpinBox:focus {{
+    border: 1px solid {tokens.border_focus};
+}}
+QComboBox:disabled, QLineEdit:disabled, QPlainTextEdit:disabled, QSpinBox:disabled {{
+    background: {tokens.surface};
+    color: {tokens.disabled};
+}}
+QComboBox::drop-down {{
+    border: 0;
+    width: 18px;
+}}
+QComboBox::down-arrow {{
+    width: 7px;
+    height: 7px;
 }}
 #newProjectButton, #importDataButton {{
     background: {tokens.surface};
-    min-height: 28px;
-    font-size: 13px;
-    font-weight: 600;
+    min-height: {layout.control_height}px;
+    text-align: center;
 }}
-#importDataButton {{
-    padding-left: 10px;
-    padding-right: 10px;
+QToolButton[controlKind="split"]::menu-button {{
+    width: 22px;
+    border-left: 1px solid transparent;
 }}
-#importDataButton::menu-button {{
-    width: 24px;
-    border-left: 1px solid {tokens.border_subtle};
+QToolButton[controlKind="split"]::menu-button:hover {{
+    background: {tokens.surface_hover};
 }}
-#importDataButton::menu-arrow {{
-    width: 8px;
+QToolButton[controlKind="split"]::menu-button:pressed {{
+    background: {tokens.surface_selected};
 }}
-#groupNavigationLabel, #datasetMetadataStatus {{
-    font-size: 11px;
+QToolButton[controlKind="split"]::menu-arrow {{
+    width: 7px;
+}}
+#groupNavigationLabel {{
+    font-size: {TYPOGRAPHY.control_size}px;
+    font-weight: {TYPOGRAPHY.control_weight};
+}}
+#datasetMetadataStatus, #qEditorPreview, #qEditorStatus,
+#inspectorSourceTitle, #inspectorSourceMetadata {{
+    font-size: {TYPOGRAPHY.secondary_size}px;
 }}
 #groupSpinBox {{
     background: {tokens.surface_input};
     color: {tokens.text_primary};
-    border: 1px solid {tokens.border_subtle};
-    border-radius: {tokens.control_radius}px;
     padding: 2px 4px;
 }}
 #inspectorButton {{
@@ -215,6 +286,23 @@ QPushButton:disabled, QToolButton:disabled {{
 #inspectorButton:checked {{
     background: {tokens.surface_selected};
     border-color: transparent;
+}}
+#maskTaskBar QToolButton:checked {{
+    background: {tokens.surface_selected};
+    border-color: {tokens.border_focus};
+}}
+#maskTaskBar QToolButton {{
+    min-height: {layout.control_height - 4}px;
+}}
+#qAssignmentEditor {{
+    border: 0;
+}}
+#inspectorSourceTitle {{
+    font-weight: 600;
+    margin-top: 4px;
+}}
+#inspectorSourceMetadata {{
+    line-height: 1.2;
 }}
 QTreeWidget {{
     background: transparent;
@@ -231,6 +319,9 @@ QTreeWidget::item {{
 }}
 QTreeWidget::item:hover {{
     background: {tokens.surface_hover};
+}}
+QTreeWidget::item:focus {{
+    border: 1px solid {tokens.border_focus};
 }}
 QTreeWidget::branch:selected {{
     background: transparent;
@@ -255,6 +346,32 @@ QMenuBar, QMenu {{
 }}
 QMenu::item:selected {{
     background: {tokens.surface_selected};
+}}
+QMenu::separator {{
+    height: 1px;
+    background: {tokens.border_subtle};
+    margin: 4px 8px;
+}}
+#ezqensDialog {{
+    background: {tokens.surface};
+    border: 1px solid {tokens.border_subtle};
+}}
+#ezqensDialogMessage {{
+    color: {tokens.text_secondary};
+}}
+#ezqensDialog QPushButton[destructive="true"] {{
+    color: {tokens.danger};
+}}
+#ezqensDialog QPushButton[destructive="true"]:hover {{
+    background: {tokens.surface_hover};
+    border-color: {tokens.danger};
+}}
+QToolTip {{
+    background: {tokens.surface};
+    border: 1px solid {tokens.border_subtle};
+    color: {tokens.text_primary};
+    font-size: {TYPOGRAPHY.tooltip_size}px;
+    font-weight: {TYPOGRAPHY.control_weight};
 }}
 #scientificCanvas {{
     background: #ffffff;

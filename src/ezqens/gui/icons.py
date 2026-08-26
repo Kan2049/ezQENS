@@ -13,6 +13,10 @@ from PySide6.QtSvg import QSvgRenderer
 class IconName(Enum):
     """The small set of icons used by the application shell."""
 
+    PROJECT = "plus"
+    IMPORT = "folder-input"
+    UNDO = "undo-2"
+    REDO = "redo-2"
     INSPECTOR_SHOW = "panel-right-open"
     INSPECTOR_HIDE = "panel-right-close"
     RESOLUTION = "activity"

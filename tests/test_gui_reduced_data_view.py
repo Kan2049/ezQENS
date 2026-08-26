@@ -380,10 +380,14 @@ def test_spectrum_view_scale_and_lock_controls_preserve_source_arrays(
     snapshots = [spectrum.intensity.copy() for spectrum in dataset.dataset.spectra]
     menu = view._build_spectrum_context_menu()
     assert [action.text() for action in menu.actions()] == [
+        "Assign Q…",
+        "",
         "Reset View",
         "Y Scale",
         "",
         "Lock Y Range",
+        "",
+        "Edit Mask…",
     ]
 
     assert view.set_y_scale("log") is True
@@ -906,7 +910,7 @@ def test_files_prompt_processes_multiple_selected_paths(
     window.close()
 
 
-def test_workspace_switches_from_empty_project_action_to_data_menu(
+def test_workspace_switches_from_empty_project_action_to_import_menu(
     application: QApplication,
 ) -> None:
     window = MainWindow()
@@ -915,6 +919,7 @@ def test_workspace_switches_from_empty_project_action_to_data_menu(
     application.processEvents()
 
     assert not workspace.new_project_button.isHidden()
+    assert workspace.new_project_button.text() == "Project"
     assert workspace.import_data_button.isHidden()
     assert workspace.new_project_button.width() >= workspace.width() - 26
     empty_font = workspace.new_project_button.font()
@@ -924,7 +929,7 @@ def test_workspace_switches_from_empty_project_action_to_data_menu(
 
     assert workspace.new_project_button.isHidden()
     assert not workspace.import_data_button.isHidden()
-    assert workspace.import_data_button.text() == "+ Data"
+    assert workspace.import_data_button.text() == "Import"
     assert workspace.import_data_button.width() >= workspace.width() - 26
     populated_font = workspace.import_data_button.font()
     assert populated_font.pointSizeF() == empty_font.pointSizeF()
@@ -935,7 +940,7 @@ def test_workspace_switches_from_empty_project_action_to_data_menu(
     window.close()
 
 
-def test_primary_data_button_opens_files_directly(
+def test_primary_import_button_opens_files_directly(
     application: QApplication,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -951,10 +956,13 @@ def test_primary_data_button_opens_files_directly(
 
     assert len(project.datasets) == 1
     assert project.datasets[0].dataset.source_reference == "single_valid.csv"
+    spectrum = project.datasets[0].dataset.spectra[0]
+    assert spectrum.intensity_unit == "arb. unit"
+    assert spectrum.uncertainty_unit == "arb. unit"
     window.close()
 
 
-def test_data_split_button_dropdown_uses_its_files_and_folder_actions(
+def test_import_split_button_dropdown_uses_its_files_and_folder_actions(
     application: QApplication,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -979,13 +987,14 @@ def test_data_split_button_dropdown_uses_its_files_and_folder_actions(
     window.close()
 
 
-def test_data_split_button_calculates_a_right_aligned_popup_position(
+def test_import_split_button_calculates_a_right_aligned_popup_position(
     application: QApplication,
 ) -> None:
     window = MainWindow()
     window.workspace.new_project()
     button = window.workspace.import_data_button
     assert isinstance(button, SplitDataButton)
+    assert button.property("controlKind") == "split"
     window.show()
     application.processEvents()
 
@@ -1066,7 +1075,10 @@ def test_project_rename_updates_open_context_without_changing_view_state(
     assert project_item.text(0) == "Calibration run"
     menu = window.workspace._create_context_menu(project_item)
     assert menu is not None
-    assert [action.text() for action in menu.actions()] == ["Rename"]
+    assert [action.text() for action in menu.actions()] == [
+        "Rename",
+        "Delete Project",
+    ]
     window.close()
 
 
@@ -1128,6 +1140,7 @@ def test_resolution_identity_is_separate_from_dataset_state_indicator(
         dataset,
         SpectrumRole.RESOLUTION,
     )
+    assert resolution is not None
     project_item = window.workspace.tree.topLevelItem(0)
     assert project_item is not None
     data_item = project_item.child(0)
@@ -1232,6 +1245,7 @@ def test_marking_dataset_resolution_updates_order_and_can_be_reverted(
         second,
         SpectrumRole.RESOLUTION,
     )
+    assert resolution is not None
 
     assert resolution.dataset.role is SpectrumRole.RESOLUTION
     assert all(
@@ -1255,6 +1269,7 @@ def test_marking_dataset_resolution_updates_order_and_can_be_reverted(
         resolution,
         SpectrumRole.SAMPLE,
     )
+    assert restored is not None
 
     assert restored.dataset.role is SpectrumRole.SAMPLE
     assert project.datasets == [first, restored]
@@ -1287,6 +1302,7 @@ def test_resolution_dataset_remains_viewable_and_updates_open_inspector_context(
         dataset,
         SpectrumRole.RESOLUTION,
     )
+    assert resolution is not None
 
     assert window.dataset_view.dataset is resolution.dataset
     assert window.dataset_view.current_group_index == 0
