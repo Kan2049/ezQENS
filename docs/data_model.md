@@ -317,22 +317,38 @@ policy.
 
 `SpectralModelDefinition` minimally describes an optional elastic component, a
 variable-length collection of zero or more unit-area Lorentzians, NONE/B0/B1
-background, integrated-area amplitudes, FWHM linewidths, and stable named center
-groups. A `CenterGroup` owns one `ParameterConfiguration`; elastic and Lorentzian
-components reference its stable identity, so tied components share one optimizer
-parameter and one bounds/free state. A group referenced by one component is an
-independent center. Legacy shared `energy_shift` and per-Lorentzian independent
-center configuration remain supported. Dangling, duplicate, unused, or conflicting
-center references are invalid. A model may be elastic-only, Lorentzian-only,
-background-only, or any nonempty supported combination; absent elastic is not a
-fixed-zero component. The model has no software-level Lorentzian-count maximum.
+background, integrated-area amplitudes, FWHM linewidths, stable component
+identities, legacy named center groups, and general same-family parameter ties.
+Elastic and background have singleton function identities; a Lorentzian identity
+is independent of tuple position and survives fitted FWHM reordering. A typed
+`ParameterReference` combines function identity with AREA, CENTER, FWHM, OFFSET,
+or SLOPE. `ParameterTieGroup` owns one `ParameterConfiguration` and two or more
+compatible references, so value, bounds, free/fixed state, optimizer slot,
+covariance, and DOF are shared exactly once. `CenterGroup` remains the compatible
+legacy center-only representation, including single-member independent centers.
+Legacy shared `energy_shift` and per-Lorentzian independent center configuration
+remain supported. Python object identity of a reused `ParameterConfiguration`
+does not declare a tie; only the named model structures above create shared
+optimizer state. Duplicate, dangling, incompatible, overlapping, unused, or
+conflicting references are invalid. A model may be elastic-only,
+Lorentzian-only, background-only, or any nonempty supported combination; absent
+elastic is not a fixed-zero component. The model has no software-level
+Lorentzian-count maximum.
 
 `FitResult` preserves the submitted model configuration separately from the
-canonical fitted model and fitted parameter estimates. It links both to retained original sample coordinates,
-component-resolved values, raw and standardized residuals, absolute-sigma
+canonical fitted model and fitted parameter estimates. Each estimate carries its
+stable member reference or tied-reference set, and each component curve carries
+its function identity, so consumers do not parse positional names. It links both
+to retained original sample coordinates, component-resolved values, raw and
+standardized residuals, absolute-sigma
 covariance/correlation, chi-square, reduced chi-square, AIC/AICc/BIC,
 point/free-parameter counts, convergence, bound activity, Jacobian diagnostics,
-and provenance. Fit provenance embeds the accepted resolution group/source,
+and provenance. `ManualFitReadiness` reports a runnable boolean plus structured
+severity/code diagnostics from the same validation used by `fit_single_q()`, with
+group/component/parameter references where applicable. This preflight includes
+finite initial model, raw-residual, and standardized-residual evaluation at the
+actual optimizer-entry parameter values. Fit provenance embeds the
+accepted resolution group/source,
 original and accepted supports, decision, retained signed area/ratio,
 normalization method/factor, acceptance origin/authorization, warning, and
 AUTO-application state.

@@ -231,10 +231,17 @@ preparation boundary.
 ### 3.4 Spectral models and convolution
 
 `spectral` defines optional elastic, Lorentzian, and background components in
-terms of integrated areas and FWHM parameters. Stable named center groups own one
-`ParameterConfiguration` shared by every referencing component; single-member
-groups represent independent centers. Components expose numerical evaluation
-through a stable interface but know nothing about optimizers or UI-master state.
+terms of integrated areas and FWHM parameters. Elastic and background use stable
+singleton function identities; every Manual Lorentzian owns a stable machine
+identity independent of tuple position or display order. Typed parameter
+references combine that function identity with AREA, CENTER, FWHM, OFFSET, or
+SLOPE. Stable named legacy center groups and general same-family equality-tie
+groups each own one `ParameterConfiguration` shared by every referencing member.
+Reusing the same `ParameterConfiguration` Python object elsewhere has no tie
+semantics: optimizer sharing is derived only from legacy `energy_shift`
+structure, a declared `CenterGroup`, or an explicit `ParameterTieGroup`.
+Components expose identity-keyed numerical evaluation but know nothing about
+optimizers or GUI-master state.
 
 For unit-area processed resolution `R_Q`, the elastic evaluator returns
 `A_elastic * R_Q(E - E0)` directly; it never constructs a discrete numerical
@@ -264,16 +271,24 @@ policy. Future `E0` shifts change evaluation coordinates, not the plan/grid.
 ### 3.5 Fitting, diagnostics, and batch execution
 
 `fitting` represents an optional elastic component, a variable-length
-Lorentzian collection, explicit stable center tie groups or legacy shared/
-independent centers, and NONE/B0/B1 background. It adapts this
+Lorentzian collection, general typed same-family equality ties, explicit stable
+center tie groups or legacy shared/independent centers, and NONE/B0/B1 background.
+It adapts this
 manual configuration to `scipy.optimize.least_squares(method="trf")`, uses the
 existing fitting selection and prepared resolution, constructs weighted
 standardized residuals on retained original sample coordinates, honors
 fixed/free state and bounds, and returns raw optimizer facts without hiding
-failure. Each center group enters optimizer, covariance, correlation, and DOF
-bookkeeping exactly once; FWHM canonicalization preserves stable group identity.
-The submitted configuration and canonical fitted model remain separately
-inspectable. The scientific model has no Lorentzian-count ceiling; production
+failure. Each equality group enters optimizer, covariance, correlation, and DOF
+bookkeeping exactly once; FWHM canonicalization preserves stable Lorentzian,
+parameter-reference, and tie-group identity. Fit estimates and component curves
+support identity-based lookup without parsing positional result names. A
+structured Manual readiness service reuses the actual fit-time validation path
+and reports stable blocker codes for selection/group/data/DOF, bounds/ties,
+center coverage, prepared-resolution failures, and nonfinite initial
+model/raw/standardized-residual evaluation before optimizer entry. The submitted
+configuration
+and canonical fitted model remain separately inspectable. The scientific model
+has no Lorentzian-count ceiling; production
 AutoFit remains elastic-containing, single-shared-center-only, and exactly
 0L/1L/2L × NONE/B0/B1.
 

@@ -18,9 +18,15 @@ from ezqens.domain import QBins, ReducedDataset, Spectrum, SpectrumRole
 from ezqens.fitting import (
     BackgroundModel,
     CenterGroup,
+    ComponentFamily,
+    ComponentIdentity,
     FittingError,
     LorentzianComponent,
+    ManualFitDiagnosticCode,
     ParameterConfiguration,
+    ParameterFamily,
+    ParameterReference,
+    ParameterTieGroup,
     SpectralModelDefinition,
     StandardModelCandidate,
     evaluate_spectral_model,
@@ -28,6 +34,8 @@ from ezqens.fitting import (
     fit_single_q,
     fit_standard_candidate,
     generate_standard_candidates,
+    manual_fit_readiness,
+    manual_parameter_metadata,
 )
 from ezqens.preprocessing import FittingSelection
 from ezqens.resolution import (
@@ -1591,3 +1599,469 @@ def test_coarse_sampling_diagnostic_is_separate_from_intrinsic_width_ratio() -> 
     assert linewidth_ratio is not None and linewidth_ratio < 0.01
     assert sampling_ratio is not None and sampling_ratio > 1.0
     assert result.diagnostics.median_sample_spacing == pytest.approx(0.05)
+
+
+def lorentzian_identity(name: str) -> ComponentIdentity:
+    return ComponentIdentity(ComponentFamily.LORENTZIAN, name)
+
+
+def reference(
+    identity: ComponentIdentity,
+    family: ParameterFamily,
+) -> ParameterReference:
+    return ParameterReference(identity, family)
+
+
+def test_stable_component_and_parameter_identity_survives_canonical_fit() -> None:
+    broad = lorentzian_identity("broad")
+    narrow = lorentzian_identity("narrow")
+    model = SpectralModelDefinition(
+        energy_shift=parameter(0.0, free=False),
+        lorentzians=(
+            LorentzianComponent(
+                area=parameter(0.3, 0.0, free=False),
+                fwhm=parameter(0.3, 1.0e-8, free=False),
+                identity=broad,
+            ),
+            LorentzianComponent(
+                area=parameter(0.5, 0.0, free=False),
+                fwhm=parameter(0.08, 1.0e-8, free=False),
+                identity=narrow,
+            ),
+        ),
+    )
+    prepared, selection = synthetic_problem(model)
+
+    result = fit_single_q(prepared, selection, 0, model)
+
+    assert [item.identity for item in result.configuration.lorentzians] == [
+        broad,
+        narrow,
+    ]
+    fitted_model = result.fitted_model
+    assert fitted_model is not None
+    assert [item.identity for item in fitted_model.lorentzians] == [narrow, broad]
+    narrow_area = reference(narrow, ParameterFamily.AREA)
+    assert result.parameter_by_reference(narrow_area).value == pytest.approx(0.5)
+    np.testing.assert_array_equal(
+        result.evaluation.component_curve(narrow),
+        result.evaluation.lorentzians[0],
+    )
+    assert result.diagnostics.alternative_starts[0].canonical_component_order == (
+        1,
+        0,
+    )
+
+
+def test_manual_parameter_metadata_is_typed_and_uses_area_label() -> None:
+    component = lorentzian_identity("metadata")
+    model = SpectralModelDefinition(
+        energy_shift=parameter(0.0),
+        elastic_area=parameter(0.5, 0.0),
+        lorentzians=(
+            LorentzianComponent(
+                area=parameter(0.4, 0.0),
+                fwhm=parameter(0.1, 1.0e-8),
+                identity=component,
+            ),
+        ),
+        background=BackgroundModel.LINEAR,
+        b0=parameter(0.0),
+        b1=parameter(0.0),
+    )
+
+    metadata = manual_parameter_metadata(
+        model,
+        energy_unit="meV",
+        intensity_unit="counts",
+    )
+    by_reference = {item.reference: item for item in metadata}
+
+    for identity in (component,):
+        assert by_reference[
+            reference(identity, ParameterFamily.AREA)
+        ].display_label == ("Area")
+        assert by_reference[reference(identity, ParameterFamily.CENTER)].unit == "meV"
+        assert by_reference[reference(identity, ParameterFamily.FWHM)].unit == "meV"
+    assert by_reference[reference(component, ParameterFamily.AREA)].unit == "counts·meV"
+    assert all(item.family is item.reference.family for item in metadata)
+    assert all(item.component is item.reference.component for item in metadata)
+
+
+def assert_reused_configuration_is_not_a_tie(
+    model: SpectralModelDefinition,
+    first: ParameterReference,
+    second: ParameterReference,
+) -> None:
+    prepared, selection = synthetic_problem(model)
+
+    result = fit_single_q(prepared, selection, 0, model)
+
+    first_estimate = result.parameter_by_reference(first)
+    second_estimate = result.parameter_by_reference(second)
+    assert first_estimate is not second_estimate
+    assert first_estimate.references == (first,)
+    assert second_estimate.references == (second,)
+
+
+def test_reused_configuration_does_not_tie_energy_shift_to_elastic_area() -> None:
+    shared = parameter(0.05, 0.0, 0.1, free=False)
+    model = SpectralModelDefinition(
+        energy_shift=shared,
+        elastic_area=shared,
+    )
+
+    assert_reused_configuration_is_not_a_tie(
+        model,
+        ParameterReference(
+            ComponentIdentity(ComponentFamily.ELASTIC, "elastic"),
+            ParameterFamily.CENTER,
+        ),
+        ParameterReference(
+            ComponentIdentity(ComponentFamily.ELASTIC, "elastic"),
+            ParameterFamily.AREA,
+        ),
+    )
+
+
+def test_reused_configuration_does_not_tie_explicit_lorentzian_center() -> None:
+    shared = parameter(0.02, -0.1, 0.1, free=False)
+    component = lorentzian_identity("independent-center")
+    model = SpectralModelDefinition(
+        energy_shift=shared,
+        elastic_area=parameter(0.4, 0.0, free=False),
+        lorentzians=(
+            LorentzianComponent(
+                area=parameter(0.3, 0.0, free=False),
+                fwhm=parameter(0.12, 1.0e-8, free=False),
+                center=shared,
+                identity=component,
+            ),
+        ),
+    )
+
+    assert_reused_configuration_is_not_a_tie(
+        model,
+        ParameterReference(
+            ComponentIdentity(ComponentFamily.ELASTIC, "elastic"),
+            ParameterFamily.CENTER,
+        ),
+        reference(component, ParameterFamily.CENTER),
+    )
+
+
+def test_reused_configuration_does_not_tie_distinct_center_group() -> None:
+    shared = parameter(0.02, -0.1, 0.1, free=False)
+    component = lorentzian_identity("group-center")
+    model = SpectralModelDefinition(
+        energy_shift=shared,
+        elastic_area=parameter(0.4, 0.0, free=False),
+        lorentzians=(
+            LorentzianComponent(
+                area=parameter(0.3, 0.0, free=False),
+                fwhm=parameter(0.12, 1.0e-8, free=False),
+                center_group="separate",
+                identity=component,
+            ),
+        ),
+        center_groups=(CenterGroup("separate", shared),),
+    )
+
+    assert_reused_configuration_is_not_a_tie(
+        model,
+        ParameterReference(
+            ComponentIdentity(ComponentFamily.ELASTIC, "elastic"),
+            ParameterFamily.CENTER,
+        ),
+        reference(component, ParameterFamily.CENTER),
+    )
+
+
+def test_reused_configuration_does_not_tie_energy_shift_to_background() -> None:
+    shared = parameter(0.02, -0.1, 0.1, free=False)
+    model = SpectralModelDefinition(
+        energy_shift=shared,
+        elastic_area=parameter(0.4, 0.0, free=False),
+        background=BackgroundModel.CONSTANT,
+        b0=shared,
+    )
+
+    assert_reused_configuration_is_not_a_tie(
+        model,
+        ParameterReference(
+            ComponentIdentity(ComponentFamily.ELASTIC, "elastic"),
+            ParameterFamily.CENTER,
+        ),
+        ParameterReference(
+            ComponentIdentity(ComponentFamily.BACKGROUND, "background"),
+            ParameterFamily.OFFSET,
+        ),
+    )
+
+
+def test_cross_component_area_tie_is_one_optimizer_parameter() -> None:
+    component = lorentzian_identity("area-tied")
+    elastic_area = ParameterReference(
+        ComponentIdentity(ComponentFamily.ELASTIC, "elastic"),
+        ParameterFamily.AREA,
+    )
+    lorentzian_area = reference(component, ParameterFamily.AREA)
+    tied_area = ParameterTieGroup(
+        "shared-area",
+        (elastic_area, lorentzian_area),
+        parameter(0.7, 0.0, 2.0),
+    )
+    model = SpectralModelDefinition(
+        energy_shift=parameter(0.0, free=False),
+        elastic_area=parameter(0.2, 0.0, free=False),
+        lorentzians=(
+            LorentzianComponent(
+                area=parameter(0.3, 0.0, free=False),
+                fwhm=parameter(0.12, 1.0e-8, free=False),
+                identity=component,
+            ),
+        ),
+        parameter_ties=(tied_area,),
+    )
+    assert model.elastic_area is tied_area.parameter
+    assert model.lorentzians[0].area is tied_area.parameter
+    prepared, selection = synthetic_problem(model)
+
+    result = fit_single_q(prepared, selection, 0, model)
+
+    assert result.statistics.free_parameters == 1
+    assert result.statistics.nominal_degrees_of_freedom == 150
+    estimate = result.parameter_by_reference(elastic_area)
+    assert estimate is result.parameter_by_reference(lorentzian_area)
+    assert set(estimate.references) == {elastic_area, lorentzian_area}
+    assert result.covariance is not None
+    assert result.covariance.shape == (3, 3)
+
+
+def test_general_center_and_fwhm_ties_survive_fitting() -> None:
+    first = lorentzian_identity("first")
+    second = lorentzian_identity("second")
+    elastic_center = ParameterReference(
+        ComponentIdentity(ComponentFamily.ELASTIC, "elastic"),
+        ParameterFamily.CENTER,
+    )
+    first_center = reference(first, ParameterFamily.CENTER)
+    second_center = reference(second, ParameterFamily.CENTER)
+    first_fwhm = reference(first, ParameterFamily.FWHM)
+    second_fwhm = reference(second, ParameterFamily.FWHM)
+    model = SpectralModelDefinition(
+        energy_shift=parameter(0.02, -0.1, 0.1, free=False),
+        elastic_area=parameter(0.4, 0.0, free=False),
+        lorentzians=(
+            LorentzianComponent(
+                area=parameter(0.25, 0.0, free=False),
+                fwhm=parameter(0.08, 1.0e-8, free=False),
+                center=parameter(-0.01, -0.1, 0.1, free=False),
+                identity=first,
+            ),
+            LorentzianComponent(
+                area=parameter(0.2, 0.0, free=False),
+                fwhm=parameter(0.2, 1.0e-8, free=False),
+                center=parameter(0.04, -0.1, 0.1, free=False),
+                identity=second,
+            ),
+        ),
+        parameter_ties=(
+            ParameterTieGroup(
+                "shared-center",
+                (elastic_center, first_center, second_center),
+                parameter(0.015, -0.1, 0.1),
+            ),
+            ParameterTieGroup(
+                "shared-width",
+                (first_fwhm, second_fwhm),
+                parameter(0.11, 1.0e-8, 0.5),
+            ),
+        ),
+    )
+    prepared, selection = synthetic_problem(model)
+
+    result = fit_single_q(prepared, selection, 0, model)
+
+    assert result.statistics.free_parameters == 2
+    assert result.parameter_by_reference(elastic_center) is (
+        result.parameter_by_reference(first_center)
+    )
+    assert result.parameter_by_reference(first_center) is (
+        result.parameter_by_reference(second_center)
+    )
+    assert result.parameter_by_reference(first_fwhm) is (
+        result.parameter_by_reference(second_fwhm)
+    )
+    fitted_model = result.fitted_model
+    assert fitted_model is not None
+    assert {item.identity for item in fitted_model.lorentzians} == {first, second}
+    assert tuple(group.group_id for group in fitted_model.parameter_ties) == (
+        "shared-center",
+        "shared-width",
+    )
+
+
+def test_incompatible_and_dangling_parameter_ties_fail_clearly() -> None:
+    component = lorentzian_identity("invalid-tie")
+    with pytest.raises(ValueError, match="same family"):
+        ParameterTieGroup(
+            "mixed",
+            (
+                reference(component, ParameterFamily.AREA),
+                reference(component, ParameterFamily.FWHM),
+            ),
+            parameter(0.1, 0.0),
+        )
+    dangling = lorentzian_identity("dangling")
+    with pytest.raises(ValueError, match="dangling"):
+        SpectralModelDefinition(
+            energy_shift=parameter(0.0),
+            lorentzians=(
+                LorentzianComponent(
+                    area=parameter(0.2, 0.0),
+                    fwhm=parameter(0.1, 1.0e-8),
+                    identity=component,
+                ),
+            ),
+            parameter_ties=(
+                ParameterTieGroup(
+                    "dangling",
+                    (
+                        reference(component, ParameterFamily.AREA),
+                        reference(dangling, ParameterFamily.AREA),
+                    ),
+                    parameter(0.2, 0.0),
+                ),
+            ),
+        )
+
+
+def test_manual_fit_readiness_uses_fit_time_blockers() -> None:
+    truth = model_definition(free=False)
+    prepared, selection = synthetic_problem(truth)
+    runnable = manual_fit_readiness(prepared, selection, 0, truth)
+    assert runnable.runnable
+    assert runnable.diagnostics == ()
+
+    one_point = selection.with_group_range(0, lower_energy=0.0, upper_energy=0.0)
+    insufficient = manual_fit_readiness(prepared, one_point, 0, truth)
+    assert not insufficient.runnable
+    assert insufficient.diagnostics[0].code is (
+        ManualFitDiagnosticCode.INSUFFICIENT_RETAINED_POINTS
+    )
+
+    three_point_prepared, three_point_selection = synthetic_problem(
+        truth,
+        sample_energy=np.array([-0.1, 0.0, 0.1]),
+    )
+    over_parameterized = model_definition(lorentzians=((0.2, 0.1),))
+    dof = manual_fit_readiness(
+        three_point_prepared,
+        three_point_selection,
+        0,
+        over_parameterized,
+    )
+    assert not dof.runnable
+    assert dof.diagnostics[0].code is ManualFitDiagnosticCode.NONPOSITIVE_NOMINAL_DOF
+
+    outside = SpectralModelDefinition(
+        energy_shift=parameter(2.0, 1.0, 3.0),
+        elastic_area=parameter(0.5, 0.0, free=False),
+    )
+    coverage = manual_fit_readiness(prepared, selection, 0, outside)
+    assert not coverage.runnable
+    assert coverage.diagnostics[0].code is (
+        ManualFitDiagnosticCode.CENTER_OUTSIDE_COVERAGE
+    )
+    assert coverage.diagnostics[0].parameter is not None
+
+
+def test_manual_fit_readiness_blocks_nonfinite_initial_evaluation() -> None:
+    truth = model_definition(free=False)
+    prepared, selection = synthetic_problem(truth)
+    overflowing = SpectralModelDefinition(
+        background=BackgroundModel.LINEAR,
+        b0=parameter(1.79e308, free=False),
+        b1=parameter(1.79e308, free=False),
+    )
+
+    readiness = manual_fit_readiness(prepared, selection, 0, overflowing)
+
+    assert not readiness.runnable
+    assert len(readiness.diagnostics) == 1
+    assert readiness.diagnostics[0].code is (
+        ManualFitDiagnosticCode.NONFINITE_INITIAL_EVALUATION
+    )
+    assert "must be finite before optimizer entry" in readiness.diagnostics[0].message
+    with pytest.raises(
+        FittingError,
+        match="must be finite before optimizer entry",
+    ) as error:
+        fit_single_q(prepared, selection, 0, overflowing)
+    assert getattr(error.value, "code", None) is (
+        ManualFitDiagnosticCode.NONFINITE_INITIAL_EVALUATION
+    )
+
+
+def test_runnable_manual_fit_readiness_has_direct_fit_parity() -> None:
+    truth = model_definition(free=False)
+    prepared, selection = synthetic_problem(truth)
+
+    readiness = manual_fit_readiness(prepared, selection, 0, truth)
+    result = fit_single_q(prepared, selection, 0, truth)
+
+    assert readiness.runnable
+    assert readiness.diagnostics == ()
+    assert result.diagnostics.optimizer_success
+    assert np.all(np.isfinite(result.evaluation.total))
+    assert np.all(np.isfinite(result.raw_residuals))
+    assert np.all(np.isfinite(result.standardized_residuals))
+
+
+def test_manual_fit_readiness_reports_structurally_invalid_tie() -> None:
+    component = lorentzian_identity("readiness-valid")
+    dangling = lorentzian_identity("readiness-dangling")
+    model = SpectralModelDefinition(
+        energy_shift=parameter(0.0, free=False),
+        lorentzians=(
+            LorentzianComponent(
+                area=parameter(0.3, 0.0, free=False),
+                fwhm=parameter(0.1, 1.0e-8, free=False),
+                identity=component,
+            ),
+        ),
+    )
+    prepared, selection = synthetic_problem(model)
+    malformed = ParameterTieGroup(
+        "forged-dangling",
+        (
+            reference(component, ParameterFamily.AREA),
+            reference(dangling, ParameterFamily.AREA),
+        ),
+        parameter(0.3, 0.0),
+    )
+    # Defensive validation must remain structured even if an invalid object is
+    # received from an unsafe deserializer that bypassed frozen construction.
+    object.__setattr__(model, "parameter_ties", (malformed,))
+
+    readiness = manual_fit_readiness(prepared, selection, 0, model)
+
+    assert not readiness.runnable
+    assert readiness.diagnostics[0].code is ManualFitDiagnosticCode.INVALID_TIES
+
+
+def test_manual_fit_readiness_reports_unusable_free_bound_interval() -> None:
+    truth = model_definition(free=False)
+    prepared, selection = synthetic_problem(truth)
+    lower = 1.0e308
+    upper = float(np.nextafter(lower, math.inf))
+    unusable = SpectralModelDefinition(
+        background=BackgroundModel.CONSTANT,
+        b0=parameter(lower, lower, upper),
+    )
+
+    readiness = manual_fit_readiness(prepared, selection, 0, unusable)
+
+    assert not readiness.runnable
+    assert readiness.diagnostics[0].code is ManualFitDiagnosticCode.INVALID_BOUNDS

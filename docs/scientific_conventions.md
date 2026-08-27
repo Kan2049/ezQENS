@@ -118,15 +118,19 @@ Automatic initialization and recommendation above the currently validated
 standard candidate scope are not implied by this arbitrary-N scientific-model
 capability.
 
-Manual center-to-center ties use stable named `CenterGroup` identities. Each
-group owns exactly one `ParameterConfiguration`—value, bounds, and fixed/free
-state—and every referencing elastic or Lorentzian component uses that one
-optimizer parameter. Multiple groups and single-member independent groups are
-supported; no GUI master component is scientific state. Legacy shared `E0` and
-per-Lorentzian independent-center construction remain supported. FWHM
-canonicalization must preserve group references, and shared centers count once
-in covariance and DOF bookkeeping. Production AutoFit remains elastic-containing
-and single-shared-center-only.
+Manual equality ties use stable typed parameter references: owning function
+identity plus AREA, CENTER, FWHM, OFFSET, or SLOPE family. A tie may connect only
+members of the same family and owns exactly one `ParameterConfiguration`—value,
+bounds, and fixed/free state—so it contributes one optimizer/covariance/DOF
+parameter. Valid examples include elastic/Lorentzian Area ties, elastic/Lorentzian
+Center ties, and Lorentzian FWHM ties. No expression/formula constraints or
+scientific GUI-master state are implied. Legacy stable named `CenterGroup`
+center ties, shared `E0`, and per-Lorentzian independent centers remain supported.
+Reusing one `ParameterConfiguration` instance across otherwise independent
+references never creates an implicit tie. FWHM canonicalization preserves
+Lorentzian and tie identity. Production AutoFit
+remains elastic-containing, single-shared-center-only, and accepts no general
+Manual tie state as standard candidate evidence.
 
 Manual interaction geometry is initial-guess information only. Background
 press-release interaction always initializes B1. A nondegenerate gesture creates

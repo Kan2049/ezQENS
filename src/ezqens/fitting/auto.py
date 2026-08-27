@@ -760,6 +760,7 @@ def _validate_successful_candidate_configuration(
             )
         if (
             configuration.center_groups
+            or configuration.parameter_ties
             or configuration.elastic_center_group is not None
             or any(
                 component.center_group is not None

@@ -272,11 +272,20 @@ without asserting that every noisy realization equals truth. Evaluate:
 - Lorentzian FWHM;
 - optional elastic, Lorentzian-only, background-only, and mixed manual models;
 - constant and linear background parameters;
-- one and multiple Lorentzians with legacy or stable named center groups;
-- elastic/Lorentzian and Lorentzian/Lorentzian ties, multiple independent/tied
-  groups, and fixed/free/bounded center parameters;
+- one and multiple Lorentzians with stable component identities and legacy or
+  stable named center groups;
+- typed same-family Area, Center, and FWHM equality ties, multiple
+  independent/tied groups, and fixed/free/bounded shared parameters;
+- identity-based parameter-result and component-curve lookup without parsing
+  positional names;
 - parameter names/counts, covariance/correlation dimensions, nominal DOF, and
-  FWHM canonicalization with stable tie-group membership preserved;
+  FWHM canonicalization with stable component/tie membership preserved;
+- structured Manual readiness for runnable configurations and stable blocker
+  diagnostics for selection/group/data/DOF, bounds/ties, center coverage,
+  unusable prepared resolution, and nonfinite initial model/raw/standardized
+  residual evaluation;
+- deliberate `ParameterConfiguration` object reuse across independent references,
+  proving only declared model structure creates optimizer ties;
 - exactly nine elastic-containing single-shared-center standard Auto candidates
   with unchanged nominal parameter counts and no manual-only candidate;
 - fixed/free states and active bounds;

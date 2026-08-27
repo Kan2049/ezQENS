@@ -13,26 +13,39 @@ import numpy.typing as npt
 from scipy.optimize import least_squares  # type: ignore[import-untyped]
 
 from ezqens.convolution import (
+    ConvolutionError,
     ConvolutionPlan,
     build_convolution_plan,
     cell_integrated_lorentzian,
 )
+from ezqens.domain import DiagnosticSeverity
 from ezqens.preprocessing import FittingSelection
 from ezqens.resolution import PreparedResolution
 
 from .models import (
+    BACKGROUND_COMPONENT,
+    ELASTIC_COMPONENT,
     AlternativeStartResult,
     BackgroundModel,
     CandidateFitResult,
     CenterGroup,
+    ComponentCurve,
+    ComponentFamily,
+    ComponentIdentity,
     FitDiagnostics,
     FitProvenance,
     FitResult,
     FitStatistics,
     LorentzianComponent,
+    ManualFitDiagnosticCode,
+    ManualFitReadiness,
+    ManualFitReadinessDiagnostic,
     ModelEvaluation,
     ParameterConfiguration,
     ParameterEstimate,
+    ParameterFamily,
+    ParameterReference,
+    ParameterTieGroup,
     ResidualDiagnostics,
     SpectralModelDefinition,
     StandardModelCandidate,
@@ -48,10 +61,44 @@ class FittingError(ValueError):
     """Raised when a requested fit is scientifically or numerically invalid."""
 
 
+class _ManualFitBlocker(FittingError):
+    """Internal typed blocker shared by readiness and actual fitting."""
+
+    def __init__(
+        self,
+        code: ManualFitDiagnosticCode,
+        message: str,
+        *,
+        group_index: int | None = None,
+        parameter: ParameterReference | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.group_index = group_index
+        self.parameter = parameter
+
+    def diagnostic(self) -> ManualFitReadinessDiagnostic:
+        return ManualFitReadinessDiagnostic(
+            code=self.code,
+            severity=DiagnosticSeverity.ERROR,
+            message=str(self),
+            group_index=self.group_index,
+            component=(
+                self.parameter.component if self.parameter is not None else None
+            ),
+            parameter=self.parameter,
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class _ParameterSlot:
     name: str
     configuration: ParameterConfiguration
+    references: tuple[ParameterReference, ...]
+
+    @property
+    def key(self) -> frozenset[ParameterReference]:
+        return frozenset(self.references)
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,85 +123,223 @@ def _center_group_slot_name(group_id: str) -> str:
     return f"center_group_{group_id}"
 
 
+def _tie_group_slot_name(group_id: str) -> str:
+    return f"tie_{group_id}"
+
+
+def _reference_name(
+    model: SpectralModelDefinition,
+    reference: ParameterReference,
+) -> str:
+    if reference.component == ELASTIC_COMPONENT:
+        return (
+            "elastic_area"
+            if reference.family is ParameterFamily.AREA
+            else "energy_shift"
+        )
+    if reference.component == BACKGROUND_COMPONENT:
+        return "b0" if reference.family is ParameterFamily.OFFSET else "b1"
+    index = next(
+        index
+        for index, component in enumerate(model.lorentzians, start=1)
+        if component.identity == reference.component
+    )
+    return f"lorentzian_{index}_{reference.family.value}"
+
+
+def _energy_shift_references(
+    model: SpectralModelDefinition,
+) -> tuple[ParameterReference, ...]:
+    """Return only centers structurally assigned to legacy energy_shift."""
+
+    references: list[ParameterReference] = []
+    if model.elastic_area is not None and model.elastic_center_group is None:
+        references.append(ParameterReference(ELASTIC_COMPONENT, ParameterFamily.CENTER))
+    references.extend(
+        ParameterReference(component.identity, ParameterFamily.CENTER)
+        for component in model.lorentzians
+        if component.center is None and component.center_group is None
+    )
+    return tuple(references)
+
+
+def _center_group_references(
+    model: SpectralModelDefinition,
+    group_id: str,
+) -> tuple[ParameterReference, ...]:
+    """Return only centers structurally assigned to one declared center group."""
+
+    references: list[ParameterReference] = []
+    if model.elastic_area is not None and model.elastic_center_group == group_id:
+        references.append(ParameterReference(ELASTIC_COMPONENT, ParameterFamily.CENTER))
+    references.extend(
+        ParameterReference(component.identity, ParameterFamily.CENTER)
+        for component in model.lorentzians
+        if component.center_group == group_id
+    )
+    return tuple(references)
+
+
+def _validate_parameter_slot_partition(
+    model: SpectralModelDefinition,
+    slots: Sequence[_ParameterSlot],
+) -> None:
+    """Require an exact, scientifically compatible partition of references."""
+
+    expected = tuple(model.parameter_references())
+    assigned = tuple(reference for slot in slots for reference in slot.references)
+    if len(assigned) != len(set(assigned)):
+        raise FittingError(
+            "a parameter reference belongs to more than one optimizer slot"
+        )
+    if set(assigned) != set(expected):
+        raise FittingError(
+            "optimizer slots do not cover every model parameter reference"
+        )
+    if any(
+        len(slot.references) > 1
+        and len({reference.family for reference in slot.references}) != 1
+        for slot in slots
+    ):
+        raise FittingError(
+            "a shared optimizer slot must contain scientifically compatible parameters"
+        )
+
+
 def _parameter_slots(model: SpectralModelDefinition) -> tuple[_ParameterSlot, ...]:
     slots: list[_ParameterSlot] = []
+    tied = {member for group in model.parameter_ties for member in group.members}
+    covered: set[ParameterReference] = set()
     if model.energy_shift is not None:
-        slots.append(_ParameterSlot("energy_shift", model.energy_shift))
-    slots.extend(
-        _ParameterSlot(_center_group_slot_name(group.group_id), group.parameter)
-        for group in model.center_groups
-    )
-    if model.elastic_area is not None:
-        slots.append(_ParameterSlot("elastic_area", model.elastic_area))
-    for index, component in enumerate(model.lorentzians, start=1):
-        slots.extend(
-            (
-                _ParameterSlot(f"lorentzian_{index}_area", component.area),
-                _ParameterSlot(f"lorentzian_{index}_fwhm", component.fwhm),
+        references = tuple(
+            reference
+            for reference in _energy_shift_references(model)
+            if reference not in tied
+        )
+        if references:
+            slots.append(_ParameterSlot("energy_shift", model.energy_shift, references))
+            covered.update(references)
+    for group in model.center_groups:
+        references = _center_group_references(model, group.group_id)
+        slots.append(
+            _ParameterSlot(
+                _center_group_slot_name(group.group_id),
+                group.parameter,
+                references,
             )
         )
-        if component.center is not None:
-            slots.append(_ParameterSlot(f"lorentzian_{index}_center", component.center))
-    if model.b0 is not None:
-        slots.append(_ParameterSlot("b0", model.b0))
-    if model.b1 is not None:
-        slots.append(_ParameterSlot("b1", model.b1))
+        covered.update(references)
+    for tie_group in model.parameter_ties:
+        slots.append(
+            _ParameterSlot(
+                _tie_group_slot_name(tie_group.group_id),
+                tie_group.parameter,
+                tie_group.members,
+            )
+        )
+        covered.update(tie_group.members)
+    for reference in model.parameter_references():
+        if reference in covered:
+            continue
+        slots.append(
+            _ParameterSlot(
+                _reference_name(model, reference),
+                model.parameter_configuration(reference),
+                (reference,),
+            )
+        )
+        covered.add(reference)
+    _validate_parameter_slot_partition(model, slots)
     return tuple(slots)
+
+
+def _configuration_values(
+    template: SpectralModelDefinition,
+    values: npt.ArrayLike,
+) -> tuple[
+    dict[ParameterReference, ParameterConfiguration], dict[str, ParameterConfiguration]
+]:
+    slots = _parameter_slots(template)
+    parameter_values = np.asarray(values, dtype=np.float64)
+    if parameter_values.ndim != 1 or parameter_values.size != len(slots):
+        raise FittingError("parameter value count does not match the spectral model")
+    by_reference: dict[ParameterReference, ParameterConfiguration] = {}
+    by_name: dict[str, ParameterConfiguration] = {}
+    for slot, value in zip(slots, parameter_values, strict=True):
+        configuration = ParameterConfiguration(
+            initial_value=float(value),
+            lower_bound=slot.configuration.lower_bound,
+            upper_bound=slot.configuration.upper_bound,
+            free=slot.configuration.free,
+        )
+        by_name[slot.name] = configuration
+        for reference in slot.references:
+            by_reference[reference] = configuration
+    return by_reference, by_name
 
 
 def _model_from_values(
     template: SpectralModelDefinition,
     values: npt.ArrayLike,
 ) -> SpectralModelDefinition:
-    slots = _parameter_slots(template)
-    parameter_values = np.asarray(values, dtype=np.float64)
-    if parameter_values.ndim != 1 or parameter_values.size != len(slots):
-        raise FittingError("parameter value count does not match the spectral model")
-    configurations = {
-        slot.name: ParameterConfiguration(
-            initial_value=float(value),
-            lower_bound=slot.configuration.lower_bound,
-            upper_bound=slot.configuration.upper_bound,
-            free=slot.configuration.free,
-        )
-        for slot, value in zip(slots, parameter_values, strict=True)
-    }
+    configurations, named = _configuration_values(template, values)
+
+    def resolved(reference: ParameterReference) -> ParameterConfiguration:
+        return configurations[reference]
+
     components = tuple(
         LorentzianComponent(
-            area=configurations[f"lorentzian_{index}_area"],
-            fwhm=configurations[f"lorentzian_{index}_fwhm"],
+            area=resolved(ParameterReference(component.identity, ParameterFamily.AREA)),
+            fwhm=resolved(ParameterReference(component.identity, ParameterFamily.FWHM)),
             center=(
-                configurations[f"lorentzian_{index}_center"]
+                resolved(ParameterReference(component.identity, ParameterFamily.CENTER))
                 if component.center is not None
                 else None
             ),
             center_group=component.center_group,
+            identity=component.identity,
         )
-        for index, component in enumerate(template.lorentzians, start=1)
+        for component in template.lorentzians
     )
+    energy_shift = None
+    if template.energy_shift is not None:
+        references = _energy_shift_references(template)
+        energy_shift = resolved(references[0])
     return SpectralModelDefinition(
-        energy_shift=(
-            configurations["energy_shift"]
-            if template.energy_shift is not None
-            else None
-        ),
+        energy_shift=energy_shift,
         elastic_area=(
-            configurations["elastic_area"]
+            resolved(ParameterReference(ELASTIC_COMPONENT, ParameterFamily.AREA))
             if template.elastic_area is not None
             else None
         ),
         lorentzians=components,
         background=template.background,
-        b0=configurations.get("b0"),
-        b1=configurations.get("b1"),
+        b0=(
+            resolved(ParameterReference(BACKGROUND_COMPONENT, ParameterFamily.OFFSET))
+            if template.b0 is not None
+            else None
+        ),
+        b1=(
+            resolved(ParameterReference(BACKGROUND_COMPONENT, ParameterFamily.SLOPE))
+            if template.b1 is not None
+            else None
+        ),
         center_groups=tuple(
             CenterGroup(
                 group_id=group.group_id,
-                parameter=configurations[_center_group_slot_name(group.group_id)],
+                parameter=named[_center_group_slot_name(group.group_id)],
             )
             for group in template.center_groups
         ),
         elastic_center_group=template.elastic_center_group,
+        parameter_ties=tuple(
+            ParameterTieGroup(
+                group_id=group.group_id,
+                members=group.members,
+                parameter=named[_tie_group_slot_name(group.group_id)],
+            )
+            for group in template.parameter_ties
+        ),
     )
 
 
@@ -179,8 +364,13 @@ def evaluate_spectral_model(
     if not np.all(np.isfinite(coordinates)):
         raise FittingError("model evaluation energy must be finite")
     elastic = np.zeros(coordinates.size, dtype=np.float64)
-    elastic_center = model.elastic_center()
-    if model.elastic_area is not None and elastic_center is not None:
+    if model.elastic_area is not None:
+        elastic_area = model.parameter_configuration(
+            ParameterReference(ELASTIC_COMPONENT, ParameterFamily.AREA)
+        )
+        elastic_center = model.parameter_configuration(
+            ParameterReference(ELASTIC_COMPONENT, ParameterFamily.CENTER)
+        )
         elastic_shape = np.interp(
             coordinates - elastic_center.initial_value,
             plan.resolution_energy,
@@ -188,36 +378,63 @@ def evaluate_spectral_model(
             left=0.0,
             right=0.0,
         )
-        elastic = np.asarray(model.elastic_area.initial_value * elastic_shape)
+        elastic = np.asarray(elastic_area.initial_value * elastic_shape)
     lorentzian_contributions: list[FloatArray] = []
     for component in model.lorentzians:
-        center = model.lorentzian_center(component).initial_value
+        center = model.parameter_configuration(
+            ParameterReference(component.identity, ParameterFamily.CENTER)
+        ).initial_value
+        fwhm = model.parameter_configuration(
+            ParameterReference(component.identity, ParameterFamily.FWHM)
+        ).initial_value
+        area = model.parameter_configuration(
+            ParameterReference(component.identity, ParameterFamily.AREA)
+        ).initial_value
         intrinsic = cell_integrated_lorentzian(
             plan.model_energy,
-            fwhm=component.fwhm.initial_value,
+            fwhm=fwhm,
             spacing=plan.spacing,
         )
         profile = plan.convolve(intrinsic).evaluate(
             coordinates,
             energy_shift=center,
         )
-        lorentzian_contributions.append(
-            np.asarray(component.area.initial_value * profile, dtype=np.float64)
-        )
+        lorentzian_contributions.append(np.asarray(area * profile, dtype=np.float64))
     background = np.zeros(coordinates.size, dtype=np.float64)
     if model.b0 is not None:
-        background += model.b0.initial_value
+        background += model.parameter_configuration(
+            ParameterReference(BACKGROUND_COMPONENT, ParameterFamily.OFFSET)
+        ).initial_value
     if model.b1 is not None:
-        background += model.b1.initial_value * coordinates
+        background += (
+            model.parameter_configuration(
+                ParameterReference(BACKGROUND_COMPONENT, ParameterFamily.SLOPE)
+            ).initial_value
+            * coordinates
+        )
     total = elastic + background
     for contribution in lorentzian_contributions:
         total = total + contribution
+    component_curves: list[ComponentCurve] = []
+    if model.elastic_area is not None:
+        component_curves.append(ComponentCurve(ELASTIC_COMPONENT, elastic))
+    component_curves.extend(
+        ComponentCurve(component.identity, contribution)
+        for component, contribution in zip(
+            model.lorentzians,
+            lorentzian_contributions,
+            strict=True,
+        )
+    )
+    if model.background is not BackgroundModel.NONE:
+        component_curves.append(ComponentCurve(BACKGROUND_COMPONENT, background))
     return ModelEvaluation(
         energy=coordinates,
         total=total,
         elastic=elastic,
         lorentzians=tuple(lorentzian_contributions),
         background=background,
+        component_curves=tuple(component_curves),
     )
 
 
@@ -227,15 +444,43 @@ def _fit_inputs(
     group_index: int,
     free_parameter_count: int,
 ) -> _FitInputs:
+    if not isinstance(prepared_resolution, PreparedResolution):
+        raise _ManualFitBlocker(
+            ManualFitDiagnosticCode.UNUSABLE_PREPARED_RESOLUTION,
+            "prepared_resolution must be a PreparedResolution",
+            group_index=group_index if isinstance(group_index, int) else None,
+        )
+    if not isinstance(selection, FittingSelection):
+        raise _ManualFitBlocker(
+            ManualFitDiagnosticCode.INVALID_SELECTION,
+            "selection must be a FittingSelection",
+            group_index=group_index if isinstance(group_index, int) else None,
+        )
     if selection.dataset is not prepared_resolution.sample_dataset:
-        raise FittingError(
-            "fitting selection must reference the prepared sample dataset"
+        raise _ManualFitBlocker(
+            ManualFitDiagnosticCode.INVALID_SELECTION,
+            "fitting selection must reference the prepared sample dataset",
+            group_index=group_index if isinstance(group_index, int) else None,
         )
     if isinstance(group_index, bool) or not isinstance(group_index, int):
-        raise FittingError("group_index must be an integer")
+        raise _ManualFitBlocker(
+            ManualFitDiagnosticCode.INVALID_GROUP,
+            "group_index must be an integer",
+        )
     if not 0 <= group_index < len(prepared_resolution.spectra):
-        raise FittingError("group_index is outside the prepared resolution")
-    retained = selection.retained_mask(group_index)
+        raise _ManualFitBlocker(
+            ManualFitDiagnosticCode.INVALID_GROUP,
+            "group_index is outside the prepared resolution",
+            group_index=group_index,
+        )
+    try:
+        retained = selection.retained_mask(group_index)
+    except (IndexError, ValueError) as error:
+        raise _ManualFitBlocker(
+            ManualFitDiagnosticCode.INVALID_SELECTION,
+            str(error),
+            group_index=group_index,
+        ) from error
     spectrum = prepared_resolution.sample_dataset.spectra[group_index]
     energy = np.asarray(spectrum.energy[retained], dtype=np.float64)
     intensity = np.asarray(spectrum.intensity[retained], dtype=np.float64)
@@ -244,34 +489,59 @@ def _fit_inputs(
         energy.ndim == intensity.ndim == sigma.ndim == 1
         and energy.size == intensity.size == sigma.size
     ):
-        raise FittingError("retained sample arrays must be equal-length vectors")
+        raise _ManualFitBlocker(
+            ManualFitDiagnosticCode.UNUSABLE_RETAINED_DATA,
+            "retained sample arrays must be equal-length vectors",
+            group_index=group_index,
+        )
     if energy.size < 2:
-        raise FittingError(
+        raise _ManualFitBlocker(
+            ManualFitDiagnosticCode.INSUFFICIENT_RETAINED_POINTS,
             "single-Q fitting and diagnostics require at least two retained "
-            "sample energy coordinates"
+            "sample energy coordinates",
+            group_index=group_index,
         )
     if not np.all(np.isfinite(energy)) or not np.all(np.isfinite(intensity)):
-        raise FittingError("retained sample energy and intensity must be finite")
+        raise _ManualFitBlocker(
+            ManualFitDiagnosticCode.UNUSABLE_RETAINED_DATA,
+            "retained sample energy and intensity must be finite",
+            group_index=group_index,
+        )
     if not np.all(np.isfinite(sigma) & (sigma > 0.0)):
-        raise FittingError(
-            "retained absolute uncertainties must be finite and strictly positive"
+        raise _ManualFitBlocker(
+            ManualFitDiagnosticCode.UNUSABLE_RETAINED_DATA,
+            "retained absolute uncertainties must be finite and strictly positive",
+            group_index=group_index,
         )
     if energy.size - free_parameter_count <= 0:
-        raise FittingError(
-            "fit requires positive nominal statistical degrees of freedom"
+        raise _ManualFitBlocker(
+            ManualFitDiagnosticCode.NONPOSITIVE_NOMINAL_DOF,
+            "fit requires positive nominal statistical degrees of freedom",
+            group_index=group_index,
         )
-    plan = build_convolution_plan(prepared_resolution, group_index)
+    try:
+        plan = build_convolution_plan(prepared_resolution, group_index)
+        q_value = prepared_resolution.q_value(group_index)
+    except (ConvolutionError, IndexError, ValueError) as error:
+        raise _ManualFitBlocker(
+            ManualFitDiagnosticCode.UNUSABLE_PREPARED_RESOLUTION,
+            str(error),
+            group_index=group_index,
+        ) from error
     return _FitInputs(
         plan=plan,
         energy=energy,
         intensity=intensity,
         sigma=sigma,
         group_label=spectrum.group_label,
-        q_value=prepared_resolution.q_value(group_index),
+        q_value=q_value,
     )
 
 
-def _interior_initial(configuration: ParameterConfiguration) -> float:
+def _interior_initial(
+    configuration: ParameterConfiguration,
+    reference: ParameterReference | None = None,
+) -> float:
     value = configuration.initial_value
     lower = configuration.lower_bound
     upper = configuration.upper_bound
@@ -282,7 +552,11 @@ def _interior_initial(configuration: ParameterConfiguration) -> float:
         scale = max(1.0, abs(upper))
         value = upper - _BOUND_INTERIOR_FRACTION * scale
     if not lower < value < upper:
-        raise FittingError("free parameter cannot be initialized inside its bounds")
+        raise _ManualFitBlocker(
+            ManualFitDiagnosticCode.INVALID_BOUNDS,
+            "free parameter cannot be initialized inside its bounds",
+            parameter=reference,
+        )
     return float(value)
 
 
@@ -294,7 +568,13 @@ def _free_problem(
         index for index, slot in enumerate(slots) if slot.configuration.free
     )
     initial = np.asarray(
-        [_interior_initial(slots[index].configuration) for index in free_indices],
+        [
+            _interior_initial(
+                slots[index].configuration,
+                slots[index].references[0] if slots[index].references else None,
+            )
+            for index in free_indices
+        ],
         dtype=np.float64,
     )
     lower = np.asarray(
@@ -324,34 +604,34 @@ def _expand_free_values(
     return values
 
 
-def _component_parameter_indices(
+def _slot_index_by_reference(
     model: SpectralModelDefinition,
-) -> tuple[tuple[int, int, int | None], ...]:
-    names = tuple(slot.name for slot in _parameter_slots(model))
-    positions = {name: index for index, name in enumerate(names)}
-    return tuple(
-        (
-            positions[f"lorentzian_{index}_area"],
-            positions[f"lorentzian_{index}_fwhm"],
-            (
-                positions[f"lorentzian_{index}_center"]
-                if component.center is not None
-                else None
-            ),
-        )
-        for index, component in enumerate(model.lorentzians, start=1)
-    )
+) -> dict[ParameterReference, int]:
+    positions: dict[ParameterReference, int] = {}
+    for index, slot in enumerate(_parameter_slots(model)):
+        for reference in slot.references:
+            positions[reference] = index
+    return positions
 
 
 def _canonical_component_order(
     values: FloatArray,
     model: SpectralModelDefinition,
 ) -> tuple[int, ...]:
-    indices = _component_parameter_indices(model)
+    positions = _slot_index_by_reference(model)
     return tuple(
         sorted(
             range(model.lorentzian_count),
-            key=lambda index: float(values[indices[index][1]]),
+            key=lambda index: float(
+                values[
+                    positions[
+                        ParameterReference(
+                            model.lorentzians[index].identity,
+                            ParameterFamily.FWHM,
+                        )
+                    ]
+                ]
+            ),
         )
     )
 
@@ -360,28 +640,28 @@ def _canonical_permutation(
     values: FloatArray,
     model: SpectralModelDefinition,
 ) -> tuple[int, ...]:
-    slots = _parameter_slots(model)
-    indices = _component_parameter_indices(model)
-    component_indices = {
-        index for component in indices for index in component if index is not None
-    }
-    background_indices = {
-        index for index, slot in enumerate(slots) if slot.name in {"b0", "b1"}
-    }
-    permutation = [
-        index
-        for index in range(len(slots))
-        if index not in component_indices and index not in background_indices
-    ]
-    for component_index in _canonical_component_order(values, model):
-        area_index, fwhm_index, center_index = indices[component_index]
-        permutation.extend((area_index, fwhm_index))
-        if center_index is not None:
-            permutation.append(center_index)
-    permutation.extend(sorted(background_indices))
-    if sorted(permutation) != list(range(len(slots))):
+    order = _canonical_component_order(values, model)
+    canonical_model = SpectralModelDefinition(
+        energy_shift=model.energy_shift,
+        elastic_area=model.elastic_area,
+        lorentzians=tuple(model.lorentzians[index] for index in order),
+        background=model.background,
+        b0=model.b0,
+        b1=model.b1,
+        center_groups=model.center_groups,
+        elastic_center_group=model.elastic_center_group,
+        parameter_ties=model.parameter_ties,
+    )
+    original = {slot.key: index for index, slot in enumerate(_parameter_slots(model))}
+    try:
+        permutation = tuple(
+            original[slot.key] for slot in _parameter_slots(canonical_model)
+        )
+    except KeyError as error:
+        raise FittingError("canonical parameter permutation is incomplete") from error
+    if sorted(permutation) != list(range(len(original))):
         raise FittingError("canonical parameter permutation is incomplete")
-    return tuple(permutation)
+    return permutation
 
 
 def _profile_fwhm(energy: FloatArray, values: FloatArray) -> float:
@@ -519,6 +799,9 @@ def _validate_center_coverage(
     configuration: ParameterConfiguration,
     inputs: _FitInputs,
     plan: ConvolutionPlan,
+    *,
+    group_index: int | None = None,
+    reference: ParameterReference | None = None,
 ) -> None:
     allowed_lower = float(inputs.energy[-1] - plan.convolution_energy[-1])
     allowed_upper = float(inputs.energy[0] - plan.convolution_energy[0])
@@ -528,14 +811,172 @@ def _validate_center_coverage(
         or configuration.lower_bound < allowed_lower
         or configuration.upper_bound > allowed_upper
     ):
-        raise FittingError(
+        raise _ManualFitBlocker(
+            ManualFitDiagnosticCode.CENTER_OUTSIDE_COVERAGE,
             f"free {name} requires finite bounds inside the fixed "
-            "convolution-domain coverage"
+            "convolution-domain coverage",
+            group_index=group_index,
+            parameter=reference,
         )
     if not allowed_lower <= configuration.initial_value <= allowed_upper:
-        raise FittingError(
-            f"{name} initial value falls outside fixed convolution-domain coverage"
+        raise _ManualFitBlocker(
+            ManualFitDiagnosticCode.CENTER_OUTSIDE_COVERAGE,
+            f"{name} initial value falls outside fixed convolution-domain coverage",
+            group_index=group_index,
+            parameter=reference,
         )
+
+
+def _validate_parameter_tie_integrity(model: SpectralModelDefinition) -> None:
+    ties = tuple(model.parameter_ties)
+    if any(not isinstance(group, ParameterTieGroup) for group in ties):
+        raise _ManualFitBlocker(
+            ManualFitDiagnosticCode.INVALID_TIES,
+            "parameter_ties must contain ParameterTieGroup values",
+        )
+    if len({group.group_id for group in ties}) != len(ties):
+        raise _ManualFitBlocker(
+            ManualFitDiagnosticCode.INVALID_TIES,
+            "parameter tie group identities must be unique",
+        )
+    available = set(model.parameter_references())
+    seen: set[ParameterReference] = set()
+    for group in ties:
+        if len({member.family for member in group.members}) != 1:
+            raise _ManualFitBlocker(
+                ManualFitDiagnosticCode.INVALID_TIES,
+                "parameter tie members must have the same family",
+            )
+        if set(group.members) - available:
+            raise _ManualFitBlocker(
+                ManualFitDiagnosticCode.INVALID_TIES,
+                "parameter tie reference is dangling",
+            )
+        if seen.intersection(group.members):
+            raise _ManualFitBlocker(
+                ManualFitDiagnosticCode.INVALID_TIES,
+                "a parameter reference may belong to only one tie",
+            )
+        seen.update(group.members)
+    if seen.intersection(model._legacy_shared_center_references()):
+        raise _ManualFitBlocker(
+            ManualFitDiagnosticCode.INVALID_TIES,
+            "general parameter ties cannot overlap legacy shared-center state",
+        )
+
+
+def _validate_initial_evaluation(
+    model: SpectralModelDefinition,
+    inputs: _FitInputs,
+    *,
+    group_index: int,
+) -> None:
+    """Validate the deterministic residual state submitted to the optimizer."""
+
+    initial, _, _, free_indices = _free_problem(model)
+    try:
+        initial_model = _model_from_values(
+            model,
+            _expand_free_values(model, free_indices, initial),
+        )
+        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+            evaluation = evaluate_spectral_model(
+                inputs.plan,
+                initial_model,
+                inputs.energy,
+            )
+            raw_residuals = evaluation.total - inputs.intensity
+            standardized_residuals = raw_residuals / inputs.sigma
+    except (ConvolutionError, ValueError, FloatingPointError) as error:
+        raise _ManualFitBlocker(
+            ManualFitDiagnosticCode.NONFINITE_INITIAL_EVALUATION,
+            f"initial model/residual evaluation failed: {error}",
+            group_index=group_index,
+        ) from error
+    if not (
+        np.all(np.isfinite(evaluation.total))
+        and np.all(np.isfinite(raw_residuals))
+        and np.all(np.isfinite(standardized_residuals))
+    ):
+        raise _ManualFitBlocker(
+            ManualFitDiagnosticCode.NONFINITE_INITIAL_EVALUATION,
+            "initial model, raw residuals, and standardized residuals "
+            "must be finite before optimizer entry",
+            group_index=group_index,
+        )
+
+
+def _validate_manual_fit_request(
+    prepared_resolution: PreparedResolution,
+    selection: FittingSelection,
+    group_index: int,
+    model: SpectralModelDefinition,
+) -> _FitInputs:
+    if not isinstance(model, SpectralModelDefinition):
+        raise _ManualFitBlocker(
+            ManualFitDiagnosticCode.INVALID_PARAMETER_CONFIGURATION,
+            "model must be a SpectralModelDefinition",
+            group_index=group_index if isinstance(group_index, int) else None,
+        )
+    _validate_parameter_tie_integrity(model)
+    try:
+        slots = _parameter_slots(model)
+    except ValueError as error:
+        raise _ManualFitBlocker(
+            ManualFitDiagnosticCode.INVALID_TIES,
+            str(error),
+            group_index=group_index if isinstance(group_index, int) else None,
+        ) from error
+    free_count = sum(slot.configuration.free for slot in slots)
+    inputs = _fit_inputs(prepared_resolution, selection, group_index, free_count)
+    plan = inputs.plan
+    center_slots = tuple(
+        slot
+        for slot in slots
+        if slot.references
+        and all(
+            reference.family is ParameterFamily.CENTER for reference in slot.references
+        )
+    )
+    for slot in center_slots:
+        _validate_center_coverage(
+            slot.name,
+            slot.configuration,
+            inputs,
+            plan,
+            group_index=group_index,
+            reference=slot.references[0],
+        )
+    _validate_initial_evaluation(model, inputs, group_index=group_index)
+    return inputs
+
+
+def manual_fit_readiness(
+    prepared_resolution: PreparedResolution,
+    selection: FittingSelection,
+    group_index: int,
+    model: SpectralModelDefinition,
+) -> ManualFitReadiness:
+    """Return structured readiness using the exact fit-time validation path."""
+
+    try:
+        _validate_manual_fit_request(
+            prepared_resolution,
+            selection,
+            group_index,
+            model,
+        )
+    except _ManualFitBlocker as error:
+        return ManualFitReadiness(False, (error.diagnostic(),))
+    except ValueError as error:
+        diagnostic = ManualFitReadinessDiagnostic(
+            code=ManualFitDiagnosticCode.INVALID_PARAMETER_CONFIGURATION,
+            severity=DiagnosticSeverity.ERROR,
+            message=str(error),
+            group_index=group_index if isinstance(group_index, int) else None,
+        )
+        return ManualFitReadiness(False, (diagnostic,))
+    return ManualFitReadiness(True)
 
 
 def _fit_with_starts(
@@ -554,6 +995,7 @@ def _fit_with_starts(
         tuple(
             (
                 slot.name,
+                slot.key,
                 slot.configuration.lower_bound,
                 slot.configuration.upper_bound,
                 slot.configuration.free,
@@ -563,6 +1005,7 @@ def _fit_with_starts(
         != tuple(
             (
                 slot.name,
+                slot.key,
                 slot.configuration.lower_bound,
                 slot.configuration.upper_bound,
                 slot.configuration.free,
@@ -576,31 +1019,21 @@ def _fit_with_starts(
         != tuple(group.group_id for group in template.center_groups)
         or tuple(component.center_group for component in model.lorentzians)
         != tuple(component.center_group for component in template.lorentzians)
+        or tuple(component.identity for component in model.lorentzians)
+        != tuple(component.identity for component in template.lorentzians)
         for model in models[1:]
     ):
         raise FittingError(
             "all starts must share model structure, bounds, and free state"
         )
     free_count = sum(slot.configuration.free for slot in template_slots)
-    inputs = _fit_inputs(prepared_resolution, selection, group_index, free_count)
+    inputs = _validate_manual_fit_request(
+        prepared_resolution,
+        selection,
+        group_index,
+        template,
+    )
     plan = inputs.plan
-    if template.energy_shift is not None:
-        _validate_center_coverage("energy_shift", template.energy_shift, inputs, plan)
-    for group in template.center_groups:
-        _validate_center_coverage(
-            _center_group_slot_name(group.group_id),
-            group.parameter,
-            inputs,
-            plan,
-        )
-    for index, component in enumerate(template.lorentzians, start=1):
-        if component.center is not None:
-            _validate_center_coverage(
-                f"lorentzian_{index}_center",
-                component.center,
-                inputs,
-                plan,
-            )
     initial, lower, upper, free_indices = _free_problem(template)
     del initial
 
@@ -707,6 +1140,7 @@ def _fit_with_starts(
         b1=best_model.b1,
         center_groups=best_model.center_groups,
         elastic_center_group=best_model.elastic_center_group,
+        parameter_ties=best_model.parameter_ties,
     )
     canonical_configurations = tuple(
         slot.configuration for slot in _parameter_slots(canonical_template)
@@ -741,8 +1175,10 @@ def _fit_with_starts(
             free=configuration.free,
             active_lower_bound=bool(lower_hit),
             active_upper_bound=bool(upper_hit),
+            references=slot.references,
         )
-        for name, value, error, configuration, lower_hit, upper_hit in zip(
+        for slot, name, value, error, configuration, lower_hit, upper_hit in zip(
+            _parameter_slots(fitted_model),
             names,
             full_values,
             standard_errors,
@@ -778,11 +1214,16 @@ def _fit_with_starts(
         for index in range(len(linewidths) - 1)
     )
     component_area_to_error: list[float | None] = []
-    for index, area in enumerate(lorentzian_areas, start=1):
+    for component, area in zip(
+        fitted_model.lorentzians,
+        lorentzian_areas,
+        strict=True,
+    ):
+        area_reference = ParameterReference(component.identity, ParameterFamily.AREA)
         error = next(
             parameter.standard_error
             for parameter in parameters
-            if parameter.name == f"lorentzian_{index}_area"
+            if area_reference in parameter.references
         )
         component_area_to_error.append(
             None if error is None else (area / error if error > 0.0 else math.inf)
@@ -1045,6 +1486,11 @@ def _standard_initializations(
         clipped = float(np.clip(initial, lower, upper))
         return ParameterConfiguration(clipped, lower, upper)
 
+    component_identities = tuple(
+        ComponentIdentity(ComponentFamily.LORENTZIAN, f"standard_lorentzian_{index}")
+        for index in range(1, candidate.lorentzian_count + 1)
+    )
+
     def build(components: Sequence[tuple[float, float]]) -> SpectralModelDefinition:
         return SpectralModelDefinition(
             energy_shift=parameter(e0, -e0_span, e0_span),
@@ -1053,8 +1499,13 @@ def _standard_initializations(
                 LorentzianComponent(
                     area=parameter(max(area, 0.0), 0.0),
                     fwhm=parameter(max(width, gamma_floor), gamma_floor),
+                    identity=identity,
                 )
-                for area, width in components
+                for identity, (area, width) in zip(
+                    component_identities,
+                    components,
+                    strict=True,
+                )
             ),
             background=candidate.background,
             b0=(

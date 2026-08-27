@@ -13,6 +13,7 @@ import pytest
 import ezqens.fitting.auto as auto_module
 import ezqens.fitting.core as fitting_core
 from ezqens.fitting import (
+    ELASTIC_COMPONENT,
     AdditionalComplexityStatus,
     AlternativeStartResult,
     BackgroundModel,
@@ -27,6 +28,9 @@ from ezqens.fitting import (
     ModelEvaluation,
     ParameterConfiguration,
     ParameterEstimate,
+    ParameterFamily,
+    ParameterReference,
+    ParameterTieGroup,
     PrimaryFamilySupport,
     ResidualAdequacy,
     ResidualDiagnostics,
@@ -1058,6 +1062,33 @@ def test_nonstandard_center_tie_groups_are_rejected_as_auto_evidence() -> None:
     evidence[index] = replace(item, fit=replace(item.fit, configuration=manual))
 
     with pytest.raises(ValueError, match="exactly one legacy shared energy_shift"):
+        recommend_standard_candidates(tuple(evidence))
+
+
+def test_general_manual_parameter_ties_are_rejected_as_auto_evidence() -> None:
+    scores = _scores(((30.0, 31.0, 32.0), (20.0, 21.0, 22.0), (10.0, 11.0, 12.0)))
+    evidence = list(_results(scores))
+    target = StandardModelCandidate(2, BackgroundModel.NONE)
+    index = next(i for i, item in enumerate(evidence) if item.candidate == target)
+    item = evidence[index]
+    assert item.fit is not None
+    configuration = item.fit.configuration
+    first = configuration.lorentzians[0]
+    tie = ParameterTieGroup(
+        "manual-area",
+        (
+            ParameterReference(ELASTIC_COMPONENT, ParameterFamily.AREA),
+            ParameterReference(first.identity, ParameterFamily.AREA),
+        ),
+        ParameterConfiguration(1.0, 0.0, math.inf),
+    )
+    manual = replace(configuration, parameter_ties=(tie,))
+    evidence[index] = replace(
+        item,
+        fit=replace(item.fit, configuration=manual, fitted_model=manual),
+    )
+
+    with pytest.raises(ValueError, match="legacy shared energy_shift"):
         recommend_standard_candidates(tuple(evidence))
 
 
