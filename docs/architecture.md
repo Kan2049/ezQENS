@@ -87,7 +87,7 @@ ezqens/
   batch/               sequential independent per-Q execution
   derived/             FWHM-to-tau and experimental EISF
   reporting/           GUI-neutral tables, plots, and export view models
-  application/         workflow use cases and cancellation boundaries
+  workflow/            GUI-independent project and Manual Fit use cases
   gui/                 PySide6 views/controllers/adapters, added later
 ```
 
@@ -329,9 +329,39 @@ substantially later extension and does not shape current modules.
 
 ### 3.7 Application and GUI
 
-`application` exposes workflow-oriented use cases such as import sample,
-process resolution, fit spectrum, run batch, derive EISF, retain lightweight
-analysis metadata, and export. It is the seam used by both tests and the GUI.
+`workflow` owns the minimal immutable application state and GUI-independent use
+cases needed before the first Manual Fit screen. Stable project-local dataset
+identities are separate from immutable `ReducedDataset` values. A Sample has no
+implicit Resolution: `apply_resolution(...)` records one explicit sample-level
+association only after the existing exact Q-association rules pass. Replacement
+is preflighted and confirmed before it is validated and applied, so a failed
+replacement leaves the prior association unchanged. Dataset removal or a role
+change invalidates affected associations rather than repairing them.
+An existing committed `FittingSelection` is rebound across immutable dataset
+replacement only when group order/identity, units, and every measured energy,
+intensity, and uncertainty value remain exactly unchanged. Q assignment is
+independent of measured-point correspondence and may change without invalidating
+the selection. Any measured-array change invalidates the selection instead of
+transferring old ranges, masks, padding, or AUTO re-inclusions onto new point
+coordinates.
+
+`ManualFitContext` resolves one Sample group, its committed
+`FittingSelection`, its explicitly associated Resolution, and the core-prepared
+measured resolution. The workflow calls the existing resolution-preparation
+service and preserves its structured diagnostics; it provides no analytic or
+inferred fallback. Manual drafts can be empty and editable before context is
+complete, while interaction completion, preview, readiness, and fitting require
+the inputs their scientific operation needs. Immutable workflow operations own
+pending component interactions, parameter edits, explicit same-family equality
+ties, component removal, and group-local cloning. They delegate scientific
+initialization, preview, readiness, and fitting to the established core.
+Persistent editable parameter state is `ManualParameterIntent`: Current Value,
+optional user limits (including genuine `None`), and Free/Fixed state. The
+workflow derives parameter kind from each typed reference and materializes
+separate preview and fit configurations for the active group. Optimizer-boundary
+projection never mutates stored intent. Cloning copies intent and topology, then
+recomputes center coverage from each target group's own prepared resolution and
+selection; incompatible target constraints block the atomic proposal.
 
 The later PySide6 GUI contains presentation and interaction only. Proposed
 screens are Import, Spectrum Fit, Batch Results, and Export/Analysis Summary.
@@ -356,7 +386,7 @@ comparison; and requires confirmation before applying detected/generated data.
 ## 4. Dependency rules
 
 ```text
-GUI -> application -> core services -> domain
+GUI -> workflow -> core services -> domain
 reporting/export -> result/domain models
 batch -> single-spectrum fitting -> spectral + convolution + diagnostics
 ```

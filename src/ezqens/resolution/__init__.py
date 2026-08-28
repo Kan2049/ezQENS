@@ -22,6 +22,7 @@ from ezqens.resolution.preparation import (
     ResolutionSupportSource,
     prepare_measured_resolution,
     preview_measured_resolution,
+    validate_exact_q_association,
 )
 
 __all__ = [
@@ -46,4 +47,5 @@ __all__ = [
     "ResolutionSupportSource",
     "prepare_measured_resolution",
     "preview_measured_resolution",
+    "validate_exact_q_association",
 ]

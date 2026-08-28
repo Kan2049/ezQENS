@@ -581,6 +581,15 @@ def _validate_exact_q_association(
             )
 
 
+def validate_exact_q_association(
+    sample_dataset: ReducedDataset,
+    resolution_dataset: ReducedDataset,
+) -> None:
+    """Validate the existing exact ordered sample-to-resolution Q rule."""
+
+    _validate_exact_q_association(sample_dataset, resolution_dataset)
+
+
 def _retained_energy_bounds(
     spectrum: Spectrum,
     padding: SpectrumPaddingResult,

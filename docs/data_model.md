@@ -426,7 +426,59 @@ seeding, failure, exclusion, manual-refit, and selected-result state.
 elastic and individual quasielastic integrated areas, EISF, validity, and
 warnings. Missing covariance never means zero uncertainty.
 
-### 4.6 Later dynamics values — provisional
+### 4.6 Application/workflow state — pre-GUI
+
+The GUI-independent workflow layer uses small immutable values without adding
+application identity to the scientific `ReducedDataset` model:
+
+- `WorkflowProject` owns a project-local ID, ordered `ProjectDataset` entries,
+  explicit Sample-to-Resolution associations, and committed per-Sample
+  `FittingSelection` values.
+- `ProjectDataset` pairs a stable project-local dataset ID with the current
+  immutable `ReducedDataset`. Replacing the value preserves the project-local
+  identity; removal or role change invalidates affected associations.
+- `ResolutionApplyPreflight` exposes whether an existing association would be
+  replaced. `apply_resolution(...)` never infers an association and changes
+  state only after confirmation and exact group/Q validation succeed.
+- `ManualFitContext` resolves one Sample group, the committed effective
+  selection, the explicitly associated Resolution, and its
+  `PreparedResolution`. Failure is represented by structured workflow blockers
+  that retain underlying resolution-preparation diagnostics.
+- `ManualFitDraft` contains ordered group-local setups whose `ManualModelState`
+  may be absent. Each active independent parameter stores a
+  `ManualParameterIntent`: Current Value, optional user lower/upper limits, and
+  Free/Fixed state. This application empty state does not weaken the core rule
+  that an empty `SpectralModelDefinition` is invalid.
+- `PendingManualInteraction` records an Add command without modifying the
+  scientific model. Completion retains the existing measured-resolution-aware
+  initializer's result as editable Manual intent rather than persisting a
+  projected optimizer start.
+
+Parameter edits address stable `ParameterReference` values and replace
+immutable intent state. An application equality tie owns one shared Manual
+intent; it materializes as the core `ParameterTieGroup` for preview/fitting.
+Joining adopts the tie's shared intent, untying copies it into independent
+intent, and a two-member group dissolves without exposing pre-tie state.
+Cloning to another Q group copies composition, Current Values, optional user
+limits, Free/Fixed state, and tie structure while regenerating Lorentzian
+component, center-group, and tie-group identities and remapping their parameter
+references. Target scientific center coverage is rematerialized from the
+target `ManualFitContext`; source-Q scientific bounds are never copied as user
+limits. No mutable or cross-group shared parameter state is retained; the
+frozen elastic/background singleton identities remain scientifically local to
+each setup's immutable parameter values.
+
+`ManualModelMaterialization` is transient and contains separate preview and fit
+`SpectralModelDefinition` values plus per-reference materialization facts.
+Preview preserves Current Value and ignores user limits while retaining
+intrinsic constraints. Fit materialization intersects optional user limits with
+core constraints and may adjust only the optimizer start into a usable
+interior. It never writes the adjusted value back into `ManualModelState`.
+
+These are in-memory application values, not scientific persistence entities or
+a final project-file contract.
+
+### 4.7 Later dynamics values — provisional
 
 Selected temporal or spatial QENS dynamics analysis may later consume validated
 FWHM(Q), relaxation-time, EISF(Q), component-Q, and uncertainty results. If a

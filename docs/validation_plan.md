@@ -531,6 +531,33 @@ verified on clean systems.
 
 ## 11. GUI smoke and workflow tests
 
+Before GUI Slice 3A-1, GUI-independent workflow tests lock the application
+contract: stable project-local dataset identity, explicit Sample-to-Resolution
+application, exact existing group/Q validation, confirmed transactional
+replacement, and association invalidation after removal or role change. Context
+tests cover missing or invalid association, missing committed selection,
+invalid group, and measured-resolution preparation failure while preserving
+the underlying structured diagnostics. Dataset-replacement tests require exact
+preservation of group identity, units, and energy, intensity, and uncertainty
+arrays before an existing `FittingSelection` may be rebound. Adding or changing
+Q assignment alone preserves selection because it does not change measured-point
+correspondence; same-shape array changes invalidate selection state, while a
+true metadata-only replacement preserves it.
+
+Manual workflow tests cover an initially empty per-group draft, pending Add
+commands that do not mutate scientific state, delegation to the frozen
+interaction initializers, immutable `ParameterReference` edits, explicit
+same-family equality ties, removal and tie dissolution, group-local clone ID
+regeneration, and atomic Apply-to-All validation. Preview, readiness, and run
+tests verify thin delegation to the existing core and confirm that neither
+clone nor Apply-to-All runs fitting or AutoFit. Intent/materialization tests
+separately verify stored Current Value, optional user limits, Free/Fixed state,
+intrinsic Area/FWHM constraints, active-group Center coverage, and fit-only
+optimizer-start adjustment. Equality-tie tests verify one shared intent across
+join, untie, and removal. Cross-group clone tests verify copied user intent is
+rematerialized against target scientific coverage and that an incompatible
+target blocks Apply-to-All atomically without mutating any setup.
+
 GUI tests begin only after core scientific gates pass. Headless/offscreen smoke
 tests cover application startup, each planned screen, lightweight analysis
 restore where implemented, validation-error presentation, task progress,
