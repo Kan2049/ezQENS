@@ -185,7 +185,7 @@ class CenterGroup:
 
 @dataclass(frozen=True, slots=True)
 class ParameterTieGroup:
-    """One same-family equality tie owning one optimizer configuration."""
+    """One persistent same-family topology owning one optimizer configuration."""
 
     group_id: str
     members: tuple[ParameterReference, ...]
@@ -199,8 +199,8 @@ class ParameterTieGroup:
                 "parameter tie group_id must not have surrounding whitespace"
             )
         members = tuple(self.members)
-        if len(members) < 2:
-            raise ValueError("parameter tie group requires at least two members")
+        if not members:
+            raise ValueError("parameter tie group requires at least one member")
         if any(not isinstance(member, ParameterReference) for member in members):
             raise ValueError("parameter tie members must be ParameterReference values")
         if len(set(members)) != len(members):

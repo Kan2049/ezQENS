@@ -85,6 +85,17 @@ class DesignTokens:
     space_large: int
 
 
+@dataclass(frozen=True)
+class SemanticIndicatorTokens:
+    """High-chroma colors reserved for physically small semantic indicators."""
+
+    error: str
+    warning: str
+    accent: str
+    success: str
+    violet: str
+
+
 LIGHT_TOKENS = DesignTokens(
     surface="#f4f4f2",
     surface_sidebar="#eeeeeb",
@@ -137,6 +148,22 @@ DARK_TOKENS = DesignTokens(
     space_large=12,
 )
 
+LIGHT_INDICATORS = SemanticIndicatorTokens(
+    error="#dc2626",
+    warning="#e87800",
+    accent="#1479d1",
+    success="#159447",
+    violet="#8b3fd6",
+)
+
+DARK_INDICATORS = SemanticIndicatorTokens(
+    error="#ff5c5c",
+    warning="#ffad32",
+    accent="#55a7ff",
+    success="#55c878",
+    violet="#c084fc",
+)
+
 
 def _color_scheme_from_qt(
     scheme: Qt.ColorScheme,
@@ -160,10 +187,19 @@ def tokens_for(scheme: ColorScheme) -> DesignTokens:
     return DARK_TOKENS if scheme is ColorScheme.DARK else LIGHT_TOKENS
 
 
+def indicator_tokens_for(scheme: ColorScheme) -> SemanticIndicatorTokens:
+    """Return saturated colors intended only for small semantic marks."""
+
+    return DARK_INDICATORS if scheme is ColorScheme.DARK else LIGHT_INDICATORS
+
+
 def application_stylesheet(tokens: DesignTokens) -> str:
     """Build the restrained stylesheet for application chrome only."""
 
     layout = DEFAULT_LAYOUT_TOKENS
+    indicators = indicator_tokens_for(
+        ColorScheme.DARK if tokens is DARK_TOKENS else ColorScheme.LIGHT,
+    )
     return f"""
 QMainWindow, #applicationShell, QSplitter {{
     background: {tokens.surface};
@@ -188,6 +224,7 @@ QLabel[muted="true"] {{
     color: {tokens.text_muted};
 }}
 #workspaceTitle, #inspectorTitle, #maskTaskTitle, #qAssignmentTitle,
+#manualFitTitle,
 #ezqensDialogTitle {{
     font-size: {TYPOGRAPHY.task_title_size}px;
     font-weight: {TYPOGRAPHY.task_title_weight};
@@ -287,6 +324,20 @@ QToolButton[controlKind="split"]::menu-arrow {{
     background: {tokens.surface_selected};
     border-color: transparent;
 }}
+#centralManualFitButton {{
+    border-color: transparent;
+}}
+#centralManualFitButton:checked {{
+    background: {tokens.surface_selected};
+    border-color: {tokens.border_focus};
+}}
+QToolButton[compactDisclosure="true"] {{
+    qproperty-iconSize: 9px;
+}}
+QToolButton[compactDisclosure="true"]::menu-indicator {{
+    image: none;
+    width: 0;
+}}
 #maskTaskBar QToolButton:checked {{
     background: {tokens.surface_selected};
     border-color: {tokens.border_focus};
@@ -303,6 +354,82 @@ QToolButton[controlKind="split"]::menu-arrow {{
 }}
 #inspectorSourceMetadata {{
     line-height: 1.2;
+}}
+#manualFitEditor {{
+    border: 0;
+}}
+#manualDiagnosticsToggle,
+#inspectorDatasetToggle,
+#inspectorSourceToggle {{
+    border-color: transparent;
+    padding-left: 0;
+    padding-right: 2px;
+}}
+#manualDiagnosticsDetails {{
+    font-size: {TYPOGRAPHY.secondary_size}px;
+}}
+#manualInteractionInstruction {{
+    background: {tokens.surface_selected};
+    border: 1px solid {tokens.border_subtle};
+    border-radius: {tokens.control_radius}px;
+    color: {tokens.text_primary};
+    padding: 4px 7px;
+}}
+#spectrumInteractionFrame {{
+    border: 1px solid transparent;
+}}
+#spectrumInteractionFrame[manualInteractionActive="true"] {{
+    border-color: {indicators.accent};
+}}
+#manualModelSummary, #manualFitReadiness {{
+    font-size: {TYPOGRAPHY.secondary_size}px;
+}}
+#manualFunctionSection {{
+    border-top: 1px solid {tokens.canvas_boundary};
+}}
+#manualFunctionTitle {{
+    font-weight: 600;
+}}
+#manualParameterCell {{
+    border: 0;
+    background: transparent;
+}}
+#manualParameterCell[manualWarning="true"] QLineEdit {{
+    border-color: {indicators.warning};
+}}
+#manualParameterCell QLineEdit {{
+    min-height: {DEFAULT_LAYOUT_TOKENS.control_height - 8}px;
+    padding: 2px 3px;
+}}
+#manualParameterHeader, #manualBoundsSeparator {{
+    font-size: {TYPOGRAPHY.secondary_size}px;
+    color: {tokens.text_secondary};
+}}
+#manualFitEditor QToolButton[fixedControl="true"],
+#manualFitEditor QToolButton[chainControl="true"] {{
+    min-width: 18px;
+    max-width: 20px;
+    padding: 1px;
+    border-color: transparent;
+}}
+#manualComponentRowLabel {{
+    min-width: 20px;
+    max-width: 32px;
+    padding: 1px;
+    border-color: transparent;
+}}
+#manualFitEditor QToolButton[fixedControl="true"]:checked {{
+    background: {tokens.surface_selected};
+    border-color: {tokens.border_focus};
+}}
+#manualFitEditor QToolButton[chainControl="true"][tieColor="accent"] {{
+    color: {indicators.accent};
+}}
+#manualFitEditor QToolButton[chainControl="true"][tieColor="amber"] {{
+    color: {indicators.warning};
+}}
+#manualFitEditor QToolButton[chainControl="true"][tieColor="violet"] {{
+    color: {indicators.violet};
 }}
 QTreeWidget {{
     background: transparent;

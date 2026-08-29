@@ -1838,6 +1838,53 @@ def test_cross_component_area_tie_is_one_optimizer_parameter() -> None:
     assert result.covariance.shape == (3, 3)
 
 
+def test_singleton_tie_is_persistent_and_optimizer_neutral() -> None:
+    elastic_center = ParameterReference(
+        ComponentIdentity(ComponentFamily.ELASTIC, "elastic"),
+        ParameterFamily.CENTER,
+    )
+    center = parameter(0.015, -0.1, 0.1)
+    singleton = ParameterTieGroup(
+        "elastic-center-chain",
+        (elastic_center,),
+        center,
+    )
+    tied_model = SpectralModelDefinition(
+        energy_shift=parameter(0.0, -0.1, 0.1),
+        elastic_area=parameter(0.6, 0.0, free=False),
+        parameter_ties=(singleton,),
+    )
+    independent_model = SpectralModelDefinition(
+        energy_shift=center,
+        elastic_area=parameter(0.6, 0.0, free=False),
+    )
+    prepared, selection = synthetic_problem(tied_model)
+
+    tied_result = fit_single_q(prepared, selection, 0, tied_model)
+    independent_result = fit_single_q(prepared, selection, 0, independent_model)
+
+    assert tied_result.statistics.free_parameters == 1
+    assert tied_result.statistics.free_parameters == (
+        independent_result.statistics.free_parameters
+    )
+    assert tied_result.statistics.nominal_degrees_of_freedom == (
+        independent_result.statistics.nominal_degrees_of_freedom
+    )
+    assert tied_result.covariance is not None
+    assert independent_result.covariance is not None
+    assert tied_result.covariance.shape == independent_result.covariance.shape
+    assert tied_result.parameter_by_reference(elastic_center).references == (
+        elastic_center,
+    )
+    assert tied_result.fitted_model is not None
+    assert tied_result.fitted_model.parameter_ties[0].members == (elastic_center,)
+
+
+def test_empty_parameter_tie_group_is_invalid() -> None:
+    with pytest.raises(ValueError, match="at least one member"):
+        ParameterTieGroup("empty", (), parameter(0.1))
+
+
 def test_general_center_and_fwhm_ties_survive_fitting() -> None:
     first = lorentzian_identity("first")
     second = lorentzian_identity("second")

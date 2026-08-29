@@ -99,7 +99,7 @@ class ManualCenterGroupState:
 
 @dataclass(frozen=True, slots=True)
 class ManualParameterTieState:
-    """One explicit same-family equality tie owning one shared Manual intent."""
+    """One persistent same-family topology owning one Manual intent."""
 
     group_id: str
     members: tuple[ParameterReference, ...]
@@ -108,8 +108,8 @@ class ManualParameterTieState:
     def __post_init__(self) -> None:
         _validate_group_id(self.group_id, name="parameter tie group_id")
         members = tuple(self.members)
-        if len(members) < 2:
-            raise ValueError("parameter tie group requires at least two members")
+        if not members:
+            raise ValueError("parameter tie group requires at least one member")
         if any(not isinstance(item, ParameterReference) for item in members):
             raise ValueError("parameter tie members must be ParameterReference values")
         if len(set(members)) != len(members):
@@ -508,14 +508,24 @@ def materialize_manual_model(
         for member in members:
             materializations[member] = result
 
+    tied_references = {
+        member for tie_state in model.parameter_ties for member in tie_state.members
+    }
     for tie_state in model.parameter_ties:
         materialize_slot(tie_state.members, tie_state.intent)
     for center_state in model.center_groups:
-        materialize_slot(
-            _center_group_references(model, center_state.group_id),
-            center_state.intent,
+        members = tuple(
+            reference
+            for reference in _center_group_references(model, center_state.group_id)
+            if reference not in tied_references
         )
-    legacy = _legacy_center_references(model)
+        if members:
+            materialize_slot(members, center_state.intent)
+    legacy = tuple(
+        reference
+        for reference in _legacy_center_references(model)
+        if reference not in tied_references
+    )
     if legacy:
         if model.energy_shift is None:
             raise RuntimeError("legacy shared center has no Manual intent")

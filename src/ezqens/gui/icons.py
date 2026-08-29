@@ -5,9 +5,10 @@ from __future__ import annotations
 from enum import Enum
 from importlib import resources
 
-from PySide6.QtCore import QByteArray, Qt
+from PySide6.QtCore import QByteArray, QSize, Qt
 from PySide6.QtGui import QIcon, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
+from PySide6.QtWidgets import QAbstractButton
 
 
 class IconName(Enum):
@@ -20,6 +21,10 @@ class IconName(Enum):
     INSPECTOR_SHOW = "panel-right-open"
     INSPECTOR_HIDE = "panel-right-close"
     RESOLUTION = "activity"
+    LOCK = "lock-keyhole"
+    CHAIN = "link-2"
+    CHEVRON_RIGHT = "chevron-right"
+    CHEVRON_DOWN = "chevron-down"
 
 
 _ICON_SIZE = 18
@@ -49,3 +54,23 @@ def load_icon(name: IconName, color: str) -> QIcon:
     icon = QIcon(pixmap)
     _icon_cache[cache_key] = icon
     return icon
+
+
+def apply_disclosure_icon(
+    button: QAbstractButton,
+    *,
+    expanded: bool,
+    color: str,
+) -> None:
+    """Apply one restrained chevron while retaining a comfortable hit target."""
+
+    button.setProperty("compactDisclosure", True)
+    button.setProperty("disclosureExpanded", expanded)
+    button.setIcon(
+        load_icon(
+            IconName.CHEVRON_DOWN if expanded else IconName.CHEVRON_RIGHT,
+            color,
+        ),
+    )
+    button.setIconSize(QSize(9, 9))
+    button.setMinimumHeight(22)

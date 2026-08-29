@@ -15,6 +15,8 @@ from PySide6.QtGui import QActionGroup, QDragEnterEvent, QDragMoveEvent, QDropEv
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QApplication,
+    QFrame,
+    QGraphicsOpacityEffect,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -26,6 +28,7 @@ from PySide6.QtWidgets import (
 )
 
 from ezqens.domain import DiagnosticSeverity, ReducedDataset
+from ezqens.fitting import ComponentIdentity, ManualModelPreview, ModelEvaluation
 from ezqens.gui.dialogs import show_message_dialog
 from ezqens.gui.q_editor import QAssignmentEditor
 from ezqens.gui.scientific_canvas import SCIENTIFIC_BACKGROUND, ScientificCanvas
@@ -35,6 +38,7 @@ from ezqens.gui.workspace import (
     q_method_drag_indices_from_mime_data,
 )
 from ezqens.preprocessing import FittingSelection
+from ezqens.workflow import ManualComponentKind
 
 Q_DISPLAY_UNIT = "Å⁻¹"
 OVERVIEW_COLORMAP = "jet"
@@ -63,6 +67,10 @@ class ReducedDatasetView(QWidget):
     mask_boundary_previewed = Signal(int, object, float)
     mask_boundary_requested = Signal(int, object, float)
     mask_operation_feedback_changed = Signal(str)
+    manual_fit_requested = Signal()
+    manual_component_completed = Signal(object, object)
+    manual_component_preview_requested = Signal(object, object)
+    manual_component_cancelled = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -86,6 +94,14 @@ class ReducedDatasetView(QWidget):
         self._boundary_handle_positions: dict[str, float] = {}
         self._mask_preview_rectangle: Rectangle | None = None
         self._mask_preview_line: Line2D | None = None
+        self._manual_component_kind: ManualComponentKind | None = None
+        self._manual_interaction_start: tuple[float, float] | None = None
+        self._manual_drag_point: tuple[float, float] | None = None
+        self._manual_pointer_down = False
+        self._manual_geometry_artists: list[Line2D] = []
+        self._manual_preview: ManualModelPreview | None = None
+        self._manual_pending_evaluation: ModelEvaluation | None = None
+        self._manual_emphasized_components: frozenset[ComponentIdentity] = frozenset()
         self.current_group_index = 0
         self.overview_axes: Axes | None = None
         self.overview_q_axis: object | None = None
@@ -165,7 +181,9 @@ class ReducedDatasetView(QWidget):
         actions.addWidget(self.metadata_status_label)
         actions.addWidget(self.overview_toggle_button)
 
-        controls = QGridLayout()
+        self.controls_container = QWidget(self)
+        self.controls_container.setObjectName("datasetControls")
+        controls = QGridLayout(self.controls_container)
         controls.setContentsMargins(0, 0, 0, 0)
         controls.setSpacing(5)
         controls.setColumnStretch(0, 1)
@@ -179,10 +197,24 @@ class ReducedDatasetView(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
-        layout.addLayout(controls)
+        layout.addWidget(self.controls_container)
         layout.addWidget(self.overview_canvas)
         layout.addWidget(self.q_editor)
-        layout.addWidget(self.canvas, 1)
+        self.manual_interaction_instruction = QLabel()
+        self.manual_interaction_instruction.setObjectName(
+            "manualInteractionInstruction",
+        )
+        self.manual_interaction_instruction.setWordWrap(True)
+        self.manual_interaction_instruction.hide()
+        layout.addWidget(self.manual_interaction_instruction)
+        self.spectrum_interaction_frame = QFrame(self)
+        self.spectrum_interaction_frame.setObjectName("spectrumInteractionFrame")
+        self.spectrum_interaction_frame.setProperty("manualInteractionActive", False)
+        spectrum_layout = QVBoxLayout(self.spectrum_interaction_frame)
+        spectrum_layout.setContentsMargins(1, 1, 1, 1)
+        spectrum_layout.setSpacing(0)
+        spectrum_layout.addWidget(self.canvas)
+        layout.addWidget(self.spectrum_interaction_frame, 1)
         self.content_layout = layout
 
         self._update_overview_toggle()
@@ -254,6 +286,7 @@ class ReducedDatasetView(QWidget):
     def open_dataset(self, dataset: ReducedDataset) -> None:
         """Open real imported data at Group 1 without changing its arrays."""
 
+        self.cancel_manual_component_interaction()
         self.dataset = dataset
         self.selection = None
         self.mask_inspection_mode = False
@@ -319,6 +352,7 @@ class ReducedDatasetView(QWidget):
     def clear_dataset(self) -> None:
         """Clear the scientific view when its Workspace object is removed."""
 
+        self.cancel_manual_component_interaction()
         self.dataset = None
         self.selection = None
         self.overview_axes = None
@@ -372,6 +406,179 @@ class ReducedDatasetView(QWidget):
         self._update_metadata_status()
         self._draw()
 
+    def set_manual_preview(
+        self,
+        preview: ManualModelPreview | None,
+        *,
+        emphasized_components: frozenset[ComponentIdentity] = frozenset(),
+    ) -> None:
+        """Draw only the typed workflow/core preview supplied by the task layer."""
+
+        self._manual_preview = preview
+        self._manual_pending_evaluation = None
+        self._manual_emphasized_components = emphasized_components
+        if self.dataset is not None:
+            self._draw()
+
+    def set_manual_pending_preview(
+        self,
+        evaluation: ModelEvaluation | None,
+    ) -> None:
+        """Draw only a workflow-evaluated transient component proposal."""
+
+        self._manual_pending_evaluation = evaluation
+        if self.dataset is not None:
+            self._draw()
+
+    def begin_manual_component_interaction(self, kind: ManualComponentKind) -> None:
+        """Enter a geometry-only component interaction without creating a model."""
+
+        self._reset_manual_interaction_feedback()
+        self._manual_component_kind = kind
+        self._cancel_mask_gesture()
+        self.canvas.setCursor(Qt.CursorShape.CrossCursor)
+        self.setProperty("manualInteractionActive", True)
+        self.spectrum_interaction_frame.setProperty("manualInteractionActive", True)
+        self._refresh_dynamic_style(self.spectrum_interaction_frame)
+        self.manual_interaction_instruction.setText(
+            self._manual_interaction_text(kind),
+        )
+        self.manual_interaction_instruction.show()
+        for widget in (
+            self.controls_container,
+            self.overview_canvas,
+            self.q_editor,
+        ):
+            effect = QGraphicsOpacityEffect(widget)
+            effect.setOpacity(0.58)
+            widget.setGraphicsEffect(effect)
+
+    def cancel_manual_component_interaction(self) -> None:
+        """Discard an incomplete geometry gesture with no workflow mutation."""
+
+        if self._manual_component_kind is None:
+            return
+        self._manual_component_kind = None
+        self._reset_manual_interaction_feedback()
+        self.manual_component_cancelled.emit()
+
+    @staticmethod
+    def _refresh_dynamic_style(widget: QWidget) -> None:
+        style = widget.style()
+        style.unpolish(widget)
+        style.polish(widget)
+        widget.update()
+
+    @staticmethod
+    def _manual_interaction_text(kind: ManualComponentKind) -> str:
+        if kind is ManualComponentKind.ELASTIC:
+            return "Add δ · Press and drag the peak position · Esc to cancel"
+        if kind is ManualComponentKind.LORENTZIAN:
+            return (
+                "Add Lorentzian · Press peak center and drag to half-width "
+                "· Esc to cancel"
+            )
+        return "Add Background · Press and drag the baseline · Esc to cancel"
+
+    def _reset_manual_interaction_feedback(self) -> None:
+        self._clear_manual_geometry()
+        self._manual_pending_evaluation = None
+        self._manual_interaction_start = None
+        self._manual_drag_point = None
+        self._manual_pointer_down = False
+        self.canvas.unsetCursor()
+        self.setProperty("manualInteractionActive", False)
+        self.spectrum_interaction_frame.setProperty("manualInteractionActive", False)
+        self._refresh_dynamic_style(self.spectrum_interaction_frame)
+        self.manual_interaction_instruction.hide()
+        for widget in (
+            self.controls_container,
+            self.overview_canvas,
+            self.q_editor,
+        ):
+            effect = widget.graphicsEffect()
+            if effect is not None:
+                effect.setEnabled(False)
+
+    def _clear_manual_geometry(self) -> None:
+        for artist in self._manual_geometry_artists:
+            try:
+                artist.remove()
+            except ValueError:
+                pass
+        self._manual_geometry_artists = []
+
+    def _draw_manual_interaction_geometry(self) -> None:
+        axes = self.spectrum_axes
+        kind = self._manual_component_kind
+        if axes is None or kind is None:
+            return
+        self._clear_manual_geometry()
+        color = "#1677d2"
+        if kind is ManualComponentKind.ELASTIC:
+            point = self._manual_drag_point
+            if point is not None:
+                (marker,) = axes.plot(
+                    [point[0]],
+                    [point[1]],
+                    marker="o",
+                    markersize=6,
+                    color=color,
+                    fillstyle="none",
+                    linewidth=1.2,
+                    zorder=8,
+                )
+                self._manual_geometry_artists.append(marker)
+        elif kind is ManualComponentKind.LORENTZIAN:
+            center = self._manual_interaction_start
+            endpoint = self._manual_drag_point
+            if center is not None and endpoint is not None:
+                distance = abs(endpoint[0] - center[0])
+                (marker,) = axes.plot(
+                    [center[0]],
+                    [center[1]],
+                    marker="o",
+                    markersize=5,
+                    color=color,
+                    zorder=8,
+                )
+                (guide,) = axes.plot(
+                    [center[0] - distance, center[0] + distance],
+                    [center[1], center[1]],
+                    marker="|",
+                    markersize=8,
+                    color=color,
+                    linewidth=1.2,
+                    zorder=8,
+                )
+                self._manual_geometry_artists.extend((marker, guide))
+        else:
+            first = self._manual_interaction_start
+            provisional = self._manual_drag_point
+            if first is not None:
+                (first_marker,) = axes.plot(
+                    [first[0]],
+                    [first[1]],
+                    marker="o",
+                    markersize=6,
+                    color=color,
+                    fillstyle="none",
+                    zorder=8,
+                )
+                self._manual_geometry_artists.append(first_marker)
+            if first is not None and provisional is not None:
+                (line,) = axes.plot(
+                    [first[0], provisional[0]],
+                    [first[1], provisional[1]],
+                    marker="o",
+                    markersize=5,
+                    color=color,
+                    linewidth=1.2,
+                    zorder=8,
+                )
+                self._manual_geometry_artists.append(line)
+        self.canvas.draw_idle()  # type: ignore[no-untyped-call]
+
     def set_overview_theme(
         self,
         *,
@@ -398,6 +605,7 @@ class ReducedDatasetView(QWidget):
     def set_current_group(self, group_index: int) -> None:
         """Select a zero-based group and synchronize controls and plots."""
 
+        self.cancel_manual_component_interaction()
         dataset = self._require_dataset()
         if not 0 <= group_index < len(dataset.spectra):
             raise ValueError("group index is outside the dataset")
@@ -533,6 +741,7 @@ class ReducedDatasetView(QWidget):
                     zorder=3,
                 )
             self._draw_mask_boundary_handles(axes, spectrum.energy, visible_points)
+        self._draw_manual_preview(axes)
         axes.set_xlabel(axis_label("Energy", spectrum.energy_unit))
         axes.set_ylabel(axis_label("Intensity", spectrum.intensity_unit))
         title = axes.set_title(
@@ -555,6 +764,41 @@ class ReducedDatasetView(QWidget):
             axes.autoscale_view(scalex=False, scaley=True)
         if self.y_range_locked and self._locked_y_limits is not None:
             axes.set_ylim(self._locked_y_limits)
+
+    def _draw_manual_preview(self, axes: Axes) -> None:
+        """Overlay the typed core preview without evaluating a scientific model here."""
+
+        preview = self._manual_preview
+        evaluation = self._manual_pending_evaluation
+        if evaluation is None and preview is not None:
+            evaluation = preview.display_evaluation
+        if evaluation is None:
+            return
+        axes.plot(
+            evaluation.energy,
+            evaluation.total,
+            color="#314b63",
+            linewidth=1.7,
+            zorder=4,
+        )
+        for curve in evaluation.component_curves:
+            emphasized = curve.component in self._manual_emphasized_components
+            axes.plot(
+                evaluation.energy,
+                curve.values,
+                color="#6d8191",
+                linewidth=1.35 if emphasized else 0.8,
+                alpha=1.0 if emphasized else 0.58,
+                zorder=4 if emphasized else 3,
+            )
+        axes.plot(
+            evaluation.energy,
+            evaluation.background,
+            color="#8a7564",
+            linewidth=1.0,
+            alpha=0.72,
+            zorder=3,
+        )
 
     def _draw_mask_boundary_handles(
         self,
@@ -857,7 +1101,8 @@ class ReducedDatasetView(QWidget):
 
     def _on_spectrum_units_press(self, event: MouseEvent) -> None:
         if (
-            getattr(event, "dblclick", False)
+            self._manual_component_kind is None
+            and getattr(event, "dblclick", False)
             and event.button is MouseButton.LEFT
             and self.spectrum_axes is not None
             and self.spectrum_axes.xaxis.label.contains(event)[0]
@@ -866,7 +1111,8 @@ class ReducedDatasetView(QWidget):
 
     def _on_spectrum_q_press(self, event: MouseEvent) -> None:
         if (
-            getattr(event, "dblclick", False)
+            self._manual_component_kind is None
+            and getattr(event, "dblclick", False)
             and event.button is MouseButton.LEFT
             and self.dataset is not None
             and self.dataset.q_bins is not None
@@ -945,6 +1191,9 @@ class ReducedDatasetView(QWidget):
         self._navigation_drag_active = False
 
     def _on_spectrum_button_press(self, event: MouseEvent) -> None:
+        if self._manual_component_kind is not None:
+            self._handle_manual_component_press(event)
+            return
         if (
             self._mask_tool is None
             or event.button is not MouseButton.LEFT
@@ -992,6 +1241,9 @@ class ReducedDatasetView(QWidget):
         self.canvas.draw_idle()  # type: ignore[no-untyped-call]
 
     def _on_spectrum_mouse_motion(self, event: MouseEvent) -> None:
+        if self._manual_component_kind is not None:
+            self._handle_manual_component_motion(event)
+            return
         if self._mask_tool is None:
             return
         if self._boundary_drag_side is not None:
@@ -1014,6 +1266,9 @@ class ReducedDatasetView(QWidget):
         self.canvas.draw_idle()  # type: ignore[no-untyped-call]
 
     def _on_spectrum_button_release(self, event: MouseEvent) -> None:
+        if self._manual_component_kind is not None:
+            self._handle_manual_component_release(event)
+            return
         if self._boundary_drag_side is not None:
             side = self._boundary_drag_side
             self._boundary_drag_side = None
@@ -1058,7 +1313,137 @@ class ReducedDatasetView(QWidget):
 
     def _on_spectrum_key_press(self, event: KeyEvent) -> None:
         if event.key == "escape":
+            if self._manual_component_kind is not None:
+                self.cancel_manual_component_interaction()
+                return
             self._cancel_mask_gesture()
+
+    def _handle_manual_component_press(self, event: MouseEvent) -> None:
+        """Capture the first public interaction hint for the pending component."""
+
+        if (
+            event.button is not MouseButton.LEFT
+            or event.inaxes is not self.spectrum_axes
+            or event.xdata is None
+            or event.ydata is None
+        ):
+            return
+        start = (float(event.xdata), float(event.ydata))
+        self._manual_pointer_down = True
+        self._manual_interaction_start = start
+        self._manual_drag_point = start
+        self._clear_manual_geometry()
+        self._request_manual_component_preview()
+        self._draw_manual_interaction_geometry()
+
+    def _handle_manual_component_motion(self, event: MouseEvent) -> None:
+        """Update geometry-only feedback while one Spectrum press is held."""
+
+        if (
+            not self._manual_pointer_down
+            or event.inaxes is not self.spectrum_axes
+            or event.xdata is None
+            or event.ydata is None
+        ):
+            return
+        point = (float(event.xdata), float(event.ydata))
+        self._manual_drag_point = point
+        self._clear_manual_geometry()
+        self._request_manual_component_preview()
+        self._draw_manual_interaction_geometry()
+
+    def _request_manual_component_preview(self) -> None:
+        """Forward raw gesture geometry without deriving scientific parameters."""
+
+        kind = self._manual_component_kind
+        start = self._manual_interaction_start
+        point = self._manual_drag_point
+        if kind is None or start is None or point is None:
+            return
+        if kind is ManualComponentKind.ELASTIC:
+            hints: dict[str, float] | None = {
+                "component_peak_center": point[0],
+                "component_peak_height": point[1],
+            }
+        elif kind is ManualComponentKind.LORENTZIAN:
+            hints = (
+                None
+                if point[0] == start[0]
+                else {
+                    "component_peak_center": start[0],
+                    "component_peak_height": start[1],
+                    "width_endpoint_energy": point[0],
+                }
+            )
+        else:
+            hints = {
+                "first_energy": start[0],
+                "first_height": start[1],
+                "second_energy": point[0],
+                "second_height": point[1],
+            }
+        self.manual_component_preview_requested.emit(kind, hints)
+
+    def _handle_manual_component_release(self, event: MouseEvent) -> None:
+        """Advance or submit one component's press/drag/release geometry."""
+
+        if not self._manual_pointer_down:
+            return
+        if (
+            event.inaxes is not self.spectrum_axes
+            or event.xdata is None
+            or event.ydata is None
+        ):
+            self._manual_pointer_down = False
+            return
+        point = (float(event.xdata), float(event.ydata))
+        self._manual_pointer_down = False
+        self._manual_drag_point = point
+        kind = self._manual_component_kind
+        if kind is ManualComponentKind.ELASTIC:
+            self._complete_manual_component(
+                {
+                    "component_peak_center": point[0],
+                    "component_peak_height": point[1],
+                },
+            )
+            return
+        if kind is ManualComponentKind.LORENTZIAN:
+            start = self._manual_interaction_start
+            if start is None:
+                return
+            if point[0] == start[0]:
+                self.cancel_manual_component_interaction()
+                return
+            self._complete_manual_component(
+                {
+                    "component_peak_center": start[0],
+                    "component_peak_height": start[1],
+                    "width_endpoint_energy": point[0],
+                },
+            )
+            return
+        if kind is not ManualComponentKind.BACKGROUND:
+            return
+        first = self._manual_interaction_start
+        if first is None:
+            return
+        self._complete_manual_component(
+            {
+                "first_energy": first[0],
+                "first_height": first[1],
+                "second_energy": point[0],
+                "second_height": point[1],
+            },
+        )
+
+    def _complete_manual_component(self, hints: dict[str, float]) -> None:
+        kind = self._manual_component_kind
+        if kind is None:
+            return
+        self._manual_component_kind = None
+        self._reset_manual_interaction_feedback()
+        self.manual_component_completed.emit(kind, hints)
 
     def _boundary_side_at(self, event: MouseEvent) -> str | None:
         """Resolve a press near one visible handle, without midpoint inference."""

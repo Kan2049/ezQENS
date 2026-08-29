@@ -322,9 +322,10 @@ identities, legacy named center groups, and general same-family parameter ties.
 Elastic and background have singleton function identities; a Lorentzian identity
 is independent of tuple position and survives fitted FWHM reordering. A typed
 `ParameterReference` combines function identity with AREA, CENTER, FWHM, OFFSET,
-or SLOPE. `ParameterTieGroup` owns one `ParameterConfiguration` and two or more
-compatible references, so value, bounds, free/fixed state, optimizer slot,
-covariance, and DOF are shared exactly once. `CenterGroup` remains the compatible
+or SLOPE. `ParameterTieGroup` owns one `ParameterConfiguration` and one or more
+compatible references. A singleton records persistent chain topology without
+changing parameter count or DOF; two or more members share value, bounds,
+free/fixed state, optimizer slot, covariance, and DOF exactly once. `CenterGroup` remains the compatible
 legacy center-only representation, including single-member independent centers.
 Legacy shared `energy_shift` and per-Lorentzian independent center configuration
 remain supported. Python object identity of a reused `ParameterConfiguration`
@@ -457,8 +458,10 @@ application identity to the scientific `ReducedDataset` model:
 Parameter edits address stable `ParameterReference` values and replace
 immutable intent state. An application equality tie owns one shared Manual
 intent; it materializes as the core `ParameterTieGroup` for preview/fitting.
-Joining adopts the tie's shared intent, untying copies it into independent
-intent, and a two-member group dissolves without exposing pre-tie state.
+Joining adopts the tie's shared intent. Untying one member copies the group's
+current authoritative intent into that departing independent parameter while
+preserving any nonempty remainder, including a singleton; only an empty group is
+removed. Component removal follows the same nonempty-remainder rule.
 Cloning to another Q group copies composition, Current Values, optional user
 limits, Free/Fixed state, and tie structure while regenerating Lorentzian
 component, center-group, and tie-group identities and remapping their parameter

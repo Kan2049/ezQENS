@@ -30,6 +30,13 @@ from ezqens.domain import (
     ReducedDataset,
     SpectrumRole,
 )
+from ezqens.fitting import (
+    ComponentIdentity,
+    ManualModelPreview,
+    ParameterMetadata,
+    ParameterReference,
+    manual_parameter_metadata,
+)
 from ezqens.gui import masking
 from ezqens.gui.dataset_view import ReducedDatasetView
 from ezqens.gui.dialogs import (
@@ -38,12 +45,14 @@ from ezqens.gui.dialogs import (
     confirm_dialog,
     show_message_dialog,
 )
-from ezqens.gui.icons import IconName, load_icon
+from ezqens.gui.icons import IconName, apply_disclosure_icon, load_icon
+from ezqens.gui.manual_fit import ManualFitEditor
 from ezqens.gui.masking import MaskTaskDraft
 from ezqens.gui.theme import (
     DEFAULT_LAYOUT_TOKENS,
     Appearance,
     application_appearance_controller,
+    indicator_tokens_for,
     tokens_for,
 )
 from ezqens.gui.units_editor import SourceUnitsDialog
@@ -56,6 +65,38 @@ from ezqens.gui.workspace import (
 from ezqens.io import parse_dave_q_bins
 from ezqens.io.importers import import_reduced_data
 from ezqens.preprocessing import BoundarySide
+from ezqens.workflow import (
+    ManualComponentKind,
+    ManualFitDraft,
+    ManualParameterEdit,
+    PendingManualInteraction,
+    ProjectDataset,
+    WorkflowError,
+    WorkflowProject,
+    add_project_dataset,
+    apply_resolution,
+    begin_component_interaction,
+    commit_fitting_selection,
+    complete_background_interaction,
+    complete_elastic_interaction,
+    complete_lorentzian_interaction,
+    create_parameter_tie,
+    create_project,
+    join_parameter_tie,
+    manual_workflow_readiness,
+    materialize_manual_setup,
+    open_manual_fit_draft,
+    preflight_apply_resolution,
+    preview_manual_fit,
+    preview_pending_background_interaction,
+    preview_pending_elastic_interaction,
+    preview_pending_lorentzian_interaction,
+    remove_manual_component,
+    remove_project_dataset,
+    replace_project_dataset,
+    untie_parameter,
+    update_manual_parameter,
+)
 
 INSPECTOR_PREFERRED_WIDTH = 280
 SUPPORTED_REDUCED_DATA_SUFFIXES = frozenset({".csv", ".dat", ".txt"})
@@ -134,6 +175,7 @@ class MainWindow(QMainWindow):
             _active_application(),
         )
         self._appearance_listener_connected = False
+        self._last_inspector_width = INSPECTOR_PREFERRED_WIDTH
 
         self.workspace = WorkspaceSidebar()
         self.workspace.set_resolution_icon_color(
@@ -148,6 +190,11 @@ class MainWindow(QMainWindow):
         self._open_dataset: DatasetState | None = None
         self._mask_draft: MaskTaskDraft | None = None
         self._mask_draft_owner: DatasetState | None = None
+        self._workflow_projects: dict[ProjectState, WorkflowProject] = {}
+        self._manual_draft: ManualFitDraft | None = None
+        self._manual_owner: tuple[ProjectState, str] | None = None
+        self._pending_manual_interaction: PendingManualInteraction | None = None
+        self._manual_preview: ManualModelPreview | None = None
         self.workspace.set_scientific_replacement_resolver(
             self._resolve_scientific_dataset_replacement,
         )
@@ -158,6 +205,7 @@ class MainWindow(QMainWindow):
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
         self.splitter.setObjectName("workspaceSplitter")
         self.splitter.setChildrenCollapsible(False)
+        self.splitter.setHandleWidth(8)
         self.splitter.addWidget(self.workspace)
         self.splitter.addWidget(self.central_workspace)
         self.splitter.addWidget(self.inspector)
@@ -165,6 +213,7 @@ class MainWindow(QMainWindow):
         self.splitter.setStretchFactor(1, 1)
         self.splitter.setStretchFactor(2, 0)
         self.splitter.setSizes([230, 760, INSPECTOR_PREFERRED_WIDTH])
+        self.splitter.splitterMoved.connect(self._remember_inspector_width)
         self.inspector.hide()
 
         self._create_menus()
@@ -174,6 +223,7 @@ class MainWindow(QMainWindow):
         self.workspace.import_files_requested.connect(self._prompt_import_files)
         self.workspace.import_folder_requested.connect(self._prompt_import_folder)
         self.workspace.dataset_open_requested.connect(self.open_dataset)
+        self.workspace.dataset_added.connect(self._on_dataset_added)
         self.workspace.dataset_role_changed.connect(self._on_dataset_role_changed)
         self.workspace.dataset_role_change_requested.connect(self.change_dataset_role)
         self.workspace.dataset_renamed.connect(self._on_dataset_renamed)
@@ -181,6 +231,10 @@ class MainWindow(QMainWindow):
         self.workspace.units_requested.connect(self.show_units_editor)
         self.workspace.q_assignment_requested.connect(self.show_q_editor)
         self.workspace.mask_edit_requested.connect(self.show_mask_editor)
+        self.workspace.manual_fit_requested.connect(self.show_manual_fit)
+        self.workspace.apply_resolution_requested.connect(
+            self.apply_resolution_for_sample
+        )
         self.workspace.q_method_dropped.connect(self._apply_q_method)
         self.workspace.project_removal_requested.connect(self.remove_project)
         self.workspace.dataset_removal_requested.connect(self.remove_dataset)
@@ -190,6 +244,17 @@ class MainWindow(QMainWindow):
         self.dataset_view.units_requested.connect(self.show_units_editor)
         self.dataset_view.q_method_dropped.connect(self._apply_dragged_q_method)
         self.dataset_view.mask_edit_requested.connect(self.enter_mask_task)
+        self.dataset_view.manual_fit_requested.connect(self.show_manual_fit)
+        self.dataset_view.manual_component_completed.connect(
+            self._complete_manual_component_interaction,
+        )
+        self.dataset_view.manual_component_preview_requested.connect(
+            self._preview_manual_component_interaction,
+        )
+        self.dataset_view.manual_component_cancelled.connect(
+            self._cancel_manual_component_interaction,
+        )
+        self.dataset_view.group_changed.connect(self._on_manual_group_changed)
         self.dataset_view.mask_rectangle_requested.connect(self._exclude_rectangle)
         self.dataset_view.mask_lasso_requested.connect(self._exclude_lasso)
         self.dataset_view.mask_boundary_previewed.connect(self._preview_auto_boundary)
@@ -228,22 +293,30 @@ class MainWindow(QMainWindow):
 
     def set_inspector_visible(self, visible: bool) -> None:
         """Reveal Inspector outward when possible, otherwise resize internally."""
-        if visible == self.inspector.isVisible():
+        if visible == (not self.inspector.isHidden()):
             self._sync_inspector_controls(visible)
             return
 
         if visible:
             canvas_width = self.scientific_canvas.width()
+            desired_width = max(
+                self.inspector.minimumWidth(),
+                self._last_inspector_width,
+            )
             self._inspector_expansion_width = self._expand_for_inspector()
             self.inspector.show()
             self.splitter.setSizes(
                 [
                     max(self.workspace.width(), 200),
                     max(canvas_width, 320),
-                    INSPECTOR_PREFERRED_WIDTH,
+                    desired_width,
                 ],
             )
         else:
+            self._last_inspector_width = max(
+                self.inspector.minimumWidth(),
+                self.inspector.width(),
+            )
             self.inspector.hide()
             self._reverse_inspector_expansion()
         self._sync_inspector_controls(visible)
@@ -261,6 +334,10 @@ class MainWindow(QMainWindow):
         self.edit_mask_action = QAction("Edit Mask…", self)
         self.edit_mask_action.setEnabled(False)
         self.edit_mask_action.triggered.connect(self.enter_mask_task)
+
+        self.manual_fit_action = QAction("Manual Fit…", self)
+        self.manual_fit_action.setEnabled(False)
+        self.manual_fit_action.triggered.connect(self.show_manual_fit)
 
         self.toggle_inspector_action = QAction("Inspector", self)
         self.toggle_inspector_action.setCheckable(True)
@@ -321,6 +398,7 @@ class MainWindow(QMainWindow):
         analysis_menu = menu_bar.addMenu("&Analysis")
         assert analysis_menu is not None
         analysis_menu.addAction(self.edit_mask_action)
+        analysis_menu.addAction(self.manual_fit_action)
 
         view_menu = menu_bar.addMenu("&View")
         assert view_menu is not None
@@ -338,6 +416,7 @@ class MainWindow(QMainWindow):
     def _build_central_workspace(self) -> QWidget:
         central_workspace = QWidget()
         central_workspace.setObjectName("centralScientificWorkspace")
+        central_workspace.setMinimumWidth(320)
         central_header = QFrame()
         central_header.setObjectName("centralHeader")
         central_header.setFixedHeight(38)
@@ -345,6 +424,18 @@ class MainWindow(QMainWindow):
         self.project_context_label = QLabel()
         self.project_context_label.setObjectName("projectContextLabel")
         self.project_context_label.setVisible(False)
+
+        self.manual_fit_button = QToolButton()
+        self.manual_fit_button.setObjectName("centralManualFitButton")
+        self.manual_fit_button.setText("Manual Fit")
+        self.manual_fit_button.setCheckable(True)
+        self.manual_fit_button.setEnabled(False)
+        self.manual_fit_button.setToolTip(
+            "Open Single-Q Manual Fit for the currently open dataset",
+        )
+        self.manual_fit_button.clicked.connect(
+            lambda _checked=False: self.show_manual_fit(),
+        )
 
         self.inspector_button = QToolButton()
         self.inspector_button.setObjectName("inspectorButton")
@@ -357,6 +448,7 @@ class MainWindow(QMainWindow):
         header_layout.setSpacing(8)
         header_layout.addWidget(self.project_context_label)
         header_layout.addStretch(1)
+        header_layout.addWidget(self.manual_fit_button)
         header_layout.addWidget(self.inspector_button)
         self._central_header_layout = header_layout
 
@@ -512,14 +604,25 @@ class MainWindow(QMainWindow):
         inspector = QWidget()
         inspector.setObjectName("inspectorPanel")
         inspector.setMinimumWidth(220)
-        inspector.setMaximumWidth(480)
 
-        title = QLabel("Inspector")
-        title.setObjectName("inspectorTitle")
         self.inspector_context_label = QLabel("Open a dataset to view its details.")
         self.inspector_context_label.setObjectName("inspectorContextLabel")
         self.inspector_context_label.setProperty("secondary", True)
         self.inspector_context_label.setWordWrap(True)
+        self.inspector_dataset_toggle = QToolButton()
+        self.inspector_dataset_toggle.setObjectName("inspectorDatasetToggle")
+        self.inspector_dataset_toggle.setText("Dataset")
+        self.inspector_dataset_toggle.setCheckable(True)
+        self.inspector_dataset_toggle.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonTextBesideIcon,
+        )
+        self.inspector_dataset_toggle.setLayoutDirection(
+            Qt.LayoutDirection.RightToLeft,
+        )
+        self.inspector_dataset_toggle.toggled.connect(
+            self._set_inspector_dataset_expanded,
+        )
+        self.inspector_dataset_toggle.hide()
         self.inspector_source_title = QLabel("Source")
         self.inspector_source_title.setObjectName("inspectorSourceTitle")
         self.inspector_source_title.hide()
@@ -528,12 +631,78 @@ class MainWindow(QMainWindow):
         self.inspector_source_metadata_label.setProperty("secondary", True)
         self.inspector_source_metadata_label.setWordWrap(True)
         self.inspector_source_metadata_label.hide()
+        self.inspector_source_toggle = QToolButton()
+        self.inspector_source_toggle.setObjectName("inspectorSourceToggle")
+        self.inspector_source_toggle.setText("Source")
+        self.inspector_source_toggle.setCheckable(True)
+        self.inspector_source_toggle.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonTextBesideIcon,
+        )
+        self.inspector_source_toggle.setLayoutDirection(
+            Qt.LayoutDirection.RightToLeft,
+        )
+        self.inspector_source_toggle.toggled.connect(
+            self._set_inspector_source_expanded,
+        )
+        self.inspector_source_toggle.hide()
+        self._inspector_source_details_available = False
+        self.inspector_resolution_title = QLabel("Resolution")
+        self.inspector_resolution_title.setObjectName("inspectorResolutionTitle")
+        self.inspector_resolution_title.hide()
+        self.inspector_resolution_label = QLabel()
+        self.inspector_resolution_label.setObjectName("inspectorResolution")
+        self.inspector_resolution_label.setProperty("secondary", True)
+        self.inspector_resolution_label.setWordWrap(True)
+        self.inspector_resolution_label.hide()
+        self.inspector_resolution_button = QToolButton()
+        self.inspector_resolution_button.setObjectName("inspectorResolutionButton")
+        self.inspector_resolution_button.clicked.connect(
+            self.apply_resolution_for_sample
+        )
+        self.inspector_resolution_button.hide()
+        self.manual_fit_editor = ManualFitEditor()
+        self.manual_fit_editor.hide()
+        self.manual_fit_editor.component_interaction_requested.connect(
+            self._begin_manual_component_interaction,
+        )
+        self.manual_fit_editor.parameter_edit_requested.connect(
+            self._update_manual_parameter,
+        )
+        self.manual_fit_editor.parameter_focused.connect(
+            self._emphasize_manual_parameter,
+        )
+        self.manual_fit_editor.chain_requested.connect(self._handle_manual_chain)
+        self.manual_fit_editor.new_tie_group_requested.connect(
+            self._begin_new_manual_tie_group,
+        )
+        self.manual_fit_editor.join_tie_requested.connect(self._join_manual_tie)
+        self.manual_fit_editor.component_removal_requested.connect(
+            self._remove_manual_component,
+        )
+        self.manual_fit_editor.apply_resolution_requested.connect(
+            self.apply_resolution_for_sample,
+        )
+        self.manual_fit_editor.close_requested.connect(self.close_manual_fit)
 
         layout = QVBoxLayout(inspector)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(5)
-        layout.addWidget(title)
+        layout.addWidget(self.manual_fit_editor)
+        layout.addWidget(self.inspector_resolution_title)
+        layout.addWidget(self.inspector_resolution_label)
+        layout.addWidget(
+            self.inspector_resolution_button,
+            alignment=Qt.AlignmentFlag.AlignLeft,
+        )
+        layout.addWidget(
+            self.inspector_dataset_toggle,
+            alignment=Qt.AlignmentFlag.AlignLeft,
+        )
         layout.addWidget(self.inspector_context_label)
+        layout.addWidget(
+            self.inspector_source_toggle,
+            alignment=Qt.AlignmentFlag.AlignLeft,
+        )
         layout.addWidget(self.inspector_source_title)
         layout.addWidget(self.inspector_source_metadata_label)
         layout.addStretch(1)
@@ -565,6 +734,89 @@ class MainWindow(QMainWindow):
         self.resize(restored_width, self.height())
         self._inspector_expansion_width = 0
 
+    def _remember_inspector_width(self, _position: int, _index: int) -> None:
+        """Retain the user's splitter width across ordinary visibility changes."""
+
+        if not self.inspector.isHidden():
+            self._last_inspector_width = max(
+                self.inspector.minimumWidth(),
+                self.inspector.width(),
+            )
+
+    def _set_manual_inspector_mode(self, active: bool) -> None:
+        """Prioritize the active Manual task while retaining collapsible context."""
+
+        self.inspector_dataset_toggle.setVisible(active)
+        self.inspector_source_toggle.setVisible(active)
+        if active:
+            self.inspector_dataset_toggle.setChecked(False)
+            self.inspector_source_toggle.setChecked(False)
+            self.inspector_context_label.hide()
+            self.inspector_source_title.hide()
+            self.inspector_source_metadata_label.hide()
+            self.inspector_source_toggle.setEnabled(
+                self._inspector_source_details_available,
+            )
+            return
+        self.inspector_context_label.show()
+        self.inspector_source_title.setVisible(
+            self._inspector_source_details_available,
+        )
+        self.inspector_source_metadata_label.setVisible(
+            self._inspector_source_details_available,
+        )
+
+    def _set_inspector_dataset_expanded(self, expanded: bool) -> None:
+        active = self._manual_draft is not None
+        apply_disclosure_icon(
+            self.inspector_dataset_toggle,
+            expanded=expanded,
+            color=tokens_for(
+                self._appearance_controller.current_scheme,
+            ).text_secondary,
+        )
+        self.inspector_context_label.setVisible(active and expanded)
+
+    def _set_inspector_source_expanded(self, expanded: bool) -> None:
+        active = self._manual_draft is not None
+        apply_disclosure_icon(
+            self.inspector_source_toggle,
+            expanded=expanded,
+            color=tokens_for(
+                self._appearance_controller.current_scheme,
+            ).text_secondary,
+        )
+        self.inspector_source_metadata_label.setVisible(
+            active and expanded and self._inspector_source_details_available,
+        )
+
+    def _sync_inspector_context_visibility(self) -> None:
+        """Respect Manual-task disclosure without changing stored context text."""
+
+        active = self._manual_draft is not None
+        self.inspector_dataset_toggle.setVisible(active)
+        self.inspector_source_toggle.setVisible(active)
+        self.inspector_source_toggle.setEnabled(
+            self._inspector_source_details_available,
+        )
+        if active:
+            self.inspector_context_label.setVisible(
+                self.inspector_dataset_toggle.isChecked(),
+            )
+            self.inspector_source_title.hide()
+            self.inspector_source_metadata_label.setVisible(
+                self.inspector_source_toggle.isChecked()
+                and self._inspector_source_details_available,
+            )
+            return
+        self.inspector_context_label.show()
+        self.inspector_source_title.setVisible(
+            self._inspector_source_details_available,
+        )
+        self.inspector_source_metadata_label.setVisible(
+            self._inspector_source_details_available,
+        )
+
     def _sync_inspector_controls(self, visible: bool) -> None:
         action_blocker = QSignalBlocker(self.toggle_inspector_action)
         self.toggle_inspector_action.setChecked(visible)
@@ -584,6 +836,99 @@ class MainWindow(QMainWindow):
     def _set_active_project(self, project: ProjectState) -> None:
         self._active_project = project
         self.import_data_action.setEnabled(True)
+
+    def _workflow_project_for(self, project: ProjectState) -> WorkflowProject:
+        """Synchronize small GUI identity state into the immutable workflow Project."""
+
+        workflow = self._workflow_projects.get(project)
+        if workflow is None:
+            workflow = create_project(project.name)
+        states = {state.workflow_dataset_id: state for state in project.datasets}
+        for reference in tuple(workflow.datasets):
+            state = states.pop(reference.dataset_id, None)
+            if state is None:
+                workflow = remove_project_dataset(workflow, reference)
+            elif reference.dataset is not state.dataset:
+                workflow, _ = replace_project_dataset(
+                    workflow,
+                    reference,
+                    state.dataset,
+                )
+        added_states = tuple(states.values())
+        for state in added_states:
+            workflow, _ = add_project_dataset(
+                workflow,
+                state.dataset,
+                dataset_id=state.workflow_dataset_id,
+            )
+        # A selection enters workflow state only with a newly added dataset or an
+        # explicit mask-baseline update. Dataset replacement owns preservation or
+        # invalidation; recommitting GUI-rebound state here would resurrect a
+        # selection intentionally invalidated by unit/scientific replacement.
+        for state in added_states:
+            reference = self._workflow_dataset(workflow, state)
+            selection = None if state.auto_mask is None else state.auto_mask.selection
+            if (
+                reference.dataset.role is SpectrumRole.SAMPLE
+                and selection is not None
+                and selection.dataset is reference.dataset
+            ):
+                workflow = commit_fitting_selection(workflow, reference, selection)
+        self._workflow_projects[project] = workflow
+        return workflow
+
+    def _manual_context_uses_dataset(
+        self,
+        project: ProjectState,
+        dataset: DatasetState,
+    ) -> bool:
+        """Return whether a dataset participates in the open Manual context."""
+
+        if self._manual_owner is None or self._manual_owner[0] is not project:
+            return False
+        sample_id = self._manual_owner[1]
+        if dataset.workflow_dataset_id == sample_id:
+            return True
+        workflow = self._workflow_projects.get(project)
+        return workflow is not None and any(
+            item.sample_id == sample_id
+            and item.resolution_id == dataset.workflow_dataset_id
+            for item in workflow.resolution_associations
+        )
+
+    def _commit_explicit_fitting_selection(
+        self,
+        project: ProjectState,
+        dataset: DatasetState,
+    ) -> None:
+        """Commit only a newly produced AutoMask/Mask baseline."""
+
+        workflow = self._workflow_project_for(project)
+        reference = self._workflow_dataset(workflow, dataset)
+        selection = None if dataset.auto_mask is None else dataset.auto_mask.selection
+        if (
+            reference.dataset.role is SpectrumRole.SAMPLE
+            and selection is not None
+            and selection.dataset is reference.dataset
+        ):
+            self._workflow_projects[project] = commit_fitting_selection(
+                workflow,
+                reference,
+                selection,
+            )
+
+    @staticmethod
+    def _workflow_dataset(
+        workflow: WorkflowProject,
+        state: DatasetState,
+    ) -> ProjectDataset:
+        """Resolve a stable GUI dataset identity through the public workflow Project."""
+
+        return next(
+            item
+            for item in workflow.datasets
+            if item.dataset_id == state.workflow_dataset_id
+        )
 
     def import_data(
         self,
@@ -715,6 +1060,11 @@ class MainWindow(QMainWindow):
         """Open an imported Workspace dataset at Group 1."""
 
         self.workspace.validate_dataset_membership(project, dataset)
+        if self._manual_draft is not None and self._manual_owner != (
+            project,
+            dataset.workflow_dataset_id,
+        ):
+            self.close_manual_fit()
         if (
             project is not self._open_project or dataset is not self._open_dataset
         ) and not self._resolve_mask_task_transition(mask_task_decision):
@@ -729,9 +1079,470 @@ class MainWindow(QMainWindow):
         self.workspace.set_active_dataset(project, dataset)
         self.set_scientific_figure_visible(True)
         self.edit_mask_action.setEnabled(dataset.mask_editable)
+        self._sync_manual_fit_entry()
         self._refresh_context_label()
         self._refresh_inspector_context()
         return True
+
+    def show_manual_fit(
+        self,
+        project: ProjectState | None = None,
+        dataset: DatasetState | None = None,
+    ) -> None:
+        """Open the group-local Manual Fit draft without requiring a Resolution."""
+
+        target_project, target_dataset = self._editing_target(project, dataset)
+        if target_project is None or target_dataset is None:
+            return
+        if (
+            target_project is not self._open_project
+            or target_dataset is not self._open_dataset
+        ) and not self.open_dataset(target_project, target_dataset):
+            return
+        owner = (target_project, target_dataset.workflow_dataset_id)
+        workflow = self._workflow_project_for(target_project)
+        if self._manual_draft is None or self._manual_owner != owner:
+            try:
+                self._manual_draft = open_manual_fit_draft(
+                    workflow,
+                    self._workflow_dataset(workflow, target_dataset),
+                )
+            except WorkflowError as error:
+                self._sync_manual_fit_entry()
+                self._show_workflow_error("Manual Fit", error)
+                return
+            self._manual_owner = owner
+        self.set_inspector_visible(True)
+        self.manual_fit_editor.show()
+        self._set_manual_inspector_mode(True)
+        self._sync_manual_fit_entry()
+        self._refresh_manual_fit()
+
+    def close_manual_fit(self) -> None:
+        """Leave the local editor and discard only its unfinished interaction mode."""
+
+        self._discard_pending_manual_interaction()
+        self._manual_preview = None
+        self.dataset_view.set_manual_preview(None)
+        self._manual_draft = None
+        self._manual_owner = None
+        if hasattr(self, "manual_fit_editor"):
+            self.manual_fit_editor.hide()
+            self._set_manual_inspector_mode(False)
+            self._sync_manual_fit_entry()
+            self._refresh_inspector_context()
+
+    def apply_resolution_for_sample(
+        self,
+        project: ProjectState | None = None,
+        dataset: DatasetState | None = None,
+        resolution: DatasetState | None = None,
+        *,
+        replace_confirmed: bool | None = None,
+    ) -> bool:
+        """Associate one selected Resolution through the transactional workflow seam."""
+
+        self._discard_pending_manual_interaction()
+        target_project, target_dataset = self._editing_target(project, dataset)
+        if (
+            target_project is None
+            or target_dataset is None
+            or target_dataset.dataset.role is not SpectrumRole.SAMPLE
+        ):
+            return False
+        candidates = tuple(
+            item
+            for item in target_project.datasets
+            if item.dataset.role is SpectrumRole.RESOLUTION
+        )
+        candidate = resolution
+        if candidate is None:
+            if not candidates:
+                show_message_dialog(
+                    self,
+                    "Apply Resolution",
+                    "Add or mark a reduced dataset as Resolution first.",
+                )
+                return False
+            names = tuple(item.name for item in candidates)
+            choice, accepted = QInputDialog.getItem(
+                self,
+                "Apply Resolution",
+                "Resolution:",
+                names,
+                editable=False,
+            )
+            if not accepted:
+                return False
+            candidate = candidates[names.index(choice)]
+        if candidate not in candidates:
+            return False
+        workflow = self._workflow_project_for(target_project)
+        sample_reference = self._workflow_dataset(workflow, target_dataset)
+        resolution_reference = self._workflow_dataset(workflow, candidate)
+        preflight = preflight_apply_resolution(
+            workflow,
+            sample_reference,
+            resolution_reference,
+        )
+        confirmed = bool(replace_confirmed)
+        if preflight.replacement_confirmation_required and replace_confirmed is None:
+            existing = self._dataset_name_for_workflow_id(
+                target_project,
+                preflight.existing_resolution.dataset_id
+                if preflight.existing_resolution is not None
+                else "",
+            )
+            confirmed = confirm_dialog(
+                self,
+                "Replace Resolution",
+                f"{existing} is currently applied. Replace it with {candidate.name}?",
+                accept_text="Replace Resolution",
+            )
+        if preflight.replacement_confirmation_required and not confirmed:
+            return False
+        try:
+            self._workflow_projects[target_project] = apply_resolution(
+                workflow,
+                sample_reference,
+                resolution_reference,
+                replace_confirmed=confirmed,
+            )
+        except WorkflowError as error:
+            self._show_workflow_error("Apply Resolution", error)
+            return False
+        self._refresh_inspector_context()
+        self._refresh_manual_fit()
+        return True
+
+    def _begin_manual_component_interaction(self, kind: ManualComponentKind) -> None:
+        if self._manual_draft is None:
+            return
+        group_index = self.dataset_view.current_group_index
+        self._pending_manual_interaction = begin_component_interaction(
+            self._manual_draft,
+            group_index,
+            kind,
+        )
+        self.dataset_view.begin_manual_component_interaction(kind)
+
+    def _cancel_manual_component_interaction(self) -> None:
+        """Forget pending geometry before another task can commit it."""
+
+        self._pending_manual_interaction = None
+        self.dataset_view.set_manual_pending_preview(None)
+
+    def _discard_pending_manual_interaction(self) -> None:
+        """Cancel both canvas geometry and its matching workflow token."""
+
+        self.dataset_view.cancel_manual_component_interaction()
+        self._pending_manual_interaction = None
+
+    def _complete_manual_component_interaction(
+        self,
+        kind: ManualComponentKind,
+        hints: dict[str, float],
+    ) -> None:
+        pending = self._pending_manual_interaction
+        if (
+            self._manual_draft is None
+            or pending is None
+            or pending.component_kind is not kind
+        ):
+            return
+        if self._open_project is None:
+            return
+        workflow = self._workflow_project_for(self._open_project)
+        try:
+            if kind is ManualComponentKind.ELASTIC:
+                updated = complete_elastic_interaction(
+                    workflow,
+                    self._manual_draft,
+                    pending,
+                    component_peak_center=hints["component_peak_center"],
+                    component_peak_height=hints["component_peak_height"],
+                )
+            elif kind is ManualComponentKind.LORENTZIAN:
+                updated = complete_lorentzian_interaction(
+                    workflow,
+                    self._manual_draft,
+                    pending,
+                    component_peak_center=hints["component_peak_center"],
+                    component_peak_height=hints["component_peak_height"],
+                    width_endpoint_energy=hints["width_endpoint_energy"],
+                )
+            else:
+                updated = complete_background_interaction(
+                    self._manual_draft,
+                    pending,
+                    first_energy=hints["first_energy"],
+                    first_height=hints["first_height"],
+                    second_energy=hints["second_energy"],
+                    second_height=hints["second_height"],
+                )
+        except WorkflowError as error:
+            self._show_workflow_error("Add Manual Function", error)
+        else:
+            self._manual_draft = updated
+        finally:
+            self._pending_manual_interaction = None
+        self._refresh_manual_fit()
+
+    def _preview_manual_component_interaction(
+        self,
+        kind: ManualComponentKind,
+        hints: dict[str, float] | None,
+    ) -> None:
+        """Render only the public workflow's transient scientific evaluation."""
+
+        pending = self._pending_manual_interaction
+        if (
+            hints is None
+            or self._manual_draft is None
+            or pending is None
+            or pending.component_kind is not kind
+            or self._open_project is None
+            or self._open_dataset is None
+        ):
+            self.dataset_view.set_manual_pending_preview(None)
+            return
+        workflow = self._workflow_project_for(self._open_project)
+        display_energy = self._open_dataset.dataset.spectra[pending.group_index].energy
+        try:
+            if kind is ManualComponentKind.ELASTIC:
+                preview = preview_pending_elastic_interaction(
+                    workflow,
+                    self._manual_draft,
+                    pending,
+                    component_peak_center=hints["component_peak_center"],
+                    component_peak_height=hints["component_peak_height"],
+                    display_energy=display_energy,
+                )
+            elif kind is ManualComponentKind.LORENTZIAN:
+                preview = preview_pending_lorentzian_interaction(
+                    workflow,
+                    self._manual_draft,
+                    pending,
+                    component_peak_center=hints["component_peak_center"],
+                    component_peak_height=hints["component_peak_height"],
+                    width_endpoint_energy=hints["width_endpoint_energy"],
+                    display_energy=display_energy,
+                )
+            else:
+                preview = preview_pending_background_interaction(
+                    workflow,
+                    self._manual_draft,
+                    pending,
+                    first_energy=hints["first_energy"],
+                    first_height=hints["first_height"],
+                    second_energy=hints["second_energy"],
+                    second_height=hints["second_height"],
+                    display_energy=display_energy,
+                )
+        except WorkflowError:
+            self.dataset_view.set_manual_pending_preview(None)
+            return
+        self.dataset_view.set_manual_pending_preview(preview.evaluation)
+
+    def _update_manual_parameter(
+        self,
+        reference: ParameterReference,
+        edit: ManualParameterEdit,
+    ) -> None:
+        self._discard_pending_manual_interaction()
+        if self._manual_draft is None:
+            return
+        try:
+            self._manual_draft = update_manual_parameter(
+                self._manual_draft,
+                self.dataset_view.current_group_index,
+                reference,
+                edit,
+            )
+        except WorkflowError as error:
+            self._show_workflow_error("Manual Fit", error)
+        self._refresh_manual_fit()
+
+    def _handle_manual_chain(self, reference: ParameterReference) -> None:
+        self._discard_pending_manual_interaction()
+        if self._manual_draft is None:
+            return
+        group_index = self.dataset_view.current_group_index
+        model = self._manual_draft.setup(group_index).model
+        if model is None:
+            return
+        try:
+            if model.tie_for(reference) is not None:
+                self._manual_draft = untie_parameter(
+                    self._manual_draft,
+                    group_index,
+                    reference,
+                )
+            else:
+                same_family = tuple(
+                    group
+                    for group in model.parameter_ties
+                    if group.members[0].family is reference.family
+                )
+                if same_family:
+                    self._manual_draft = join_parameter_tie(
+                        self._manual_draft,
+                        group_index,
+                        same_family[0].group_id,
+                        reference,
+                    )
+                else:
+                    self._manual_draft = create_parameter_tie(
+                        self._manual_draft,
+                        group_index,
+                        (reference,),
+                        source_member=reference,
+                    )
+        except WorkflowError as error:
+            self._show_workflow_error("Manual Fit", error)
+        self._refresh_manual_fit()
+
+    def _begin_new_manual_tie_group(self, reference: ParameterReference) -> None:
+        self._discard_pending_manual_interaction()
+        if self._manual_draft is None:
+            return
+        try:
+            self._manual_draft = create_parameter_tie(
+                self._manual_draft,
+                self.dataset_view.current_group_index,
+                (reference,),
+                source_member=reference,
+            )
+        except WorkflowError as error:
+            self._show_workflow_error("Manual Fit", error)
+        self._refresh_manual_fit()
+
+    def _join_manual_tie(self, reference: ParameterReference, group_id: str) -> None:
+        self._discard_pending_manual_interaction()
+        if self._manual_draft is None:
+            return
+        try:
+            self._manual_draft = join_parameter_tie(
+                self._manual_draft,
+                self.dataset_view.current_group_index,
+                group_id,
+                reference,
+            )
+        except WorkflowError as error:
+            self._show_workflow_error("Manual Fit", error)
+        self._refresh_manual_fit()
+
+    def _remove_manual_component(self, identity: ComponentIdentity) -> None:
+        self._discard_pending_manual_interaction()
+        if self._manual_draft is None:
+            return
+        try:
+            self._manual_draft = remove_manual_component(
+                self._manual_draft,
+                self.dataset_view.current_group_index,
+                identity,
+            )
+        except WorkflowError as error:
+            self._show_workflow_error("Manual Fit", error)
+        self._refresh_manual_fit()
+
+    def _on_manual_group_changed(self, _group_index: int) -> None:
+        """Keep independently stored group setups intact while the viewer navigates."""
+
+        self.dataset_view.cancel_manual_component_interaction()
+        self._refresh_manual_fit()
+
+    def _refresh_manual_fit(self) -> None:
+        if (
+            self._manual_draft is None
+            or self._open_project is None
+            or self._open_dataset is None
+            or self._manual_owner
+            != (self._open_project, self._open_dataset.workflow_dataset_id)
+        ):
+            return
+        workflow = self._workflow_project_for(self._open_project)
+        group_index = self.dataset_view.current_group_index
+        readiness = manual_workflow_readiness(
+            workflow,
+            self._manual_draft,
+            group_index,
+        )
+        model = self._manual_draft.setup(group_index).model
+        spectrum = self._open_dataset.dataset.spectra[group_index]
+        metadata: tuple[ParameterMetadata, ...] = ()
+        if model is not None and readiness.context is not None:
+            try:
+                materialized = materialize_manual_setup(
+                    workflow,
+                    self._manual_draft,
+                    group_index,
+                )
+            except WorkflowError:
+                pass
+            else:
+                metadata = manual_parameter_metadata(
+                    materialized.fit_model,
+                    energy_unit=spectrum.energy_unit,
+                    intensity_unit=spectrum.intensity_unit,
+                )
+        self.manual_fit_editor.set_state(
+            model,
+            metadata,
+            readiness,
+        )
+        try:
+            preview = (
+                None
+                if readiness.context is None or model is None
+                else preview_manual_fit(
+                    workflow,
+                    self._manual_draft,
+                    group_index,
+                    display_energy=spectrum.energy,
+                )
+            )
+        except WorkflowError:
+            preview = None
+        self._manual_preview = preview
+        self.dataset_view.set_manual_preview(preview)
+
+    def _emphasize_manual_parameter(self, reference: ParameterReference) -> None:
+        if self._manual_draft is None:
+            return
+        model = self._manual_draft.setup(self.dataset_view.current_group_index).model
+        if model is None:
+            return
+        tie = model.tie_for(reference)
+        references = (reference,) if tie is None else tie.members
+        components = frozenset(item.component for item in references)
+        self.dataset_view.set_manual_preview(
+            self._manual_preview,
+            emphasized_components=components,
+        )
+
+    def _dataset_name_for_workflow_id(
+        self,
+        project: ProjectState,
+        dataset_id: str,
+    ) -> str:
+        return next(
+            (
+                item.name
+                for item in project.datasets
+                if item.workflow_dataset_id == dataset_id
+            ),
+            "Resolution",
+        )
+
+    def _show_workflow_error(self, title: str, error: WorkflowError) -> None:
+        """Present typed workflow failures without parsing them for control flow."""
+
+        show_message_dialog(
+            self,
+            title,
+            "\n".join(item.message for item in error.diagnostics),
+        )
 
     def show_units_editor(
         self,
@@ -743,6 +1554,7 @@ class MainWindow(QMainWindow):
         target_project, target_dataset = self._editing_target(project, dataset)
         if target_project is None or target_dataset is None:
             return None
+        self._discard_pending_manual_interaction()
         dialog = SourceUnitsDialog(target_dataset.dataset, self)
         dialog.set_apply_handler(
             lambda energy, intensity: self._apply_source_units(
@@ -773,6 +1585,7 @@ class MainWindow(QMainWindow):
             return False
         if self._open_project is project:
             self._clear_open_context()
+        self._workflow_projects.pop(project, None)
         self.workspace.remove_project(project)
         return True
 
@@ -796,6 +1609,7 @@ class MainWindow(QMainWindow):
             )
             if not accepted:
                 return False
+        manual_context_affected = self._manual_context_uses_dataset(project, dataset)
         removing_open_dataset = (
             self._open_project is project and self._open_dataset is dataset
         )
@@ -808,7 +1622,18 @@ class MainWindow(QMainWindow):
             dataset = self._open_dataset
         if removing_open_dataset:
             self._clear_open_context()
+        elif manual_context_affected:
+            self._discard_pending_manual_interaction()
+        workflow = self._workflow_projects.get(project)
+        if workflow is not None:
+            self._workflow_projects[project] = remove_project_dataset(
+                workflow,
+                self._workflow_dataset(workflow, dataset),
+            )
         self.workspace.remove_dataset(project, dataset)
+        if manual_context_affected and not removing_open_dataset:
+            self._refresh_inspector_context()
+            self._refresh_manual_fit()
         return True
 
     def remove_q_method(
@@ -845,12 +1670,14 @@ class MainWindow(QMainWindow):
         """Clear every view reference before its Workspace object is removed."""
 
         self._teardown_mask_task()
+        self.close_manual_fit()
         self.dataset_view.set_mask_edit_available(False)
         self.dataset_view.clear_dataset()
         self.workspace.clear_active_dataset()
         self._open_project = None
         self._open_dataset = None
         self.edit_mask_action.setEnabled(False)
+        self._sync_manual_fit_entry()
         self.set_scientific_figure_visible(False)
         self._refresh_context_label()
         self._refresh_inspector_context()
@@ -865,6 +1692,7 @@ class MainWindow(QMainWindow):
         target_project, target_dataset = self._editing_target(project, dataset)
         if target_project is None or target_dataset is None:
             return
+        self._discard_pending_manual_interaction()
         if (
             target_project is not self._open_project
             or target_dataset is not self._open_dataset
@@ -1087,6 +1915,7 @@ class MainWindow(QMainWindow):
     def enter_mask_task(self, checked: bool = True) -> None:
         """Enter the familiar viewer-based Mask task with a local draft."""
 
+        self._discard_pending_manual_interaction()
         if not checked and self._mask_draft is not None:
             return
         if self._mask_draft is not None:
@@ -1244,6 +2073,46 @@ class MainWindow(QMainWindow):
         return (
             project or self._open_project,
             dataset or self._open_dataset,
+        )
+
+    def _manual_fit_capability(
+        self,
+        project: ProjectState,
+        dataset: DatasetState,
+    ) -> tuple[bool, str]:
+        """Ask the public workflow boundary whether this dataset can own a draft."""
+
+        workflow = self._workflow_project_for(project)
+        try:
+            open_manual_fit_draft(
+                workflow,
+                self._workflow_dataset(workflow, dataset),
+            )
+        except WorkflowError as error:
+            return False, "\n".join(item.message for item in error.diagnostics)
+        return True, "Open Single-Q Manual Fit for the currently open dataset"
+
+    def _sync_manual_fit_entry(self) -> None:
+        """Keep menu and central task entry bound only to the open dataset."""
+
+        available = False
+        tooltip = "Open a reduced dataset to use Manual Fit"
+        if self._open_project is not None and self._open_dataset is not None:
+            available, tooltip = self._manual_fit_capability(
+                self._open_project,
+                self._open_dataset,
+            )
+        self.manual_fit_action.setEnabled(available)
+        if not hasattr(self, "manual_fit_button"):
+            return
+        self.manual_fit_button.setEnabled(available)
+        self.manual_fit_button.setToolTip(tooltip)
+        self.manual_fit_button.setChecked(
+            self._manual_draft is not None
+            and self._open_project is not None
+            and self._open_dataset is not None
+            and self._manual_owner
+            == (self._open_project, self._open_dataset.workflow_dataset_id),
         )
 
     def _set_mask_tool(self, tool: str, enabled: bool) -> None:
@@ -1438,8 +2307,13 @@ class MainWindow(QMainWindow):
     def _refresh_inspector_context(self, _group_index: int | None = None) -> None:
         if self._open_project is None or self._open_dataset is None:
             self.inspector_context_label.setText("Open a dataset to view its details.")
+            self._inspector_source_details_available = False
             self.inspector_source_title.hide()
             self.inspector_source_metadata_label.hide()
+            self.inspector_resolution_title.hide()
+            self.inspector_resolution_label.hide()
+            self.inspector_resolution_button.hide()
+            self._sync_inspector_context_visibility()
             return
         role = (
             "Resolution data"
@@ -1463,36 +2337,70 @@ class MainWindow(QMainWindow):
         if metadata is None:
             self.inspector_source_title.hide()
             self.inspector_source_metadata_label.hide()
-            return
-        details = tuple(
-            f"{label}: {_compact_inspector_value(str(value))}"
-            for label, value in (
-                ("File", metadata.source_filename),
-                ("Instrument", metadata.instrument),
-                ("Sample", metadata.sample),
-                ("Title", metadata.title),
-                (
-                    "Temperature",
-                    None
-                    if metadata.temperature_kelvin is None
-                    else f"{metadata.temperature_kelvin:g} K",
-                ),
-                (
-                    "Wavelength",
-                    None
-                    if metadata.wavelength_angstrom is None
-                    else f"{metadata.wavelength_angstrom:g} Å",
-                ),
+            details: tuple[str, ...] = ()
+        else:
+            details = tuple(
+                f"{label}: {_compact_inspector_value(str(value))}"
+                for label, value in (
+                    ("File", metadata.source_filename),
+                    ("Instrument", metadata.instrument),
+                    ("Sample", metadata.sample),
+                    ("Title", metadata.title),
+                    (
+                        "Temperature",
+                        None
+                        if metadata.temperature_kelvin is None
+                        else f"{metadata.temperature_kelvin:g} K",
+                    ),
+                    (
+                        "Wavelength",
+                        None
+                        if metadata.wavelength_angstrom is None
+                        else f"{metadata.wavelength_angstrom:g} Å",
+                    ),
+                )
+                if value is not None
             )
-            if value is not None
-        )
         if details:
+            self._inspector_source_details_available = True
             self.inspector_source_title.show()
             self.inspector_source_metadata_label.setText("\n".join(details))
             self.inspector_source_metadata_label.show()
         else:
+            self._inspector_source_details_available = False
             self.inspector_source_title.hide()
             self.inspector_source_metadata_label.hide()
+        if self._open_dataset.dataset.role is not SpectrumRole.SAMPLE:
+            self.inspector_resolution_title.hide()
+            self.inspector_resolution_label.hide()
+            self.inspector_resolution_button.hide()
+            self._sync_inspector_context_visibility()
+            return
+        workflow = self._workflow_project_for(self._open_project)
+        sample = self._workflow_dataset(workflow, self._open_dataset)
+        association = next(
+            (
+                item
+                for item in workflow.resolution_associations
+                if item.sample_id == sample.dataset_id
+            ),
+            None,
+        )
+        self.inspector_resolution_title.show()
+        self.inspector_resolution_label.show()
+        self.inspector_resolution_button.show()
+        if association is None:
+            self.inspector_resolution_label.setText("No Resolution applied")
+            self.inspector_resolution_button.setText("Apply Resolution…")
+        else:
+            self.inspector_resolution_label.setText(
+                self._dataset_name_for_workflow_id(
+                    self._open_project,
+                    association.resolution_id,
+                ),
+            )
+            self.inspector_resolution_button.setText("Replace Resolution…")
+        self._sync_inspector_context_visibility()
 
     def _prompt_import_files(self) -> None:
         """Choose candidate Data or standalone Q Method files for a Project."""
@@ -1630,15 +2538,18 @@ class MainWindow(QMainWindow):
 
     def _apply_workspace_state_colors(self) -> None:
         tokens = tokens_for(self._appearance_controller.current_scheme)
+        indicators = indicator_tokens_for(
+            self._appearance_controller.current_scheme,
+        )
         self.workspace.set_tree_state_colors(
             active_background=tokens.surface_selected,
             selection_background=tokens.surface_hover,
         )
         self.workspace.set_dataset_state_colors(
-            required=tokens.danger,
-            ready=tokens.warning,
-            partially_fit=tokens.accent,
-            fully_fit=tokens.success,
+            required=indicators.error,
+            ready=indicators.warning,
+            partially_fit=indicators.accent,
+            fully_fit=indicators.success,
             complete=tokens.text_secondary,
         )
 
@@ -1656,6 +2567,25 @@ class MainWindow(QMainWindow):
 
         color = tokens_for(self._appearance_controller.current_scheme).text_secondary
         self.workspace.set_control_icon_color(color)
+        indicators = indicator_tokens_for(
+            self._appearance_controller.current_scheme,
+        )
+        self.manual_fit_editor.set_icon_colors(
+            neutral=color,
+            accent=indicators.accent,
+            amber=indicators.warning,
+            violet=indicators.violet,
+        )
+        apply_disclosure_icon(
+            self.inspector_dataset_toggle,
+            expanded=self.inspector_dataset_toggle.isChecked(),
+            color=color,
+        )
+        apply_disclosure_icon(
+            self.inspector_source_toggle,
+            expanded=self.inspector_source_toggle.isChecked(),
+            color=color,
+        )
         self.mask_undo_button.setIcon(load_icon(IconName.UNDO, color))
         self.mask_redo_button.setIcon(load_icon(IconName.REDO, color))
 
@@ -1665,6 +2595,10 @@ class MainWindow(QMainWindow):
         previous: DatasetState,
         current: DatasetState,
     ) -> None:
+        manual_context_affected = self._manual_context_uses_dataset(project, previous)
+        self._workflow_project_for(project)
+        if manual_context_affected:
+            self._discard_pending_manual_interaction()
         if self._open_project is project and self._open_dataset is previous:
             self._open_dataset = current
             self.dataset_view.replace_dataset(current.dataset)
@@ -1673,8 +2607,25 @@ class MainWindow(QMainWindow):
             )
             self.dataset_view.set_mask_edit_available(current.mask_editable)
             self.edit_mask_action.setEnabled(current.mask_editable)
+            available, _tooltip = self._manual_fit_capability(project, current)
+            if not available:
+                self.close_manual_fit()
+            self._sync_manual_fit_entry()
             self._refresh_context_label()
             self._refresh_inspector_context()
+            self._refresh_manual_fit()
+        elif manual_context_affected:
+            self._refresh_inspector_context()
+            self._refresh_manual_fit()
+
+    def _on_dataset_added(
+        self,
+        project: ProjectState,
+        _dataset: DatasetState,
+    ) -> None:
+        """Register imported dataset identity before any later replacement."""
+
+        self._workflow_project_for(project)
 
     def _on_dataset_updated(
         self,
@@ -1682,6 +2633,15 @@ class MainWindow(QMainWindow):
         previous: DatasetState,
         current: DatasetState,
     ) -> None:
+        manual_context_affected = self._manual_context_uses_dataset(project, previous)
+        self._workflow_project_for(project)
+        if (
+            current.dataset is previous.dataset
+            and current.auto_mask is not previous.auto_mask
+        ):
+            self._commit_explicit_fitting_selection(project, current)
+        if manual_context_affected:
+            self._discard_pending_manual_interaction()
         if self._open_project is project and self._open_dataset is previous:
             self._open_dataset = current
             if (
@@ -1701,6 +2661,10 @@ class MainWindow(QMainWindow):
             self.edit_mask_action.setEnabled(current.mask_editable)
             self._refresh_context_label()
             self._refresh_inspector_context()
+            self._refresh_manual_fit()
+        elif manual_context_affected:
+            self._refresh_inspector_context()
+            self._refresh_manual_fit()
 
     def _on_dataset_renamed(
         self,

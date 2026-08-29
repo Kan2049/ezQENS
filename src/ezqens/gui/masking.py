@@ -18,6 +18,7 @@ from ezqens.preprocessing import (
     SpectrumPaddingResult,
     detect_edge_padding,
 )
+from ezqens.workflow import measured_point_correspondence_exactly_unchanged
 
 BoolArray = npt.NDArray[np.bool_]
 
@@ -56,6 +57,18 @@ def rebind_auto_mask_state(
             padding=state.padding,
             selection=None,
             diagnostic=state.diagnostic,
+        )
+    if not measured_point_correspondence_exactly_unchanged(
+        state.selection.dataset,
+        dataset,
+    ):
+        return AutoMaskState(
+            padding=state.padding,
+            selection=None,
+            diagnostic=(
+                "measured spectra changed; AutoMask and fitting selection must be "
+                "initialized again"
+            ),
         )
     try:
         selection = FittingSelection(

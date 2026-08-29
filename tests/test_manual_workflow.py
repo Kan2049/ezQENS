@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import cast
@@ -34,6 +35,7 @@ from ezqens.workflow import (
     ManualModelState,
     ManualParameterEdit,
     ManualParameterTieState,
+    PendingManualComponentPreview,
     ProjectDataset,
     WorkflowDiagnosticCode,
     WorkflowError,
@@ -56,6 +58,9 @@ from ezqens.workflow import (
     open_manual_fit_draft,
     preflight_apply_resolution,
     preview_manual_fit,
+    preview_pending_background_interaction,
+    preview_pending_elastic_interaction,
+    preview_pending_lorentzian_interaction,
     remove_manual_component,
     remove_project_dataset,
     replace_project_dataset,
@@ -549,7 +554,7 @@ def test_empty_manual_draft_opens_without_resolution_and_is_not_runnable() -> No
     )
 
 
-def test_add_command_changes_no_model_and_background_completion_creates_b1() -> None:
+def test_background_completion_without_resolution_creates_b1() -> None:
     project, sample, _ = configured_project(apply=False)
     draft = open_manual_fit_draft(project, sample)
 
@@ -574,6 +579,37 @@ def test_add_command_changes_no_model_and_background_completion_creates_b1() -> 
     assert model.b1 is not None
     assert model.b1.current_value == pytest.approx(0.0)
     assert model.b1.free
+
+
+def test_committed_model_preview_failure_is_a_structured_workflow_error() -> None:
+    project, sample, _ = configured_project()
+    draft = open_manual_fit_draft(project, sample)
+    pending = begin_component_interaction(
+        draft,
+        0,
+        ManualComponentKind.BACKGROUND,
+    )
+    completed = complete_background_interaction(
+        draft,
+        pending,
+        first_energy=-0.2,
+        first_height=0.1,
+        second_energy=0.2,
+        second_height=0.1,
+    )
+
+    with pytest.raises(WorkflowError) as failed:
+        preview_manual_fit(
+            project,
+            completed,
+            0,
+            display_energy=np.array([-0.2, np.nan, 0.2]),
+        )
+
+    assert failed.value.diagnostics[0].code is (
+        WorkflowDiagnosticCode.MANUAL_PREVIEW_FAILED
+    )
+    assert completed.setup(0).model is not None
 
 
 def test_elastic_and_lorentzian_completion_require_context_and_delegate(
@@ -633,7 +669,7 @@ def test_elastic_and_lorentzian_completion_require_context_and_delegate(
         begin_component_interaction(draft, 0, ManualComponentKind.LORENTZIAN),
         component_peak_center=0.0,
         component_peak_height=1.0,
-        observed_fwhm=0.1,
+        width_endpoint_energy=0.05,
     )
 
     model = draft.setup(0).model
@@ -642,6 +678,301 @@ def test_elastic_and_lorentzian_completion_require_context_and_delegate(
     assert model.elastic_area is not None
     assert len(model.lorentzians) == 1
     assert model.lorentzians[0].center is not None
+
+
+def test_lorentzian_completion_converts_one_sided_endpoint_to_full_width(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project, sample, _ = configured_project()
+    draft = open_manual_fit_draft(project, sample)
+    observed_widths: list[float] = []
+
+    def fake_lorentzian(*args: object, **kwargs: object) -> LorentzianInteractionSeed:
+        observed_widths.append(cast(float, kwargs["observed_fwhm"]))
+        return LorentzianInteractionSeed(0.4, 0.1, 0.02, 0.11, 0.01)
+
+    monkeypatch.setattr(
+        manual_workflow_module,
+        "initialize_lorentzian_from_interaction",
+        fake_lorentzian,
+    )
+    peak_center = 0.25
+    for group_index, endpoint in enumerate((-0.25, 0.75)):
+        draft = complete_lorentzian_interaction(
+            project,
+            draft,
+            begin_component_interaction(
+                draft,
+                group_index,
+                ManualComponentKind.LORENTZIAN,
+            ),
+            component_peak_center=peak_center,
+            component_peak_height=1.0,
+            width_endpoint_energy=endpoint,
+        )
+
+    assert observed_widths == pytest.approx([1.0, 1.0])
+    left_model = draft.setup(0).model
+    right_model = draft.setup(1).model
+    assert left_model is not None
+    assert right_model is not None
+    assert left_model.lorentzians[0].area == right_model.lorentzians[0].area
+    assert left_model.lorentzians[0].fwhm == right_model.lorentzians[0].fwhm
+    assert left_model.lorentzians[0].center == right_model.lorentzians[0].center
+
+    before_zero_width = tuple(observed_widths)
+    with pytest.raises(WorkflowError) as zero_width:
+        complete_lorentzian_interaction(
+            project,
+            draft,
+            begin_component_interaction(
+                draft,
+                0,
+                ManualComponentKind.LORENTZIAN,
+            ),
+            component_peak_center=peak_center,
+            component_peak_height=1.0,
+            width_endpoint_energy=peak_center,
+        )
+    assert zero_width.value.diagnostics[0].code is (
+        WorkflowDiagnosticCode.INVALID_MANUAL_OPERATION
+    )
+    assert "finite positive extent" in zero_width.value.diagnostics[0].message
+    assert tuple(observed_widths) == before_zero_width
+
+
+def test_pending_elastic_preview_matches_completion_without_mutating_draft() -> None:
+    project, sample, _ = configured_project()
+    draft = open_manual_fit_draft(project, sample)
+    original = draft
+    pending = begin_component_interaction(
+        draft,
+        0,
+        ManualComponentKind.ELASTIC,
+    )
+    display_energy = sample.dataset.spectra[0].energy
+
+    transient = preview_pending_elastic_interaction(
+        project,
+        draft,
+        pending,
+        component_peak_center=0.03,
+        component_peak_height=1.2,
+        display_energy=display_energy,
+    )
+
+    assert draft is original
+    assert draft.setup(0).model is None
+    assert transient.component_identity == pending.component_identity
+    completed = complete_elastic_interaction(
+        project,
+        draft,
+        pending,
+        component_peak_center=0.03,
+        component_peak_height=1.2,
+    )
+    committed = preview_manual_fit(
+        project,
+        completed,
+        0,
+        display_energy=display_energy,
+    ).display_evaluation
+    np.testing.assert_allclose(transient.evaluation.total, committed.total)
+    np.testing.assert_allclose(
+        transient.evaluation.component_curve(pending.component_identity),
+        committed.component_curve(pending.component_identity),
+    )
+
+
+def test_pending_lorentzian_preview_matches_completion_and_rejects_zero_width() -> None:
+    project, sample, _ = configured_project()
+    draft = open_manual_fit_draft(project, sample)
+    original = draft
+    component_curves: list[np.ndarray] = []
+    peak_center = 0.05
+    for group_index, endpoint in enumerate((-0.15, 0.25)):
+        pending = begin_component_interaction(
+            draft,
+            group_index,
+            ManualComponentKind.LORENTZIAN,
+        )
+        display_energy = sample.dataset.spectra[group_index].energy
+        transient = preview_pending_lorentzian_interaction(
+            project,
+            draft,
+            pending,
+            component_peak_center=peak_center,
+            component_peak_height=0.8,
+            width_endpoint_energy=endpoint,
+            display_energy=display_energy,
+        )
+        assert draft is original
+        assert draft.setup(group_index).model is None
+        completed = complete_lorentzian_interaction(
+            project,
+            draft,
+            pending,
+            component_peak_center=peak_center,
+            component_peak_height=0.8,
+            width_endpoint_energy=endpoint,
+        )
+        committed = preview_manual_fit(
+            project,
+            completed,
+            group_index,
+            display_energy=display_energy,
+        ).display_evaluation
+        component_curve = transient.evaluation.component_curve(
+            pending.component_identity
+        )
+        component_curves.append(component_curve)
+        np.testing.assert_allclose(transient.evaluation.total, committed.total)
+        np.testing.assert_allclose(
+            component_curve,
+            committed.component_curve(pending.component_identity),
+        )
+
+    np.testing.assert_allclose(component_curves[0], component_curves[1])
+    zero = begin_component_interaction(draft, 0, ManualComponentKind.LORENTZIAN)
+    with pytest.raises(WorkflowError) as invalid:
+        preview_pending_lorentzian_interaction(
+            project,
+            draft,
+            zero,
+            component_peak_center=peak_center,
+            component_peak_height=0.8,
+            width_endpoint_energy=peak_center,
+        )
+    assert invalid.value.diagnostics[0].code is (
+        WorkflowDiagnosticCode.INVALID_MANUAL_OPERATION
+    )
+    assert draft is original
+    assert draft.setup(0).model is None
+
+
+def test_pending_background_preview_is_full_domain_b1_and_matches_completion() -> None:
+    project, sample, _ = configured_project()
+    draft = open_manual_fit_draft(project, sample)
+    original = draft
+    pending = begin_component_interaction(
+        draft,
+        0,
+        ManualComponentKind.BACKGROUND,
+    )
+    display_energy = sample.dataset.spectra[0].energy
+    transient = preview_pending_background_interaction(
+        project,
+        draft,
+        pending,
+        first_energy=-0.2,
+        first_height=0.1,
+        second_energy=0.2,
+        second_height=0.3,
+        display_energy=display_energy,
+    )
+
+    assert draft is original
+    assert draft.setup(0).model is None
+    expected = 0.2 + 0.5 * display_energy
+    np.testing.assert_allclose(transient.evaluation.energy, display_energy)
+    np.testing.assert_allclose(transient.evaluation.background, expected, atol=1e-15)
+    np.testing.assert_allclose(transient.evaluation.total, expected, atol=1e-15)
+    completed = complete_background_interaction(
+        draft,
+        pending,
+        first_energy=-0.2,
+        first_height=0.1,
+        second_energy=0.2,
+        second_height=0.3,
+    )
+    committed = preview_manual_fit(
+        project,
+        completed,
+        0,
+        display_energy=display_energy,
+    ).display_evaluation
+    np.testing.assert_allclose(transient.evaluation.total, committed.total)
+
+    coincident = begin_component_interaction(
+        draft,
+        1,
+        ManualComponentKind.BACKGROUND,
+    )
+    coincident_energy = sample.dataset.spectra[1].energy
+    click_preview = preview_pending_background_interaction(
+        project,
+        draft,
+        coincident,
+        first_energy=0.1,
+        first_height=-0.2,
+        second_energy=0.1,
+        second_height=-0.2,
+        display_energy=coincident_energy,
+    )
+    np.testing.assert_allclose(click_preview.evaluation.background, -0.2)
+    click_completed = complete_background_interaction(
+        draft,
+        coincident,
+        first_energy=0.1,
+        first_height=-0.2,
+        second_energy=0.1,
+        second_height=-0.2,
+    )
+    click_model = click_completed.setup(1).model
+    assert click_model is not None
+    assert click_model.background is BackgroundModel.LINEAR
+    assert click_model.b1 is not None
+    assert click_model.b1.current_value == 0.0
+
+
+def test_pending_resolution_aware_previews_require_applied_resolution() -> None:
+    project, sample, _ = configured_project(apply=False)
+    draft = open_manual_fit_draft(project, sample)
+    elastic = begin_component_interaction(draft, 0, ManualComponentKind.ELASTIC)
+    lorentzian = begin_component_interaction(
+        draft,
+        0,
+        ManualComponentKind.LORENTZIAN,
+    )
+    background = begin_component_interaction(
+        draft,
+        0,
+        ManualComponentKind.BACKGROUND,
+    )
+
+    operations: tuple[Callable[[], PendingManualComponentPreview], ...] = (
+        lambda: preview_pending_elastic_interaction(
+            project,
+            draft,
+            elastic,
+            component_peak_center=0.0,
+            component_peak_height=1.0,
+        ),
+        lambda: preview_pending_lorentzian_interaction(
+            project,
+            draft,
+            lorentzian,
+            component_peak_center=0.0,
+            component_peak_height=1.0,
+            width_endpoint_energy=0.1,
+        ),
+        lambda: preview_pending_background_interaction(
+            project,
+            draft,
+            background,
+            first_energy=-0.1,
+            first_height=0.0,
+            second_energy=0.1,
+            second_height=0.0,
+        ),
+    )
+    for operation in operations:
+        with pytest.raises(WorkflowError) as missing:
+            operation()
+        assert missing.value.diagnostics[0].code is (
+            WorkflowDiagnosticCode.INTERACTION_CONTEXT_UNAVAILABLE
+        )
+    assert all(item.model is None for item in draft.setups)
 
 
 def test_zero_height_interactions_preserve_zero_preview_and_adjust_fit_only(
@@ -695,7 +1026,7 @@ def test_zero_height_interactions_preserve_zero_preview_and_adjust_fit_only(
         begin_component_interaction(draft, 1, ManualComponentKind.LORENTZIAN),
         component_peak_center=0.0,
         component_peak_height=0.0,
-        observed_fwhm=0.12,
+        width_endpoint_energy=0.06,
     )
     lorentzian_model = lorentzian.setup(1).model
     assert lorentzian_model is not None
@@ -823,20 +1154,29 @@ def test_tie_create_join_untie_and_multiple_same_family_groups() -> None:
     draft = create_parameter_tie(
         draft,
         0,
-        (first_area, second_area),
-        source_member=second_area,
+        (first_area,),
+        source_member=first_area,
         tie_group_id="areas-a",
     )
     tied = draft.setup(0).model
     assert tied is not None
-    assert tied.parameter_intent(first_area).current_value == pytest.approx(0.3)
-    draft = join_parameter_tie(draft, 0, "areas-a", third_area)
+    assert tied.parameter_ties[0].members == (first_area,)
     draft = update_manual_parameter(
         draft,
         0,
         first_area,
         ManualParameterEdit(0.35, 0.1, 0.6, True),
     )
+    singleton = draft.setup(0).model
+    assert singleton is not None
+    assert singleton.parameter_ties[0].intent == ManualParameterIntent(
+        0.35,
+        0.1,
+        0.6,
+        True,
+    )
+    draft = join_parameter_tie(draft, 0, "areas-a", second_area)
+    draft = join_parameter_tie(draft, 0, "areas-a", third_area)
     joined = draft.setup(0).model
     assert joined is not None
     assert len(joined.parameter_ties[0].members) == 3
@@ -860,6 +1200,7 @@ def test_tie_create_join_untie_and_multiple_same_family_groups() -> None:
     two = draft.setup(0).model
     assert two is not None
     assert len(two.parameter_ties) == 1
+    assert two.parameter_ties[0].members == (first_area, second_area)
     assert two.tie_for(third_area) is None
     assert two.parameter_intent(third_area) is not two.parameter_ties[0].intent
     assert two.parameter_intent(third_area) == ManualParameterIntent(
@@ -870,30 +1211,45 @@ def test_tie_create_join_untie_and_multiple_same_family_groups() -> None:
     )
 
     draft = untie_parameter(draft, 0, first_area)
+    singleton = draft.setup(0).model
+    assert singleton is not None
+    assert singleton.parameter_ties[0].members == (second_area,)
+    assert singleton.parameter_intent(first_area) is not (
+        singleton.parameter_ties[0].intent
+    )
+    assert singleton.parameter_intent(first_area) == ManualParameterIntent(
+        0.35,
+        0.1,
+        0.6,
+        True,
+    )
+    draft = untie_parameter(draft, 0, second_area)
     independent = draft.setup(0).model
     assert independent is not None
     assert not independent.parameter_ties
-    assert independent.parameter_intent(first_area) is not (
-        independent.parameter_intent(second_area)
-    )
-    assert independent.parameter_intent(first_area).current_value == (
-        independent.parameter_intent(second_area).current_value
+    assert independent.parameter_intent(second_area) == ManualParameterIntent(
+        0.35,
+        0.1,
+        0.6,
+        True,
     )
 
     draft = create_parameter_tie(
         draft,
         0,
-        (first_area, second_area),
+        (first_area,),
         source_member=first_area,
         tie_group_id="areas-a",
     )
+    draft = join_parameter_tie(draft, 0, "areas-a", second_area)
     draft = create_parameter_tie(
         draft,
         0,
-        (third_area, fourth_area),
-        source_member=fourth_area,
+        (third_area,),
+        source_member=third_area,
         tie_group_id="areas-b",
     )
+    draft = join_parameter_tie(draft, 0, "areas-b", fourth_area)
     multiple = draft.setup(0).model
     assert multiple is not None
     assert {item.group_id for item in multiple.parameter_ties} == {
@@ -904,6 +1260,97 @@ def test_tie_create_join_untie_and_multiple_same_family_groups() -> None:
         group.members[0].family is ParameterFamily.AREA
         for group in multiple.parameter_ties
     )
+
+
+def test_empty_manual_parameter_tie_state_is_invalid() -> None:
+    with pytest.raises(ValueError, match="at least one member"):
+        ManualParameterTieState("empty", (), intent(0.1))
+
+
+def test_singleton_elastic_center_tie_owns_materialized_state() -> None:
+    project, sample, _ = configured_project()
+    elastic_center = ParameterReference(ELASTIC_COMPONENT, ParameterFamily.CENTER)
+    chain_intent = intent(0.02, -0.05, 0.05, free=True)
+    model = ManualModelState(
+        energy_shift=intent(0.0, -0.1, 0.1),
+        elastic_area=intent(0.5, 0.0),
+        parameter_ties=(
+            ManualParameterTieState(
+                "elastic-center-chain",
+                (elastic_center,),
+                chain_intent,
+            ),
+        ),
+    )
+    draft = open_manual_fit_draft(project, sample).with_model(0, model)
+
+    materialized = materialize_manual_setup(project, draft, 0)
+    center = materialized.parameter(elastic_center)
+    readiness = manual_workflow_readiness(project, draft, 0)
+    preview = preview_manual_fit(project, draft, 0)
+    result = run_manual_fit(project, draft, 0)
+
+    assert center.fit_configuration.initial_value == pytest.approx(0.02)
+    assert center.fit_configuration.lower_bound == pytest.approx(-0.05)
+    assert center.fit_configuration.upper_bound == pytest.approx(0.05)
+    assert center.fit_configuration.free
+    assert materialized.fit_model.energy_shift is center.fit_configuration
+    assert materialized.fit_model.parameter_ties[0].parameter is (
+        center.fit_configuration
+    )
+    assert readiness.runnable
+    assert np.all(np.isfinite(preview.display_evaluation.total))
+    assert result.parameter_by_reference(elastic_center).references == (elastic_center,)
+    assert result.configuration.parameter_ties[0].members == (elastic_center,)
+
+
+def test_clone_and_apply_preserve_singleton_and_multiple_tie_groups() -> None:
+    project, sample, _ = configured_project()
+    identities = tuple(lorentzian_identity(f"topology-{index}") for index in range(3))
+    references = tuple(ref(identity, ParameterFamily.AREA) for identity in identities)
+    model = ManualModelState(
+        lorentzians=tuple(
+            ManualLorentzianState(
+                area=intent(0.2 + 0.1 * index, 0.0),
+                fwhm=intent(0.1 + 0.05 * index, 1.0e-8),
+                center=intent(0.01 * index, -0.1, 0.1),
+                identity=identity,
+            )
+            for index, identity in enumerate(identities)
+        ),
+        parameter_ties=(
+            ManualParameterTieState(
+                "singleton-area",
+                (references[0],),
+                intent(0.25, 0.0),
+            ),
+            ManualParameterTieState(
+                "shared-area",
+                references[1:],
+                intent(0.35, 0.0),
+            ),
+        ),
+    )
+    draft = open_manual_fit_draft(project, sample).with_model(0, model)
+
+    cloned = clone_manual_setup_to_group(project, draft, 0, 1)
+    applied = apply_manual_setup_to_all_groups(project, cloned, 0)
+
+    for group_index in (1, 2):
+        target = applied.setup(group_index).model
+        assert target is not None
+        assert tuple(len(group.members) for group in target.parameter_ties) == (1, 2)
+        assert {group.family for group in target.parameter_ties} == {
+            ParameterFamily.AREA
+        }
+        assert {
+            member.component
+            for group in target.parameter_ties
+            for member in group.members
+        } == {component.identity for component in target.lorentzians}
+        assert {group.group_id for group in target.parameter_ties}.isdisjoint(
+            {group.group_id for group in model.parameter_ties}
+        )
 
 
 def test_component_removal_keeps_ties_valid_and_can_restore_empty_draft() -> None:
@@ -940,7 +1387,9 @@ def test_component_removal_keeps_ties_valid_and_can_restore_empty_draft() -> Non
     remaining = draft.setup(0).model
     assert remaining is not None
     assert [item.identity for item in remaining.lorentzians] == [second]
-    assert not remaining.parameter_ties
+    assert len(remaining.parameter_ties) == 1
+    assert remaining.parameter_ties[0].group_id == "areas"
+    assert remaining.parameter_ties[0].members == (members[1],)
     assert remaining.parameter_intent(members[1]) == ManualParameterIntent(
         0.25,
         0.1,

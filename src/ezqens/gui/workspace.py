@@ -6,6 +6,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
+from uuid import uuid4
 
 from PySide6.QtCore import (
     QByteArray,
@@ -398,6 +399,9 @@ class DatasetState:
     source_order: int = 0
     source_path: Path | None = None
     auto_mask: AutoMaskState | None = None
+    workflow_dataset_id: str = field(
+        default_factory=lambda: f"dataset-{uuid4().hex}",
+    )
 
     @property
     def mask_editable(self) -> bool:
@@ -436,6 +440,7 @@ class WorkspaceSidebar(QWidget):
     import_files_requested = Signal()
     import_folder_requested = Signal()
     dataset_open_requested = Signal(object, object)
+    dataset_added = Signal(object, object)
     dataset_role_changed = Signal(object, object, object)
     dataset_role_change_requested = Signal(object, object, object)
     dataset_renamed = Signal(object, object, object)
@@ -443,6 +448,8 @@ class WorkspaceSidebar(QWidget):
     units_requested = Signal(object, object)
     q_assignment_requested = Signal(object, object)
     mask_edit_requested = Signal(object, object)
+    manual_fit_requested = Signal(object, object)
+    apply_resolution_requested = Signal(object, object)
     q_method_dropped = Signal(object, object, object)
     project_removal_requested = Signal(object)
     dataset_removal_requested = Signal(object, object)
@@ -631,6 +638,7 @@ class WorkspaceSidebar(QWidget):
         project.datasets.append(state)
         project.datasets.sort(key=_dataset_sort_key)
         self._rebuild_dataset_items(project_index)
+        self.dataset_added.emit(project, state)
         return state
 
     def assign_q_bins(
@@ -1053,6 +1061,15 @@ class WorkspaceSidebar(QWidget):
             mask_action = menu.addAction("Edit Mask…")
             mask_action.triggered.connect(
                 lambda: self.mask_edit_requested.emit(project, dataset),
+            )
+        if dataset.dataset.role is SpectrumRole.SAMPLE:
+            manual_fit_action = menu.addAction("Manual Fit…")
+            manual_fit_action.triggered.connect(
+                lambda: self.manual_fit_requested.emit(project, dataset),
+            )
+            resolution_action = menu.addAction("Apply Resolution…")
+            resolution_action.triggered.connect(
+                lambda: self.apply_resolution_requested.emit(project, dataset),
             )
         menu.addSeparator()
         if dataset.dataset.role is SpectrumRole.RESOLUTION:

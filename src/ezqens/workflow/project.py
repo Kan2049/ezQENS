@@ -41,6 +41,7 @@ class WorkflowDiagnosticCode(StrEnum):
     RESOLUTION_PREPARATION_FAILED = "resolution_preparation_failed"
     EMPTY_MANUAL_DRAFT = "empty_manual_draft"
     MANUAL_MATERIALIZATION_FAILED = "manual_materialization_failed"
+    MANUAL_PREVIEW_FAILED = "manual_preview_failed"
     INTERACTION_CONTEXT_UNAVAILABLE = "interaction_context_unavailable"
     INVALID_MANUAL_OPERATION = "invalid_manual_operation"
     TARGET_SETUP_INVALID = "target_setup_invalid"
@@ -334,18 +335,35 @@ def _measured_spectra_exactly_unchanged(
     original: ReducedDataset,
     replacement: ReducedDataset,
 ) -> bool:
+    """Return whether a point-indexed selection can safely bind to replacement."""
+
     if original.role is not replacement.role:
         return False
+    if not measured_point_correspondence_exactly_unchanged(original, replacement):
+        return False
+    for before, after in zip(original.spectra, replacement.spectra, strict=True):
+        if (
+            before.role is not after.role
+            or before.energy_unit != after.energy_unit
+            or before.intensity_unit != after.intensity_unit
+            or before.uncertainty_unit != after.uncertainty_unit
+        ):
+            return False
+    return True
+
+
+def measured_point_correspondence_exactly_unchanged(
+    original: ReducedDataset,
+    replacement: ReducedDataset,
+) -> bool:
+    """Return whether point-indexed masks retain exact measured correspondence."""
+
     if len(original.spectra) != len(replacement.spectra):
         return False
     for before, after in zip(original.spectra, replacement.spectra, strict=True):
         if (
             before.group_index != after.group_index
             or before.group_label != after.group_label
-            or before.role is not after.role
-            or before.energy_unit != after.energy_unit
-            or before.intensity_unit != after.intensity_unit
-            or before.uncertainty_unit != after.uncertainty_unit
             or not _same_array(before.energy, after.energy)
             or not _same_array(before.intensity, after.intensity)
             or not _same_array(before.uncertainty, after.uncertainty)

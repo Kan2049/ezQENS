@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from uuid import uuid4
@@ -16,10 +17,13 @@ from ezqens.fitting import (
     ComponentFamily,
     ComponentIdentity,
     FitResult,
+    FittingError,
     ManualFitReadiness,
+    ManualInitializationError,
     ManualMaterializationError,
     ManualModelPreview,
     ManualParameterIntent,
+    ModelEvaluation,
     ParameterReference,
     fit_single_q,
     initialize_background_from_interaction,
@@ -126,6 +130,27 @@ class PendingManualInteraction:
     sample_id: str
     group_index: int
     component_kind: ManualComponentKind
+    component_identity: ComponentIdentity
+
+
+@dataclass(frozen=True, slots=True)
+class PendingManualComponentPreview:
+    """Directly plottable evaluation of one immutable interaction proposal."""
+
+    component_identity: ComponentIdentity
+    evaluation: ModelEvaluation
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.component_identity, ComponentIdentity):
+            raise ValueError("component_identity must be a ComponentIdentity")
+        if not isinstance(self.evaluation, ModelEvaluation):
+            raise ValueError("evaluation must be a ModelEvaluation")
+        try:
+            self.evaluation.component_curve(self.component_identity)
+        except KeyError as error:
+            raise ValueError(
+                "pending evaluation must contain its provisional component"
+            ) from error
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,11 +254,21 @@ def begin_component_interaction(
     draft.setup(group_index)
     if not isinstance(component_kind, ManualComponentKind):
         raise ValueError("component_kind must be a ManualComponentKind")
+    if component_kind is ManualComponentKind.ELASTIC:
+        component_identity = ELASTIC_COMPONENT
+    elif component_kind is ManualComponentKind.BACKGROUND:
+        component_identity = BACKGROUND_COMPONENT
+    else:
+        component_identity = ComponentIdentity(
+            ComponentFamily.LORENTZIAN,
+            uuid4().hex,
+        )
     return PendingManualInteraction(
         project_id=draft.project_id,
         sample_id=draft.sample_id,
         group_index=group_index,
         component_kind=component_kind,
+        component_identity=component_identity,
     )
 
 
@@ -283,15 +318,26 @@ def _require_context(
     return resolution.context
 
 
-def complete_elastic_interaction(
+def _interaction_initialization_failed(
+    error: ManualInitializationError,
+    pending: PendingManualInteraction,
+) -> WorkflowError:
+    return _workflow_error(
+        WorkflowDiagnosticCode.INVALID_MANUAL_OPERATION,
+        str(error),
+        group_index=pending.group_index,
+    )
+
+
+def _elastic_interaction_proposal(
     project: WorkflowProject,
     draft: ManualFitDraft,
     pending: PendingManualInteraction,
     *,
     component_peak_center: float,
     component_peak_height: float,
-) -> ManualFitDraft:
-    """Create elastic parameters only after measured-resolution-aware interaction."""
+) -> tuple[ManualFitContext, ManualModelState]:
+    """Build the one elastic proposal shared by preview and completion."""
 
     _validate_pending(draft, pending, ManualComponentKind.ELASTIC)
     context = _require_context(
@@ -300,12 +346,15 @@ def complete_elastic_interaction(
         pending.group_index,
         interaction=True,
     )
-    seed = initialize_elastic_from_interaction(
-        context.prepared_resolution,
-        context.group_index,
-        component_peak_center=component_peak_center,
-        component_peak_height=component_peak_height,
-    )
+    try:
+        seed = initialize_elastic_from_interaction(
+            context.prepared_resolution,
+            context.group_index,
+            component_peak_center=component_peak_center,
+            component_peak_height=component_peak_height,
+        )
+    except ManualInitializationError as error:
+        raise _interaction_initialization_failed(error, pending) from error
     area = ManualParameterIntent(seed.integrated_area)
     center = ManualParameterIntent(seed.center_parameter_value)
     current = draft.setup(pending.group_index).model
@@ -329,38 +378,63 @@ def complete_elastic_interaction(
                 group_index=pending.group_index,
             )
         model = replace(current, energy_shift=center, elastic_area=area)
-    return draft.with_model(pending.group_index, model)
+    return context, model
 
 
-def complete_lorentzian_interaction(
+def _observed_fwhm_from_endpoint(
+    component_peak_center: float,
+    width_endpoint_energy: float,
+    pending: PendingManualInteraction,
+) -> float:
+    half_width_extent = abs(width_endpoint_energy - component_peak_center)
+    observed_fwhm = 2.0 * half_width_extent
+    if not math.isfinite(observed_fwhm) or observed_fwhm <= 0.0:
+        raise _workflow_error(
+            WorkflowDiagnosticCode.INVALID_MANUAL_OPERATION,
+            "Lorentzian width interaction must define a finite positive extent",
+            group_index=pending.group_index,
+        )
+    return observed_fwhm
+
+
+def _lorentzian_interaction_proposal(
     project: WorkflowProject,
     draft: ManualFitDraft,
     pending: PendingManualInteraction,
     *,
     component_peak_center: float,
     component_peak_height: float,
-    observed_fwhm: float,
-) -> ManualFitDraft:
-    """Create one identity-bearing independent Lorentzian after interaction."""
+    width_endpoint_energy: float,
+) -> tuple[ManualFitContext, ManualModelState]:
+    """Build the one Lorentzian proposal shared by preview and completion."""
 
     _validate_pending(draft, pending, ManualComponentKind.LORENTZIAN)
+    observed_fwhm = _observed_fwhm_from_endpoint(
+        component_peak_center,
+        width_endpoint_energy,
+        pending,
+    )
     context = _require_context(
         project,
         draft,
         pending.group_index,
         interaction=True,
     )
-    seed = initialize_lorentzian_from_interaction(
-        context.prepared_resolution,
-        context.group_index,
-        component_peak_center=component_peak_center,
-        component_peak_height=component_peak_height,
-        observed_fwhm=observed_fwhm,
-    )
+    try:
+        seed = initialize_lorentzian_from_interaction(
+            context.prepared_resolution,
+            context.group_index,
+            component_peak_center=component_peak_center,
+            component_peak_height=component_peak_height,
+            observed_fwhm=observed_fwhm,
+        )
+    except ManualInitializationError as error:
+        raise _interaction_initialization_failed(error, pending) from error
     component = ManualLorentzianState(
         area=ManualParameterIntent(seed.integrated_area),
         fwhm=ManualParameterIntent(seed.intrinsic_fwhm),
         center=ManualParameterIntent(seed.center_parameter_value),
+        identity=pending.component_identity,
     )
     current = draft.setup(pending.group_index).model
     model = (
@@ -368,10 +442,10 @@ def complete_lorentzian_interaction(
         if current is None
         else replace(current, lorentzians=(*current.lorentzians, component))
     )
-    return draft.with_model(pending.group_index, model)
+    return context, model
 
 
-def complete_background_interaction(
+def _background_interaction_proposal(
     draft: ManualFitDraft,
     pending: PendingManualInteraction,
     *,
@@ -379,16 +453,19 @@ def complete_background_interaction(
     first_height: float,
     second_energy: float,
     second_height: float,
-) -> ManualFitDraft:
-    """Create B1 only after completed two-point interaction."""
+) -> ManualModelState:
+    """Build the one B1 proposal shared by preview and completion."""
 
     _validate_pending(draft, pending, ManualComponentKind.BACKGROUND)
-    seed = initialize_background_from_interaction(
-        first_energy=first_energy,
-        first_height=first_height,
-        second_energy=second_energy,
-        second_height=second_height,
-    )
+    try:
+        seed = initialize_background_from_interaction(
+            first_energy=first_energy,
+            first_height=first_height,
+            second_energy=second_energy,
+            second_height=second_height,
+        )
+    except ManualInitializationError as error:
+        raise _interaction_initialization_failed(error, pending) from error
     current = draft.setup(pending.group_index).model
     if current is not None and current.background is not BackgroundModel.NONE:
         raise _workflow_error(
@@ -411,6 +488,202 @@ def complete_background_interaction(
             b0=b0,
             b1=b1,
         )
+    )
+    return model
+
+
+def _preview_model_or_error(
+    context: ManualFitContext,
+    model: ManualModelState,
+    *,
+    display_energy: npt.ArrayLike | None,
+) -> ManualModelPreview:
+    """Contain deterministic scientific-preview failures at the workflow boundary."""
+
+    materialized = _materialize_or_error(context, model)
+    try:
+        return preview_manual_model(
+            context.prepared_resolution,
+            context.selection,
+            context.group_index,
+            materialized.preview_model,
+            display_energy=display_energy,
+        )
+    except (FittingError, ValueError) as error:
+        raise _workflow_error(
+            WorkflowDiagnosticCode.MANUAL_PREVIEW_FAILED,
+            str(error),
+            group_index=context.group_index,
+        ) from error
+
+
+def _preview_interaction_proposal(
+    context: ManualFitContext,
+    model: ManualModelState,
+    pending: PendingManualInteraction,
+    *,
+    display_energy: npt.ArrayLike | None,
+) -> PendingManualComponentPreview:
+    preview = _preview_model_or_error(
+        context,
+        model,
+        display_energy=display_energy,
+    )
+    return PendingManualComponentPreview(
+        component_identity=pending.component_identity,
+        evaluation=preview.display_evaluation,
+    )
+
+
+def preview_pending_elastic_interaction(
+    project: WorkflowProject,
+    draft: ManualFitDraft,
+    pending: PendingManualInteraction,
+    *,
+    component_peak_center: float,
+    component_peak_height: float,
+    display_energy: npt.ArrayLike | None = None,
+) -> PendingManualComponentPreview:
+    """Evaluate an elastic proposal without mutating the Manual draft."""
+
+    context, model = _elastic_interaction_proposal(
+        project,
+        draft,
+        pending,
+        component_peak_center=component_peak_center,
+        component_peak_height=component_peak_height,
+    )
+    return _preview_interaction_proposal(
+        context,
+        model,
+        pending,
+        display_energy=display_energy,
+    )
+
+
+def preview_pending_lorentzian_interaction(
+    project: WorkflowProject,
+    draft: ManualFitDraft,
+    pending: PendingManualInteraction,
+    *,
+    component_peak_center: float,
+    component_peak_height: float,
+    width_endpoint_energy: float,
+    display_energy: npt.ArrayLike | None = None,
+) -> PendingManualComponentPreview:
+    """Evaluate a one-sided-width Lorentzian proposal without draft mutation."""
+
+    context, model = _lorentzian_interaction_proposal(
+        project,
+        draft,
+        pending,
+        component_peak_center=component_peak_center,
+        component_peak_height=component_peak_height,
+        width_endpoint_energy=width_endpoint_energy,
+    )
+    return _preview_interaction_proposal(
+        context,
+        model,
+        pending,
+        display_energy=display_energy,
+    )
+
+
+def preview_pending_background_interaction(
+    project: WorkflowProject,
+    draft: ManualFitDraft,
+    pending: PendingManualInteraction,
+    *,
+    first_energy: float,
+    first_height: float,
+    second_energy: float,
+    second_height: float,
+    display_energy: npt.ArrayLike | None = None,
+) -> PendingManualComponentPreview:
+    """Evaluate a full-domain B1 proposal without mutating the Manual draft."""
+
+    context = _require_context(
+        project,
+        draft,
+        pending.group_index,
+        interaction=True,
+    )
+    model = _background_interaction_proposal(
+        draft,
+        pending,
+        first_energy=first_energy,
+        first_height=first_height,
+        second_energy=second_energy,
+        second_height=second_height,
+    )
+    return _preview_interaction_proposal(
+        context,
+        model,
+        pending,
+        display_energy=display_energy,
+    )
+
+
+def complete_elastic_interaction(
+    project: WorkflowProject,
+    draft: ManualFitDraft,
+    pending: PendingManualInteraction,
+    *,
+    component_peak_center: float,
+    component_peak_height: float,
+) -> ManualFitDraft:
+    """Commit the same measured-resolution-aware proposal used for preview."""
+
+    _context, model = _elastic_interaction_proposal(
+        project,
+        draft,
+        pending,
+        component_peak_center=component_peak_center,
+        component_peak_height=component_peak_height,
+    )
+    return draft.with_model(pending.group_index, model)
+
+
+def complete_lorentzian_interaction(
+    project: WorkflowProject,
+    draft: ManualFitDraft,
+    pending: PendingManualInteraction,
+    *,
+    component_peak_center: float,
+    component_peak_height: float,
+    width_endpoint_energy: float,
+) -> ManualFitDraft:
+    """Commit the same one-sided-width proposal used for preview."""
+
+    _context, model = _lorentzian_interaction_proposal(
+        project,
+        draft,
+        pending,
+        component_peak_center=component_peak_center,
+        component_peak_height=component_peak_height,
+        width_endpoint_energy=width_endpoint_energy,
+    )
+    return draft.with_model(pending.group_index, model)
+
+
+def complete_background_interaction(
+    draft: ManualFitDraft,
+    pending: PendingManualInteraction,
+    *,
+    first_energy: float,
+    first_height: float,
+    second_energy: float,
+    second_height: float,
+) -> ManualFitDraft:
+    """Commit the same full-domain B1 proposal used for preview."""
+
+    model = _background_interaction_proposal(
+        draft,
+        pending,
+        first_energy=first_energy,
+        first_height=first_height,
+        second_energy=second_energy,
+        second_height=second_height,
     )
     return draft.with_model(pending.group_index, model)
 
@@ -573,7 +846,7 @@ def untie_parameter(
     group_index: int,
     member: ParameterReference,
 ) -> ManualFitDraft:
-    """Make a member independent, dissolving a two-member remainder."""
+    """Remove one membership while preserving every surviving tie member."""
 
     model = _require_model(draft, group_index)
     target = model.tie_for(member)
@@ -583,24 +856,21 @@ def untie_parameter(
             "parameter is not a member of an explicit equality tie",
             group_index=group_index,
         )
-    base = replace(model, parameter_ties=())
     remaining = tuple(item for item in target.members if item != member)
-    independent = (member, *remaining) if len(remaining) == 1 else (member,)
-    for reference in independent:
-        base = replace_parameter_intent(
-            base,
-            reference,
-            _copy_intent(target.intent),
-        )
     ties: list[ManualParameterTieState] = []
     for group in model.parameter_ties:
         if group.group_id != target.group_id:
             ties.append(group)
-        elif len(remaining) >= 2:
+        elif remaining:
             ties.append(
                 ManualParameterTieState(group.group_id, remaining, group.intent)
             )
-    updated = replace(base, parameter_ties=tuple(ties))
+    base = replace(model, parameter_ties=tuple(ties))
+    updated = replace_parameter_intent(
+        base,
+        member,
+        _copy_intent(target.intent),
+    )
     return draft.with_model(group_index, updated)
 
 
@@ -636,19 +906,13 @@ def remove_manual_component(
         surviving_members = tuple(
             member for member in group.members if member not in removed
         )
-        if len(surviving_members) >= 2:
+        if surviving_members:
             surviving_ties.append(
                 ManualParameterTieState(
                     group.group_id,
                     surviving_members,
                     group.intent,
                 )
-            )
-        elif len(surviving_members) == 1:
-            base = replace_parameter_intent(
-                base,
-                surviving_members[0],
-                _copy_intent(group.intent),
             )
     elastic_area = base.elastic_area
     elastic_center_group = base.elastic_center_group
@@ -971,12 +1235,9 @@ def preview_manual_fit(
 
     context = _require_context(project, draft, group_index)
     model = _require_model(draft, group_index)
-    materialized = _materialize_or_error(context, model)
-    return preview_manual_model(
-        context.prepared_resolution,
-        context.selection,
-        group_index,
-        materialized.preview_model,
+    return _preview_model_or_error(
+        context,
+        model,
         display_energy=display_energy,
     )
 
