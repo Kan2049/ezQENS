@@ -24,6 +24,7 @@ from ezqens.fitting import (
     ManualModelPreview,
     ManualParameterIntent,
     ModelEvaluation,
+    ParameterEstimate,
     ParameterReference,
     fit_single_q,
     initialize_background_from_interaction,
@@ -161,6 +162,7 @@ class ManualParameterEdit:
     user_lower_limit: float | None
     user_upper_limit: float | None
     free: bool
+    user_bounds_enabled: bool = True
 
     def intent(self) -> ManualParameterIntent:
         """Return the persistent editable state without materializing fit bounds."""
@@ -170,6 +172,7 @@ class ManualParameterEdit:
             user_lower_limit=self.user_lower_limit,
             user_upper_limit=self.user_upper_limit,
             free=self.free,
+            user_bounds_enabled=self.user_bounds_enabled,
         )
 
 
@@ -181,6 +184,40 @@ class ManualWorkflowReadiness:
     context: ManualFitContext | None
     workflow_diagnostics: tuple[WorkflowDiagnostic, ...] = ()
     scientific_readiness: ManualFitReadiness | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ManualFitExecutionOutcome:
+    """Atomic result of running and optionally adopting one Manual fit."""
+
+    fit_result: FitResult | None
+    adopted_draft: ManualFitDraft | None
+    diagnostics: tuple[WorkflowDiagnostic, ...] = ()
+
+    def __post_init__(self) -> None:
+        diagnostics = tuple(self.diagnostics)
+        if any(not isinstance(item, WorkflowDiagnostic) for item in diagnostics):
+            raise ValueError("diagnostics must contain WorkflowDiagnostic values")
+        if self.adopted_draft is not None:
+            if self.fit_result is None:
+                raise ValueError("an adopted draft requires a FitResult")
+            if not self.fit_result.diagnostics.optimizer_success:
+                raise ValueError(
+                    "a nonconverged FitResult cannot have an adopted draft"
+                )
+            if any(item.severity is DiagnosticSeverity.ERROR for item in diagnostics):
+                raise ValueError(
+                    "a successful execution cannot contain error diagnostics"
+                )
+        elif not any(item.severity is DiagnosticSeverity.ERROR for item in diagnostics):
+            raise ValueError("a failed execution requires an error diagnostic")
+        object.__setattr__(self, "diagnostics", diagnostics)
+
+    @property
+    def success(self) -> bool:
+        """Return whether a complete adopted draft was produced."""
+
+        return self.fit_result is not None and self.adopted_draft is not None
 
 
 def _workflow_error(
@@ -694,6 +731,7 @@ def _copy_intent(intent: ManualParameterIntent) -> ManualParameterIntent:
         intent.user_lower_limit,
         intent.user_upper_limit,
         intent.free,
+        intent.user_bounds_enabled,
     )
 
 
@@ -1261,3 +1299,243 @@ def run_manual_fit(
         materialized.fit_model,
         max_nfev=max_nfev,
     )
+
+
+class _ManualFitAdoptionError(ValueError):
+    """Expected validation failure while constructing an adopted Manual state."""
+
+
+def _execution_diagnostic(
+    code: WorkflowDiagnosticCode,
+    message: str,
+    *,
+    group_index: int,
+) -> WorkflowDiagnostic:
+    return WorkflowDiagnostic(
+        code=code,
+        severity=DiagnosticSeverity.ERROR,
+        message=message,
+        group_index=group_index,
+    )
+
+
+def _failed_execution(
+    code: WorkflowDiagnosticCode,
+    message: str,
+    *,
+    group_index: int,
+    fit_result: FitResult | None = None,
+) -> ManualFitExecutionOutcome:
+    return ManualFitExecutionOutcome(
+        fit_result=fit_result,
+        adopted_draft=None,
+        diagnostics=(_execution_diagnostic(code, message, group_index=group_index),),
+    )
+
+
+def _readiness_execution_diagnostics(
+    readiness: ManualWorkflowReadiness,
+    *,
+    group_index: int,
+) -> tuple[WorkflowDiagnostic, ...]:
+    if readiness.workflow_diagnostics:
+        return readiness.workflow_diagnostics
+    scientific = readiness.scientific_readiness
+    if scientific is not None and scientific.diagnostics:
+        return tuple(
+            WorkflowDiagnostic(
+                code=WorkflowDiagnosticCode.TARGET_SETUP_INVALID,
+                severity=item.severity,
+                message=item.message,
+                group_index=group_index,
+            )
+            for item in scientific.diagnostics
+        )
+    return (
+        _execution_diagnostic(
+            WorkflowDiagnosticCode.MANUAL_FIT_EXECUTION_FAILED,
+            "Manual fit is not ready to run",
+            group_index=group_index,
+        ),
+    )
+
+
+def _materialized_reference_slots(
+    materialized: ManualModelMaterialization,
+) -> tuple[tuple[ParameterReference, ...], ...]:
+    slots: list[list[ParameterReference]] = []
+    owners: list[object] = []
+    for state in materialized.parameters:
+        for index, owner in enumerate(owners):
+            if state.materialization is owner:
+                slots[index].append(state.reference)
+                break
+        else:
+            owners.append(state.materialization)
+            slots.append([state.reference])
+    return tuple(tuple(slot) for slot in slots)
+
+
+def _validated_estimates_by_slot(
+    fit_result: FitResult,
+    materialized: ManualModelMaterialization,
+) -> tuple[tuple[tuple[ParameterReference, ...], ParameterEstimate], ...]:
+    expected_slots = _materialized_reference_slots(materialized)
+    expected_sets = tuple(frozenset(slot) for slot in expected_slots)
+    if any(not isinstance(item, ParameterEstimate) for item in fit_result.parameters):
+        raise _ManualFitAdoptionError(
+            "Manual fit result contains an invalid parameter estimate"
+        )
+    actual_sets = tuple(
+        frozenset(estimate.references) for estimate in fit_result.parameters
+    )
+    if (
+        len(actual_sets) != len(expected_sets)
+        or len(set(actual_sets)) != len(actual_sets)
+        or set(actual_sets) != set(expected_sets)
+    ):
+        raise _ManualFitAdoptionError(
+            "Manual fit result does not provide exact parameter-reference coverage"
+        )
+    estimates = {
+        frozenset(estimate.references): estimate for estimate in fit_result.parameters
+    }
+    validated: list[tuple[tuple[ParameterReference, ...], ParameterEstimate]] = []
+    for slot, slot_set in zip(expected_slots, expected_sets, strict=True):
+        estimate = estimates[slot_set]
+        configuration = materialized.parameter(slot[0]).fit_configuration
+        if not math.isfinite(estimate.value):
+            raise _ManualFitAdoptionError(
+                "Manual fit result contains a nonfinite fitted parameter value"
+            )
+        if not configuration.lower_bound <= estimate.value <= configuration.upper_bound:
+            raise _ManualFitAdoptionError(
+                "Manual fit result contains a value outside submitted fit bounds"
+            )
+        if estimate.free is not configuration.free:
+            raise _ManualFitAdoptionError(
+                "Manual fit result free/fixed state differs from submitted state"
+            )
+        validated.append((slot, estimate))
+    return tuple(validated)
+
+
+def _adopt_manual_fit_values(
+    model: ManualModelState,
+    fit_result: FitResult,
+    materialized: ManualModelMaterialization,
+) -> ManualModelState:
+    adopted = model
+    for references, estimate in _validated_estimates_by_slot(
+        fit_result,
+        materialized,
+    ):
+        reference = references[0]
+        submitted = adopted.parameter_intent(reference)
+        adopted = replace_parameter_intent(
+            adopted,
+            reference,
+            ManualParameterIntent(
+                current_value=estimate.value,
+                user_lower_limit=submitted.user_lower_limit,
+                user_upper_limit=submitted.user_upper_limit,
+                free=submitted.free,
+                user_bounds_enabled=submitted.user_bounds_enabled,
+            ),
+        )
+    return adopted
+
+
+def run_and_adopt_manual_fit(
+    project: WorkflowProject,
+    draft: ManualFitDraft,
+    group_index: int,
+    *,
+    max_nfev: int = 2500,
+) -> ManualFitExecutionOutcome:
+    """Run one Manual fit and atomically adopt its identity-mapped estimates."""
+
+    try:
+        readiness = manual_workflow_readiness(project, draft, group_index)
+    except WorkflowError as error:
+        return ManualFitExecutionOutcome(None, None, error.diagnostics)
+    if not readiness.runnable:
+        return ManualFitExecutionOutcome(
+            None,
+            None,
+            _readiness_execution_diagnostics(readiness, group_index=group_index),
+        )
+    if readiness.context is None:
+        raise RuntimeError("runnable Manual readiness must contain context")
+    model = _require_model(draft, group_index)
+    try:
+        materialized = materialize_manual_model(
+            model,
+            readiness.context.prepared_resolution,
+            readiness.context.selection,
+            group_index,
+        )
+    except (ManualMaterializationError, ValueError) as error:
+        return _failed_execution(
+            WorkflowDiagnosticCode.MANUAL_FIT_EXECUTION_FAILED,
+            str(error),
+            group_index=group_index,
+        )
+    try:
+        fit_result = fit_single_q(
+            readiness.context.prepared_resolution,
+            readiness.context.selection,
+            group_index,
+            materialized.fit_model,
+            max_nfev=max_nfev,
+        )
+    except FittingError as error:
+        return _failed_execution(
+            WorkflowDiagnosticCode.MANUAL_FIT_EXECUTION_FAILED,
+            str(error),
+            group_index=group_index,
+        )
+    if not isinstance(fit_result, FitResult):
+        return _failed_execution(
+            WorkflowDiagnosticCode.MANUAL_FIT_ADOPTION_FAILED,
+            "Manual fit did not return a FitResult",
+            group_index=group_index,
+        )
+    if not fit_result.diagnostics.optimizer_success:
+        return _failed_execution(
+            WorkflowDiagnosticCode.MANUAL_FIT_DID_NOT_CONVERGE,
+            "Manual fit optimizer did not converge",
+            group_index=group_index,
+            fit_result=fit_result,
+        )
+    try:
+        adopted_model = _adopt_manual_fit_values(model, fit_result, materialized)
+        adopted_materialized = materialize_manual_model(
+            adopted_model,
+            readiness.context.prepared_resolution,
+            readiness.context.selection,
+            group_index,
+        )
+    except (KeyError, ManualMaterializationError, ValueError) as error:
+        return _failed_execution(
+            WorkflowDiagnosticCode.MANUAL_FIT_ADOPTION_FAILED,
+            str(error),
+            group_index=group_index,
+            fit_result=fit_result,
+        )
+    adopted_readiness = manual_fit_readiness(
+        readiness.context.prepared_resolution,
+        readiness.context.selection,
+        group_index,
+        adopted_materialized.fit_model,
+    )
+    if not adopted_readiness.runnable:
+        message = "; ".join(item.message for item in adopted_readiness.diagnostics)
+        return _failed_execution(
+            WorkflowDiagnosticCode.MANUAL_FIT_ADOPTION_FAILED,
+            message or "adopted Manual state is not runnable",
+            group_index=group_index,
+            fit_result=fit_result,
+        )
+    adopted_draft = draft.with_model(group_index, adopted_model)
+    return ManualFitExecutionOutcome(fit_result, adopted_draft)

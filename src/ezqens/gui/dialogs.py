@@ -58,7 +58,11 @@ def choose_dialog(
         button.setDefault(choice.default)
         button.setAutoDefault(choice.default)
 
-        def accept(value: str = choice.value) -> None:
+        def accept(
+            _checked: bool = False,
+            *,
+            value: str = choice.value,
+        ) -> None:
             nonlocal selected
             selected = value
             dialog.accept()

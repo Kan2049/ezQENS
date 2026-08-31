@@ -28,8 +28,12 @@ from PySide6.QtWidgets import (
 )
 
 from ezqens.domain import DiagnosticSeverity, ReducedDataset
-from ezqens.fitting import ComponentIdentity, ManualModelPreview, ModelEvaluation
-from ezqens.gui.dialogs import show_message_dialog
+from ezqens.fitting import (
+    ComponentIdentity,
+    FitResult,
+    ManualModelPreview,
+    ModelEvaluation,
+)
 from ezqens.gui.q_editor import QAssignmentEditor
 from ezqens.gui.scientific_canvas import SCIENTIFIC_BACKGROUND, ScientificCanvas
 from ezqens.gui.theme import DEFAULT_LAYOUT_TOKENS
@@ -42,8 +46,11 @@ from ezqens.workflow import ManualComponentKind
 
 Q_DISPLAY_UNIT = "Å⁻¹"
 OVERVIEW_COLORMAP = "jet"
-OVERVIEW_ACTIVE_COLOR = "#496d91"
+OVERVIEW_ACCENT_COLOR = "#496d91"
+OVERVIEW_ACTIVE_COLOR = "#ffffff"
+OVERVIEW_ACTIVE_ALPHA = 0.26
 NAVIGATOR_INACTIVE_COLOR = "#8d969d"
+SPECTRUM_ZOOM_DRAG_THRESHOLD_PX = 4.0
 
 
 def axis_label(quantity: str, unit: str) -> str:
@@ -71,6 +78,7 @@ class ReducedDatasetView(QWidget):
     manual_component_completed = Signal(object, object)
     manual_component_preview_requested = Signal(object, object)
     manual_component_cancelled = Signal()
+    y_scale_changed = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -98,8 +106,8 @@ class ReducedDatasetView(QWidget):
         self._manual_interaction_start: tuple[float, float] | None = None
         self._manual_drag_point: tuple[float, float] | None = None
         self._manual_pointer_down = False
-        self._manual_geometry_artists: list[Line2D] = []
         self._manual_preview: ManualModelPreview | None = None
+        self._manual_fit_result: FitResult | None = None
         self._manual_pending_evaluation: ModelEvaluation | None = None
         self._manual_emphasized_components: frozenset[ComponentIdentity] = frozenset()
         self.current_group_index = 0
@@ -107,22 +115,29 @@ class ReducedDatasetView(QWidget):
         self.overview_q_axis: object | None = None
         self.navigator_axes: Axes | None = None
         self.spectrum_axes: Axes | None = None
+        self.residual_axes: Axes | None = None
+        self.standardized_residual_line: Line2D | None = None
         self.overview_meshes: tuple[QuadMesh, ...] = ()
         self.overview_x_cell_bounds: tuple[tuple[float, float], ...] = ()
         self.overview_active_highlight: Rectangle | None = None
         self._overview_q_label_artists: tuple[Text, ...] = ()
         self._navigator_q_label_artists: tuple[Text, ...] = ()
         self.spectrum_q_title: Text | None = None
+        self.spectrum_log_empty_message: Text | None = None
         self._spectrum_x_limits: tuple[float, float] | None = None
+        self._spectrum_y_limits: tuple[float, float] | None = None
+        self._spectrum_zoom_start: tuple[float, float] | None = None
+        self._spectrum_zoom_start_display: tuple[float, float] | None = None
+        self._spectrum_zoom_rectangle: Rectangle | None = None
         self.overview_visible = True
         self._navigation_drag_active = False
         self.y_scale = "linear"
-        self.y_range_locked = False
+        self.y_range_locked = True
         self._locked_y_limits: tuple[float, float] | None = None
         self._overview_surface = SCIENTIFIC_BACKGROUND
         self._overview_text = "#292928"
         self._overview_border = "#deded9"
-        self._overview_accent = OVERVIEW_ACTIVE_COLOR
+        self._overview_accent = OVERVIEW_ACCENT_COLOR
         self._overview_masked = "#8d819d"
 
         self.previous_button = QToolButton()
@@ -283,21 +298,36 @@ class ReducedDatasetView(QWidget):
         self._controls_layout.setSpacing(DEFAULT_LAYOUT_TOKENS.row_spacing)
         self.content_layout.setSpacing(DEFAULT_LAYOUT_TOKENS.section_spacing)
 
-    def open_dataset(self, dataset: ReducedDataset) -> None:
-        """Open real imported data at Group 1 without changing its arrays."""
+    def open_dataset(
+        self,
+        dataset: ReducedDataset,
+        *,
+        group_index: int = 0,
+        y_scale: str = "linear",
+    ) -> None:
+        """Open real imported data at a validated Group without changing arrays."""
+
+        if not 0 <= group_index < len(dataset.spectra):
+            raise ValueError("group index is outside the dataset")
+        if y_scale not in {"linear", "symlog", "log"}:
+            raise ValueError("y scale must be 'linear', 'symlog', or 'log'")
 
         self.cancel_manual_component_interaction()
         self.dataset = dataset
         self.selection = None
+        self._manual_preview = None
+        self._manual_fit_result = None
+        self._manual_pending_evaluation = None
         self.mask_inspection_mode = False
-        self.current_group_index = 0
+        self.current_group_index = group_index
         self._spectrum_x_limits = None
-        self.y_scale = "linear"
-        self.y_range_locked = False
+        self._spectrum_y_limits = None
+        self.y_scale = y_scale
+        self.y_range_locked = True
         self._locked_y_limits = None
         blocker = QSignalBlocker(self.group_spinbox)
         self.group_spinbox.setRange(1, len(dataset.spectra))
-        self.group_spinbox.setValue(1)
+        self.group_spinbox.setValue(group_index + 1)
         del blocker
         self._update_metadata_status()
         self._draw()
@@ -331,6 +361,7 @@ class ReducedDatasetView(QWidget):
 
         if tool not in {None, "boundary", "rectangle", "lasso"}:
             raise ValueError("unknown mask editing tool")
+        self._cancel_spectrum_zoom()
         self._cancel_mask_gesture()
         self._mask_tool = tool
         if tool is None:
@@ -353,18 +384,26 @@ class ReducedDatasetView(QWidget):
         """Clear the scientific view when its Workspace object is removed."""
 
         self.cancel_manual_component_interaction()
+        self._cancel_spectrum_zoom(redraw=False)
         self.dataset = None
         self.selection = None
+        self._manual_preview = None
+        self._manual_fit_result = None
+        self._manual_pending_evaluation = None
         self.overview_axes = None
         self.overview_q_axis = None
         self.navigator_axes = None
         self.spectrum_axes = None
+        self.residual_axes = None
+        self.standardized_residual_line = None
         self.overview_meshes = ()
         self.overview_x_cell_bounds = ()
         self.overview_active_highlight = None
         self._overview_q_label_artists = ()
         self._navigator_q_label_artists = ()
         self.spectrum_q_title = None
+        self._spectrum_x_limits = None
+        self._spectrum_y_limits = None
         self.q_editor.hide()
         self.overview_canvas.figure.clear()
         self.canvas.figure.clear()
@@ -418,7 +457,32 @@ class ReducedDatasetView(QWidget):
         self._manual_pending_evaluation = None
         self._manual_emphasized_components = emphasized_components
         if self.dataset is not None:
-            self._draw()
+            self._draw_spectrum_figure(self.dataset)
+            self.canvas.draw_idle()  # type: ignore[no-untyped-call]
+
+    def set_manual_fit_result(self, result: FitResult | None) -> None:
+        """Show only the current workflow/core FitResult evaluation."""
+
+        self._manual_fit_result = result
+        self._manual_pending_evaluation = None
+        if self.dataset is not None:
+            self._draw_spectrum_figure(self.dataset)
+            self.canvas.draw_idle()  # type: ignore[no-untyped-call]
+
+    def set_manual_display_state(
+        self,
+        preview: ManualModelPreview | None,
+        result: FitResult | None,
+    ) -> None:
+        """Redraw once from one coherent authoritative Manual display state."""
+
+        self._manual_preview = preview
+        self._manual_fit_result = result
+        self._manual_pending_evaluation = None
+        self._manual_emphasized_components = frozenset()
+        if self.dataset is not None:
+            self._draw_spectrum_figure(self.dataset)
+            self.canvas.draw_idle()  # type: ignore[no-untyped-call]
 
     def set_manual_pending_preview(
         self,
@@ -428,13 +492,15 @@ class ReducedDatasetView(QWidget):
 
         self._manual_pending_evaluation = evaluation
         if self.dataset is not None:
-            self._draw()
+            self._draw_spectrum_figure(self.dataset)
+            self.canvas.draw_idle()  # type: ignore[no-untyped-call]
 
     def begin_manual_component_interaction(self, kind: ManualComponentKind) -> None:
         """Enter a geometry-only component interaction without creating a model."""
 
         self._reset_manual_interaction_feedback()
         self._manual_component_kind = kind
+        self._cancel_spectrum_zoom()
         self._cancel_mask_gesture()
         self.canvas.setCursor(Qt.CursorShape.CrossCursor)
         self.setProperty("manualInteractionActive", True)
@@ -475,13 +541,12 @@ class ReducedDatasetView(QWidget):
             return "Add δ · Press and drag the peak position · Esc to cancel"
         if kind is ManualComponentKind.LORENTZIAN:
             return (
-                "Add Lorentzian · Press peak center and drag to half-width "
+                "Add Lorentzian · Press peak center and drag to set width "
                 "· Esc to cancel"
             )
         return "Add Background · Press and drag the baseline · Esc to cancel"
 
     def _reset_manual_interaction_feedback(self) -> None:
-        self._clear_manual_geometry()
         self._manual_pending_evaluation = None
         self._manual_interaction_start = None
         self._manual_drag_point = None
@@ -499,85 +564,6 @@ class ReducedDatasetView(QWidget):
             effect = widget.graphicsEffect()
             if effect is not None:
                 effect.setEnabled(False)
-
-    def _clear_manual_geometry(self) -> None:
-        for artist in self._manual_geometry_artists:
-            try:
-                artist.remove()
-            except ValueError:
-                pass
-        self._manual_geometry_artists = []
-
-    def _draw_manual_interaction_geometry(self) -> None:
-        axes = self.spectrum_axes
-        kind = self._manual_component_kind
-        if axes is None or kind is None:
-            return
-        self._clear_manual_geometry()
-        color = "#1677d2"
-        if kind is ManualComponentKind.ELASTIC:
-            point = self._manual_drag_point
-            if point is not None:
-                (marker,) = axes.plot(
-                    [point[0]],
-                    [point[1]],
-                    marker="o",
-                    markersize=6,
-                    color=color,
-                    fillstyle="none",
-                    linewidth=1.2,
-                    zorder=8,
-                )
-                self._manual_geometry_artists.append(marker)
-        elif kind is ManualComponentKind.LORENTZIAN:
-            center = self._manual_interaction_start
-            endpoint = self._manual_drag_point
-            if center is not None and endpoint is not None:
-                distance = abs(endpoint[0] - center[0])
-                (marker,) = axes.plot(
-                    [center[0]],
-                    [center[1]],
-                    marker="o",
-                    markersize=5,
-                    color=color,
-                    zorder=8,
-                )
-                (guide,) = axes.plot(
-                    [center[0] - distance, center[0] + distance],
-                    [center[1], center[1]],
-                    marker="|",
-                    markersize=8,
-                    color=color,
-                    linewidth=1.2,
-                    zorder=8,
-                )
-                self._manual_geometry_artists.extend((marker, guide))
-        else:
-            first = self._manual_interaction_start
-            provisional = self._manual_drag_point
-            if first is not None:
-                (first_marker,) = axes.plot(
-                    [first[0]],
-                    [first[1]],
-                    marker="o",
-                    markersize=6,
-                    color=color,
-                    fillstyle="none",
-                    zorder=8,
-                )
-                self._manual_geometry_artists.append(first_marker)
-            if first is not None and provisional is not None:
-                (line,) = axes.plot(
-                    [first[0], provisional[0]],
-                    [first[1], provisional[1]],
-                    marker="o",
-                    markersize=5,
-                    color=color,
-                    linewidth=1.2,
-                    zorder=8,
-                )
-                self._manual_geometry_artists.append(line)
-        self.canvas.draw_idle()  # type: ignore[no-untyped-call]
 
     def set_overview_theme(
         self,
@@ -611,6 +597,10 @@ class ReducedDatasetView(QWidget):
             raise ValueError("group index is outside the dataset")
         if self.spectrum_axes is not None:
             self._spectrum_x_limits = self.spectrum_axes.get_xlim()
+            if self.y_range_locked:
+                self._locked_y_limits = self.spectrum_axes.get_ylim()
+            else:
+                self._spectrum_y_limits = None
         self.current_group_index = group_index
         blocker = QSignalBlocker(self.group_spinbox)
         self.group_spinbox.setValue(group_index + 1)
@@ -659,9 +649,14 @@ class ReducedDatasetView(QWidget):
     def reset_view(self) -> None:
         """Reset independent spectrum and overview axes to their data limits."""
 
+        self._cancel_spectrum_zoom()
         self._spectrum_x_limits = None
+        self._spectrum_y_limits = None
+        self._locked_y_limits = None
         if self.dataset is not None:
             self._draw()
+            if self.y_range_locked and self.spectrum_axes is not None:
+                self._locked_y_limits = self.spectrum_axes.get_ylim()
 
     def _draw(self) -> None:
         dataset = self._require_dataset()
@@ -684,17 +679,74 @@ class ReducedDatasetView(QWidget):
             self.navigator_axes = overview_figure.add_subplot(111)
             self._draw_discrete_navigator(dataset, self.navigator_axes)
 
-        spectrum_figure = self.canvas.figure
-        spectrum_figure.clear()
-        self.spectrum_q_title = None
-        spectrum_figure.set_facecolor(SCIENTIFIC_BACKGROUND)
-        self.spectrum_axes = spectrum_figure.add_subplot(111)
-        self.spectrum_axes.set_facecolor(SCIENTIFIC_BACKGROUND)
-        self._draw_spectrum(dataset, self.spectrum_axes)
+        self._draw_spectrum_figure(dataset)
         self._update_navigation_state(dataset)
         self._update_overview_canvas_height()
         self.overview_canvas.draw_idle()  # type: ignore[no-untyped-call]
         self.canvas.draw_idle()  # type: ignore[no-untyped-call]
+
+    def _draw_spectrum_figure(self, dataset: ReducedDataset) -> None:
+        """Rebuild only the white Spectrum/result figure role."""
+
+        self._cancel_spectrum_zoom(redraw=False)
+        spectrum_figure = self.canvas.figure
+        spectrum_figure.clear()
+        self.spectrum_q_title = None
+        self.spectrum_log_empty_message = None
+        spectrum_figure.set_facecolor(SCIENTIFIC_BACKGROUND)
+        self.residual_axes = None
+        self.standardized_residual_line = None
+        if self._manual_fit_result is None:
+            self.spectrum_axes = spectrum_figure.add_subplot(111)
+        else:
+            result_grid = spectrum_figure.add_gridspec(
+                2,
+                1,
+                height_ratios=(4.0, 1.0),
+                hspace=0.04,
+            )
+            self.spectrum_axes = spectrum_figure.add_subplot(result_grid[0])
+            self.residual_axes = spectrum_figure.add_subplot(
+                result_grid[1],
+                sharex=self.spectrum_axes,
+            )
+        self.spectrum_axes.set_facecolor(SCIENTIFIC_BACKGROUND)
+        self._draw_spectrum(dataset, self.spectrum_axes)
+        if self.residual_axes is not None:
+            self._draw_standardized_residual(
+                dataset,
+                self.residual_axes,
+                self._manual_fit_result,
+            )
+
+    def _draw_standardized_residual(
+        self,
+        dataset: ReducedDataset,
+        axes: Axes,
+        result: FitResult | None,
+    ) -> None:
+        """Draw only the standardized residual supplied by the current FitResult."""
+
+        if result is None:
+            return
+        axes.set_facecolor(SCIENTIFIC_BACKGROUND)
+        (self.standardized_residual_line,) = axes.plot(
+            result.evaluation.energy,
+            result.standardized_residuals,
+            color="#496d91",
+            linewidth=0.9,
+            marker=".",
+            markersize=3.0,
+            zorder=3,
+        )
+        axes.axhline(0.0, color="#727272", linewidth=0.7, alpha=0.7, zorder=2)
+        spectrum = dataset.spectra[self.current_group_index]
+        axes.set_xlabel(axis_label("Energy", spectrum.energy_unit))
+        axes.set_ylabel("Std. residual")
+        axes.grid(True, color="#ededed", linewidth=0.5)
+        if self.spectrum_axes is not None:
+            self.spectrum_axes.set_xlabel("")
+            self.spectrum_axes.tick_params(axis="x", labelbottom=False)
 
     def _update_overview_canvas_height(self) -> None:
         """Reserve compact, DPI-aware space for the overview figure role."""
@@ -708,7 +760,11 @@ class ReducedDatasetView(QWidget):
             spectrum.intensity
         )
         excluded = self._effective_excluded_mask(spectrum.energy.size)
-        visible_points = finite_coordinates & ~excluded
+        retained_points = finite_coordinates & ~excluded
+        visible_points = retained_points
+        if self.y_scale == "log":
+            axes.set_yscale("log", nonpositive="mask")
+            visible_points = visible_points & (spectrum.intensity > 0.0)
         _plot_visible_spectrum_segments(
             axes,
             spectrum.energy,
@@ -729,6 +785,8 @@ class ReducedDatasetView(QWidget):
             )
         if self.mask_inspection_mode:
             masked_points = finite_coordinates & excluded
+            if self.y_scale == "log":
+                masked_points = masked_points & (spectrum.intensity > 0.0)
             if np.any(masked_points):
                 _draw_mask_inspection_spans(axes, spectrum.energy, masked_points)
                 axes.scatter(
@@ -740,7 +798,7 @@ class ReducedDatasetView(QWidget):
                     alpha=0.52,
                     zorder=3,
                 )
-            self._draw_mask_boundary_handles(axes, spectrum.energy, visible_points)
+            self._draw_mask_boundary_handles(axes, spectrum.energy, retained_points)
         self._draw_manual_preview(axes)
         axes.set_xlabel(axis_label("Energy", spectrum.energy_unit))
         axes.set_ylabel(axis_label("Intensity", spectrum.intensity_unit))
@@ -755,8 +813,21 @@ class ReducedDatasetView(QWidget):
                 "symlog",
                 linthresh=_symlog_linthresh(spectrum.intensity[visible_points]),
             )
-        else:
+        elif self.y_scale == "linear":
             axes.set_yscale(self.y_scale)
+        elif not self._log_display_has_positive_value(
+            spectrum.intensity[retained_points]
+        ):
+            self.spectrum_log_empty_message = axes.text(
+                0.5,
+                0.5,
+                "No positive values available for Log Y display",
+                transform=axes.transAxes,
+                ha="center",
+                va="center",
+                color="#676764",
+                fontsize=9,
+            )
         axes.grid(True, color="#e8e8e8", linewidth=0.6)
         if self._spectrum_x_limits is not None:
             axes.set_xlim(self._spectrum_x_limits)
@@ -764,19 +835,18 @@ class ReducedDatasetView(QWidget):
             axes.autoscale_view(scalex=False, scaley=True)
         if self.y_range_locked and self._locked_y_limits is not None:
             axes.set_ylim(self._locked_y_limits)
+        if self._spectrum_y_limits is not None:
+            axes.set_ylim(self._spectrum_y_limits)
 
     def _draw_manual_preview(self, axes: Axes) -> None:
         """Overlay the typed core preview without evaluating a scientific model here."""
 
-        preview = self._manual_preview
-        evaluation = self._manual_pending_evaluation
-        if evaluation is None and preview is not None:
-            evaluation = preview.display_evaluation
+        evaluation = self._manual_display_evaluation()
         if evaluation is None:
             return
         axes.plot(
             evaluation.energy,
-            evaluation.total,
+            self._log_display_values(evaluation.total),
             color="#314b63",
             linewidth=1.7,
             zorder=4,
@@ -785,7 +855,7 @@ class ReducedDatasetView(QWidget):
             emphasized = curve.component in self._manual_emphasized_components
             axes.plot(
                 evaluation.energy,
-                curve.values,
+                self._log_display_values(curve.values),
                 color="#6d8191",
                 linewidth=1.35 if emphasized else 0.8,
                 alpha=1.0 if emphasized else 0.58,
@@ -793,12 +863,45 @@ class ReducedDatasetView(QWidget):
             )
         axes.plot(
             evaluation.energy,
-            evaluation.background,
+            self._log_display_values(evaluation.background),
             color="#8a7564",
             linewidth=1.0,
             alpha=0.72,
             zorder=3,
         )
+
+    def _manual_display_evaluation(self) -> ModelEvaluation | None:
+        """Return the one evaluation currently selected by display precedence."""
+
+        if self._manual_pending_evaluation is not None:
+            return self._manual_pending_evaluation
+        if self._manual_fit_result is not None:
+            return self._manual_fit_result.evaluation
+        if self._manual_preview is not None:
+            return self._manual_preview.display_evaluation
+        return None
+
+    def _log_display_values(self, values: np.ndarray) -> np.ndarray:
+        """Mask non-positive curve values only for Matplotlib Log rendering."""
+
+        if self.y_scale != "log":
+            return values
+        return np.ma.masked_where(~np.isfinite(values) | (values <= 0.0), values)
+
+    def _log_display_has_positive_value(self, measured: np.ndarray) -> bool:
+        """Return whether any measured or Manual display layer can appear on Log."""
+
+        if np.any(np.isfinite(measured) & (measured > 0.0)):
+            return True
+        evaluation = self._manual_display_evaluation()
+        if evaluation is None:
+            return False
+        arrays = (
+            evaluation.total,
+            evaluation.background,
+            *(curve.values for curve in evaluation.component_curves),
+        )
+        return any(np.any(np.isfinite(values) & (values > 0.0)) for values in arrays)
 
     def _draw_mask_boundary_handles(
         self,
@@ -878,11 +981,10 @@ class ReducedDatasetView(QWidget):
         current_bounds = self.overview_x_cell_bounds[self.current_group_index]
         self.overview_active_highlight = axes.axvspan(
             *current_bounds,
-            facecolor=self._overview_accent,
-            alpha=0.18,
-            linewidth=0.8,
-            edgecolor=self._overview_accent,
-            zorder=3,
+            facecolor=(1.0, 1.0, 1.0, OVERVIEW_ACTIVE_ALPHA),
+            linewidth=1.25,
+            edgecolor=OVERVIEW_ACTIVE_COLOR,
+            zorder=4,
         )
         spectrum = dataset.spectra[self.current_group_index]
         axes.set_ylabel(axis_label("Energy", spectrum.energy_unit), fontsize=8)
@@ -1194,9 +1296,11 @@ class ReducedDatasetView(QWidget):
         if self._manual_component_kind is not None:
             self._handle_manual_component_press(event)
             return
+        if self._mask_tool is None:
+            self._handle_spectrum_zoom_press(event)
+            return
         if (
-            self._mask_tool is None
-            or event.button is not MouseButton.LEFT
+            event.button is not MouseButton.LEFT
             or event.inaxes is not self.spectrum_axes
         ):
             return
@@ -1245,6 +1349,7 @@ class ReducedDatasetView(QWidget):
             self._handle_manual_component_motion(event)
             return
         if self._mask_tool is None:
+            self._handle_spectrum_zoom_motion(event)
             return
         if self._boundary_drag_side is not None:
             if event.inaxes is self.spectrum_axes and event.xdata is not None:
@@ -1268,6 +1373,9 @@ class ReducedDatasetView(QWidget):
     def _on_spectrum_button_release(self, event: MouseEvent) -> None:
         if self._manual_component_kind is not None:
             self._handle_manual_component_release(event)
+            return
+        if self._mask_tool is None:
+            self._handle_spectrum_zoom_release(event)
             return
         if self._boundary_drag_side is not None:
             side = self._boundary_drag_side
@@ -1316,10 +1424,149 @@ class ReducedDatasetView(QWidget):
             if self._manual_component_kind is not None:
                 self.cancel_manual_component_interaction()
                 return
+            if self._spectrum_zoom_start is not None:
+                self._cancel_spectrum_zoom()
+                return
             self._cancel_mask_gesture()
 
+    def _handle_spectrum_zoom_press(self, event: MouseEvent) -> None:
+        """Begin an idle, display-only rubber-band zoom gesture."""
+
+        if getattr(event, "dblclick", False) and self._event_hits_spectrum_label(
+            event,
+        ):
+            return
+        if (
+            event.button is not MouseButton.LEFT
+            or event.inaxes is not self.spectrum_axes
+        ):
+            return
+        if getattr(event, "dblclick", False):
+            self.reset_view()
+            return
+        if event.xdata is None or event.ydata is None:
+            return
+        display_point = self._spectrum_event_display_point(event)
+        if display_point is None:
+            return
+        start = (float(event.xdata), float(event.ydata))
+        self._cancel_spectrum_zoom(redraw=False)
+        self._spectrum_zoom_start = start
+        self._spectrum_zoom_start_display = display_point
+        self._spectrum_zoom_rectangle = Rectangle(
+            start,
+            0.0,
+            0.0,
+            facecolor="#496d91",
+            edgecolor="#314b63",
+            alpha=0.16,
+            linewidth=1.0,
+            zorder=7,
+        )
+        assert self.spectrum_axes is not None
+        self.spectrum_axes.add_patch(self._spectrum_zoom_rectangle)
+        self.canvas.draw_idle()  # type: ignore[no-untyped-call]
+
+    def _event_hits_spectrum_label(self, event: MouseEvent) -> bool:
+        axes = self.spectrum_axes
+        if axes is None:
+            return False
+        if self.spectrum_q_title is not None and _event_hits_text(
+            event,
+            self.spectrum_q_title,
+        ):
+            return True
+        return bool(axes.xaxis.label.contains(event)[0])
+
+    def _handle_spectrum_zoom_motion(self, event: MouseEvent) -> None:
+        """Update the visible idle zoom rectangle while the pointer is held."""
+
+        if (
+            self._spectrum_zoom_start is None
+            or self._spectrum_zoom_rectangle is None
+            or event.inaxes is not self.spectrum_axes
+            or event.xdata is None
+            or event.ydata is None
+        ):
+            return
+        start_x, start_y = self._spectrum_zoom_start
+        end_x, end_y = float(event.xdata), float(event.ydata)
+        self._spectrum_zoom_rectangle.set_bounds(
+            min(start_x, end_x),
+            min(start_y, end_y),
+            abs(end_x - start_x),
+            abs(end_y - start_y),
+        )
+        self.canvas.draw_idle()  # type: ignore[no-untyped-call]
+
+    def _handle_spectrum_zoom_release(self, event: MouseEvent) -> None:
+        """Apply normalized Spectrum view limits for a non-trivial idle drag."""
+
+        start = self._spectrum_zoom_start
+        start_display = self._spectrum_zoom_start_display
+        if start is None or start_display is None:
+            return
+        if (
+            event.inaxes is not self.spectrum_axes
+            or event.xdata is None
+            or event.ydata is None
+        ):
+            self._cancel_spectrum_zoom()
+            return
+        end = (float(event.xdata), float(event.ydata))
+        end_display = self._spectrum_event_display_point(event)
+        self._cancel_spectrum_zoom(redraw=False)
+        if (
+            end_display is None
+            or max(
+                abs(end_display[0] - start_display[0]),
+                abs(end_display[1] - start_display[1]),
+            )
+            < SPECTRUM_ZOOM_DRAG_THRESHOLD_PX
+        ):
+            self.canvas.draw_idle()  # type: ignore[no-untyped-call]
+            return
+        x_limits = (min(start[0], end[0]), max(start[0], end[0]))
+        y_limits = (min(start[1], end[1]), max(start[1], end[1]))
+        if x_limits[0] == x_limits[1] or y_limits[0] == y_limits[1]:
+            self.canvas.draw_idle()  # type: ignore[no-untyped-call]
+            return
+        axes = self.spectrum_axes
+        if axes is None:
+            return
+        axes.set_xlim(x_limits)
+        axes.set_ylim(y_limits)
+        self._spectrum_x_limits = axes.get_xlim()
+        self._spectrum_y_limits = axes.get_ylim()
+        if self.y_range_locked:
+            self._locked_y_limits = axes.get_ylim()
+        self.canvas.draw_idle()  # type: ignore[no-untyped-call]
+
+    def _spectrum_event_display_point(
+        self,
+        event: MouseEvent,
+    ) -> tuple[float, float] | None:
+        event_x = getattr(event, "x", None)
+        event_y = getattr(event, "y", None)
+        if event_x is not None and event_y is not None:
+            return float(event_x), float(event_y)
+        if self.spectrum_axes is None or event.xdata is None or event.ydata is None:
+            return None
+        point = self.spectrum_axes.transData.transform((event.xdata, event.ydata))
+        return float(point[0]), float(point[1])
+
+    def _cancel_spectrum_zoom(self, *, redraw: bool = True) -> None:
+        rectangle = self._spectrum_zoom_rectangle
+        self._spectrum_zoom_rectangle = None
+        self._spectrum_zoom_start = None
+        self._spectrum_zoom_start_display = None
+        if rectangle is not None and rectangle.axes is not None:
+            rectangle.remove()
+            if redraw:
+                self.canvas.draw_idle()  # type: ignore[no-untyped-call]
+
     def _handle_manual_component_press(self, event: MouseEvent) -> None:
-        """Capture the first public interaction hint for the pending component."""
+        """Capture the first hint and request its workflow scientific preview."""
 
         if (
             event.button is not MouseButton.LEFT
@@ -1332,12 +1579,10 @@ class ReducedDatasetView(QWidget):
         self._manual_pointer_down = True
         self._manual_interaction_start = start
         self._manual_drag_point = start
-        self._clear_manual_geometry()
         self._request_manual_component_preview()
-        self._draw_manual_interaction_geometry()
 
     def _handle_manual_component_motion(self, event: MouseEvent) -> None:
-        """Update geometry-only feedback while one Spectrum press is held."""
+        """Update workflow scientific feedback while one Spectrum press is held."""
 
         if (
             not self._manual_pointer_down
@@ -1348,9 +1593,7 @@ class ReducedDatasetView(QWidget):
             return
         point = (float(event.xdata), float(event.ydata))
         self._manual_drag_point = point
-        self._clear_manual_geometry()
         self._request_manual_component_preview()
-        self._draw_manual_interaction_geometry()
 
     def _request_manual_component_preview(self) -> None:
         """Forward raw gesture geometry without deriving scientific parameters."""
@@ -1385,7 +1628,7 @@ class ReducedDatasetView(QWidget):
         self.manual_component_preview_requested.emit(kind, hints)
 
     def _handle_manual_component_release(self, event: MouseEvent) -> None:
-        """Advance or submit one component's press/drag/release geometry."""
+        """Submit the final raw gesture hints for one pending component."""
 
         if not self._manual_pointer_down:
             return
@@ -1578,23 +1821,14 @@ class ReducedDatasetView(QWidget):
 
         if scale not in {"linear", "symlog", "log"}:
             raise ValueError("y scale must be 'linear', 'symlog', or 'log'")
-        dataset = self._require_dataset()
-        spectrum = dataset.spectra[self.current_group_index]
-        effective = ~self._effective_excluded_mask(spectrum.energy.size)
-        displayed = spectrum.intensity[np.isfinite(spectrum.intensity) & effective]
-        if scale == "log" and (not displayed.size or np.any(displayed <= 0.0)):
-            show_message_dialog(
-                self,
-                "Log Y Scale Unavailable",
-                "Log display requires positive visible intensity values. Choose "
-                "SymLog to inspect negative, zero, and positive values.",
-            )
-            return False
+        self._require_dataset()
         self.y_scale = scale
+        self._spectrum_y_limits = None
         self._locked_y_limits = None
         self._draw()
         if self.y_range_locked and self.spectrum_axes is not None:
             self._locked_y_limits = self.spectrum_axes.get_ylim()
+        self.y_scale_changed.emit(scale)
         return True
 
     def set_y_range_locked(self, locked: bool) -> None:
@@ -1729,6 +1963,7 @@ class ReducedDatasetView(QWidget):
             self._spectrum_x_limits = axes.get_xlim()
         if inside_body or in_y_axis:
             axes.set_ylim(*_zoom_limits(axes.get_ylim(), float(y_cursor), scale))
+            self._spectrum_y_limits = axes.get_ylim()
             if self.y_range_locked:
                 self._locked_y_limits = axes.get_ylim()
         self.canvas.draw_idle()  # type: ignore[no-untyped-call]

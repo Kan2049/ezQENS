@@ -12,22 +12,34 @@ import pytest
 
 import ezqens.fitting as fitting_module
 import ezqens.workflow.manual as manual_workflow_module
-from ezqens.domain import QBins, ReducedDataset, Spectrum, SpectrumRole
+from ezqens.domain import (
+    DiagnosticSeverity,
+    QBins,
+    ReducedDataset,
+    Spectrum,
+    SpectrumRole,
+)
 from ezqens.fitting import (
+    BACKGROUND_COMPONENT,
     ELASTIC_COMPONENT,
     BackgroundModel,
     ComponentFamily,
     ComponentIdentity,
     ElasticInteractionSeed,
     FitResult,
+    FittingError,
     LorentzianInteractionSeed,
+    ManualFitDiagnosticCode,
     ManualFitReadiness,
+    ManualFitReadinessDiagnostic,
     ManualModelPreview,
     ManualParameterIntent,
     ParameterFamily,
     ParameterReference,
+    SpectralModelDefinition,
 )
 from ezqens.preprocessing import FittingSelection, detect_edge_padding
+from ezqens.resolution import PreparedResolution
 from ezqens.workflow import (
     ManualCenterGroupState,
     ManualComponentKind,
@@ -66,6 +78,7 @@ from ezqens.workflow import (
     replace_project_dataset,
     rerole_project_dataset,
     resolve_manual_fit_context,
+    run_and_adopt_manual_fit,
     run_manual_fit,
     untie_parameter,
     update_manual_parameter,
@@ -78,8 +91,9 @@ def intent(
     upper: float | None = None,
     *,
     free: bool = False,
+    bounds_enabled: bool = True,
 ) -> ManualParameterIntent:
-    return ManualParameterIntent(value, lower, upper, free)
+    return ManualParameterIntent(value, lower, upper, free, bounds_enabled)
 
 
 def make_dataset(
@@ -1126,6 +1140,136 @@ def test_parameter_edit_preserves_unrelated_identity_and_state() -> None:
     assert result.parameter_ties == model.parameter_ties
 
 
+def test_parameter_edit_deletes_one_bound_without_disabling_bounds() -> None:
+    project, sample, _ = configured_project()
+    offset = ParameterReference(BACKGROUND_COMPONENT, ParameterFamily.OFFSET)
+    draft = open_manual_fit_draft(project, sample).with_model(
+        0,
+        ManualModelState(
+            background=BackgroundModel.CONSTANT,
+            b0=intent(0.2, -0.5, 0.5, free=True),
+        ),
+    )
+
+    updated = update_manual_parameter(
+        draft,
+        0,
+        offset,
+        ManualParameterEdit(
+            current_value=0.2,
+            user_lower_limit=None,
+            user_upper_limit=0.5,
+            free=True,
+            user_bounds_enabled=True,
+        ),
+    )
+
+    model = updated.setup(0).model
+    assert model is not None
+    stored = model.parameter_intent(offset)
+    assert stored.user_lower_limit is None
+    assert stored.user_upper_limit == 0.5
+    assert stored.user_bounds_enabled
+
+
+def test_disabled_inverted_bounds_are_runnable_until_reenabled() -> None:
+    project, sample, _ = configured_project()
+    offset = ParameterReference(BACKGROUND_COMPONENT, ParameterFamily.OFFSET)
+    draft = open_manual_fit_draft(project, sample).with_model(
+        0,
+        ManualModelState(
+            background=BackgroundModel.CONSTANT,
+            b0=intent(
+                0.3,
+                0.8,
+                0.2,
+                free=True,
+                bounds_enabled=False,
+            ),
+        ),
+    )
+
+    disabled = materialize_manual_setup(project, draft, 0).parameter(offset)
+    assert manual_workflow_readiness(project, draft, 0).runnable
+    assert disabled.intent.user_lower_limit == 0.8
+    assert disabled.intent.user_upper_limit == 0.2
+    assert not disabled.intent.user_bounds_enabled
+    assert np.isneginf(disabled.fit_configuration.lower_bound)
+    assert np.isposinf(disabled.fit_configuration.upper_bound)
+
+    enabled = update_manual_parameter(
+        draft,
+        0,
+        offset,
+        ManualParameterEdit(0.3, 0.8, 0.2, True, True),
+    )
+    readiness = manual_workflow_readiness(project, enabled, 0)
+    assert not readiness.runnable
+    assert readiness.workflow_diagnostics[0].code is (
+        WorkflowDiagnosticCode.MANUAL_MATERIALIZATION_FAILED
+    )
+
+
+def test_tie_untie_and_clone_preserve_bounds_enabled_state() -> None:
+    project, sample, _ = configured_project()
+    first = lorentzian_identity("bounds-first")
+    second = lorentzian_identity("bounds-second")
+    first_area = ref(first, ParameterFamily.AREA)
+    second_area = ref(second, ParameterFamily.AREA)
+    model = ManualModelState(
+        lorentzians=(
+            ManualLorentzianState(
+                area=intent(0.2, 0.1, 0.5),
+                fwhm=intent(0.1),
+                center=intent(0.0),
+                identity=first,
+            ),
+            ManualLorentzianState(
+                area=intent(0.3),
+                fwhm=intent(0.15),
+                center=intent(0.0),
+                identity=second,
+            ),
+        ),
+    )
+    draft = open_manual_fit_draft(project, sample).with_model(0, model)
+    draft = create_parameter_tie(
+        draft,
+        0,
+        (first_area,),
+        source_member=first_area,
+        tie_group_id="bounds-chain",
+    )
+    draft = update_manual_parameter(
+        draft,
+        0,
+        first_area,
+        ManualParameterEdit(0.25, 0.1, 0.5, False, False),
+    )
+    draft = join_parameter_tie(draft, 0, "bounds-chain", second_area)
+
+    tied = draft.setup(0).model
+    assert tied is not None
+    assert tied.parameter_intent(first_area) is tied.parameter_intent(second_area)
+    assert not tied.parameter_intent(first_area).user_bounds_enabled
+
+    untied = untie_parameter(draft, 0, second_area)
+    untied_model = untied.setup(0).model
+    assert untied_model is not None
+    departing = untied_model.parameter_intent(second_area)
+    assert departing == ManualParameterIntent(0.25, 0.1, 0.5, False, False)
+    assert departing is not untied_model.parameter_intent(first_area)
+
+    applied = apply_manual_setup_to_all_groups(project, draft, 0)
+    for setup in applied.setups:
+        copied = setup.model
+        assert copied is not None
+        assert len(copied.parameter_ties) == 1
+        assert not copied.parameter_ties[0].intent.user_bounds_enabled
+        assert copied.parameter_ties[0].intent.user_lower_limit == 0.1
+        assert copied.parameter_ties[0].intent.user_upper_limit == 0.5
+
+
 def test_tie_create_join_untie_and_multiple_same_family_groups() -> None:
     first = lorentzian_identity("first")
     second = lorentzian_identity("second")
@@ -1643,3 +1787,402 @@ def test_thin_readiness_preview_and_run_delegate_to_frozen_core(
     assert preview is preview_sentinel
     assert result is fit_sentinel
     assert calls == ["readiness", "preview", "fit"]
+
+
+def test_run_and_adopt_updates_values_preserves_intent_and_seeds_next_run() -> None:
+    project, sample, _ = configured_project()
+    original_model = ManualModelState(
+        background=BackgroundModel.LINEAR,
+        b0=intent(0.5, 0.0, 2.0, free=True),
+        b1=intent(0.0, -1.0, 1.0),
+    )
+    original = open_manual_fit_draft(project, sample).with_model(0, original_model)
+    background_offset = ParameterReference(
+        BACKGROUND_COMPONENT,
+        ParameterFamily.OFFSET,
+    )
+    background_slope = ParameterReference(
+        BACKGROUND_COMPONENT,
+        ParameterFamily.SLOPE,
+    )
+
+    first = run_and_adopt_manual_fit(project, original, 0)
+
+    assert first.success
+    assert first.fit_result is not None
+    assert first.adopted_draft is not None
+    assert original.setup(0).model is original_model
+    assert original_model.b0 == intent(0.5, 0.0, 2.0, free=True)
+    adopted_model = first.adopted_draft.setup(0).model
+    assert adopted_model is not None
+    adopted_offset = adopted_model.parameter_intent(background_offset)
+    fitted_offset = first.fit_result.parameter_by_reference(background_offset)
+    assert adopted_offset.current_value == pytest.approx(fitted_offset.value)
+    assert adopted_offset.user_lower_limit == 0.0
+    assert adopted_offset.user_upper_limit == 2.0
+    assert adopted_offset.free
+    adopted_slope = adopted_model.parameter_intent(background_slope)
+    assert adopted_slope.current_value == pytest.approx(
+        first.fit_result.parameter_by_reference(background_slope).value
+    )
+    assert adopted_slope.user_lower_limit == -1.0
+    assert adopted_slope.user_upper_limit == 1.0
+    assert not adopted_slope.free
+
+    second = run_and_adopt_manual_fit(project, first.adopted_draft, 0)
+
+    assert second.success
+    assert second.fit_result is not None
+    assert second.fit_result.configuration.b0 is not None
+    assert second.fit_result.configuration.b0.initial_value == pytest.approx(
+        fitted_offset.value
+    )
+
+
+def test_run_and_adopt_accepts_active_bound_without_changing_user_limits() -> None:
+    project, sample, _ = configured_project()
+    model = ManualModelState(
+        background=BackgroundModel.CONSTANT,
+        b0=intent(0.5, 0.0, 0.8, free=True),
+    )
+    draft = open_manual_fit_draft(project, sample).with_model(0, model)
+    background_offset = ParameterReference(
+        BACKGROUND_COMPONENT,
+        ParameterFamily.OFFSET,
+    )
+
+    outcome = run_and_adopt_manual_fit(project, draft, 0)
+
+    assert outcome.success
+    assert outcome.fit_result is not None
+    assert outcome.adopted_draft is not None
+    estimate = outcome.fit_result.parameter_by_reference(background_offset)
+    assert estimate.active_upper_bound
+    adopted_model = outcome.adopted_draft.setup(0).model
+    assert adopted_model is not None
+    adopted = adopted_model.parameter_intent(background_offset)
+    assert adopted.current_value == pytest.approx(estimate.value)
+    assert adopted.user_lower_limit == 0.0
+    assert adopted.user_upper_limit == 0.8
+    assert adopted.free
+    rematerialized = materialize_manual_setup(
+        project,
+        outcome.adopted_draft,
+        0,
+    ).parameter(background_offset)
+    assert (
+        rematerialized.fit_configuration.lower_bound
+        <= (rematerialized.fit_configuration.initial_value)
+        <= rematerialized.fit_configuration.upper_bound
+    )
+    assert rematerialized.intent.current_value == pytest.approx(estimate.value)
+
+
+def test_run_and_adopt_preserves_disabled_dormant_user_bounds() -> None:
+    project, sample, _ = configured_project()
+    model = ManualModelState(
+        background=BackgroundModel.CONSTANT,
+        b0=intent(
+            0.5,
+            0.0,
+            0.8,
+            free=True,
+            bounds_enabled=False,
+        ),
+    )
+    draft = open_manual_fit_draft(project, sample).with_model(0, model)
+    background_offset = ParameterReference(
+        BACKGROUND_COMPONENT,
+        ParameterFamily.OFFSET,
+    )
+
+    outcome = run_and_adopt_manual_fit(project, draft, 0)
+
+    assert outcome.success
+    assert outcome.fit_result is not None
+    assert outcome.adopted_draft is not None
+    estimate = outcome.fit_result.parameter_by_reference(background_offset)
+    assert estimate.value > 0.8
+    assert not estimate.active_upper_bound
+    assert np.isposinf(estimate.upper_bound)
+    adopted_model = outcome.adopted_draft.setup(0).model
+    assert adopted_model is not None
+    adopted = adopted_model.parameter_intent(background_offset)
+    assert adopted.current_value == pytest.approx(estimate.value)
+    assert adopted.user_lower_limit == 0.0
+    assert adopted.user_upper_limit == 0.8
+    assert adopted.free
+    assert not adopted.user_bounds_enabled
+
+
+def test_run_and_adopt_uses_reference_identity_after_fwhm_reordering() -> None:
+    project, sample, _ = configured_project()
+    broad = lorentzian_identity("submitted-broad")
+    narrow = lorentzian_identity("submitted-narrow")
+    model = ManualModelState(
+        lorentzians=(
+            ManualLorentzianState(
+                area=intent(0.2, 0.0),
+                fwhm=intent(0.3, 1.0e-8),
+                center=intent(-0.02, -0.1, 0.1),
+                identity=broad,
+            ),
+            ManualLorentzianState(
+                area=intent(0.1, 0.0),
+                fwhm=intent(0.08, 1.0e-8),
+                center=intent(0.03, -0.1, 0.1),
+                identity=narrow,
+            ),
+        ),
+        background=BackgroundModel.CONSTANT,
+        b0=intent(0.5, 0.0, 2.0, free=True),
+    )
+    draft = open_manual_fit_draft(project, sample).with_model(0, model)
+
+    outcome = run_and_adopt_manual_fit(project, draft, 0)
+
+    assert outcome.success
+    assert outcome.fit_result is not None
+    assert outcome.adopted_draft is not None
+    assert outcome.fit_result.fitted_model is not None
+    assert tuple(
+        component.identity for component in outcome.fit_result.fitted_model.lorentzians
+    ) == (narrow, broad)
+    adopted = outcome.adopted_draft.setup(0).model
+    assert adopted is not None
+    assert tuple(component.identity for component in adopted.lorentzians) == (
+        broad,
+        narrow,
+    )
+    for reference in model.parameter_references():
+        assert adopted.parameter_intent(reference).current_value == pytest.approx(
+            outcome.fit_result.parameter_by_reference(reference).value
+        )
+
+
+def test_run_and_adopt_preserves_singleton_and_multiple_tie_topology() -> None:
+    project, sample, _ = configured_project()
+    identities = tuple(lorentzian_identity(f"adopt-tie-{index}") for index in range(3))
+    area_references = tuple(
+        ref(identity, ParameterFamily.AREA) for identity in identities
+    )
+    model = ManualModelState(
+        lorentzians=tuple(
+            ManualLorentzianState(
+                area=intent(0.15 + 0.05 * index, 0.0),
+                fwhm=intent(0.08 + 0.04 * index, 1.0e-8),
+                center=intent(0.0, -0.1, 0.1),
+                identity=identity,
+            )
+            for index, identity in enumerate(identities)
+        ),
+        background=BackgroundModel.CONSTANT,
+        b0=intent(0.5, 0.0, 2.0, free=True),
+        parameter_ties=(
+            ManualParameterTieState(
+                "shared-areas",
+                area_references[:2],
+                intent(0.25, 0.0),
+            ),
+            ManualParameterTieState(
+                "singleton-area",
+                area_references[2:],
+                intent(0.4, 0.0),
+            ),
+        ),
+    )
+    draft = open_manual_fit_draft(project, sample).with_model(0, model)
+
+    outcome = run_and_adopt_manual_fit(project, draft, 0)
+
+    assert outcome.success
+    assert outcome.fit_result is not None
+    assert outcome.adopted_draft is not None
+    adopted = outcome.adopted_draft.setup(0).model
+    assert adopted is not None
+    assert tuple(
+        (group.group_id, group.members) for group in adopted.parameter_ties
+    ) == tuple((group.group_id, group.members) for group in model.parameter_ties)
+    assert adopted.parameter_intent(area_references[0]) is adopted.parameter_intent(
+        area_references[1]
+    )
+    assert adopted.parameter_intent(area_references[2]) is not adopted.parameter_intent(
+        area_references[0]
+    )
+    assert adopted.parameter_intent(area_references[0]).current_value == pytest.approx(
+        outcome.fit_result.parameter_by_reference(area_references[0]).value
+    )
+    assert adopted.parameter_intent(area_references[2]).current_value == pytest.approx(
+        outcome.fit_result.parameter_by_reference(area_references[2]).value
+    )
+
+
+def test_run_and_adopt_accepts_success_without_covariance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project, sample, _ = configured_project()
+    draft = open_manual_fit_draft(project, sample).with_model(
+        0,
+        ManualModelState(
+            background=BackgroundModel.CONSTANT,
+            b0=intent(0.5, 0.0, 2.0, free=True),
+        ),
+    )
+    fit_result = run_manual_fit(project, draft, 0)
+    without_covariance = replace(
+        fit_result,
+        covariance=None,
+        correlation=None,
+        diagnostics=replace(
+            fit_result.diagnostics,
+            covariance_available=False,
+        ),
+    )
+    monkeypatch.setattr(
+        manual_workflow_module,
+        "fit_single_q",
+        lambda *args, **kwargs: without_covariance,
+    )
+
+    outcome = run_and_adopt_manual_fit(project, draft, 0)
+
+    assert outcome.success
+    assert outcome.fit_result is without_covariance
+    assert outcome.adopted_draft is not None
+
+
+def test_run_and_adopt_contains_optimizer_and_fitting_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project, sample, _ = configured_project()
+    model = ManualModelState(
+        background=BackgroundModel.CONSTANT,
+        b0=intent(0.5, 0.0, 2.0, free=True),
+    )
+    draft = open_manual_fit_draft(project, sample).with_model(0, model)
+    fit_result = run_manual_fit(project, draft, 0)
+    nonconverged = replace(
+        fit_result,
+        diagnostics=replace(fit_result.diagnostics, optimizer_success=False),
+    )
+    monkeypatch.setattr(
+        manual_workflow_module,
+        "fit_single_q",
+        lambda *args, **kwargs: nonconverged,
+    )
+
+    failed = run_and_adopt_manual_fit(project, draft, 0)
+
+    assert not failed.success
+    assert failed.fit_result is nonconverged
+    assert failed.adopted_draft is None
+    assert failed.diagnostics[0].code is (
+        WorkflowDiagnosticCode.MANUAL_FIT_DID_NOT_CONVERGE
+    )
+    assert draft.setup(0).model is model
+
+    def raise_fitting_error(*args: object, **kwargs: object) -> FitResult:
+        raise FittingError("controlled fitting failure")
+
+    monkeypatch.setattr(
+        manual_workflow_module,
+        "fit_single_q",
+        raise_fitting_error,
+    )
+    errored = run_and_adopt_manual_fit(project, draft, 0)
+    assert not errored.success
+    assert errored.fit_result is None
+    assert errored.adopted_draft is None
+    assert errored.diagnostics[0].code is (
+        WorkflowDiagnosticCode.MANUAL_FIT_EXECUTION_FAILED
+    )
+    assert draft.setup(0).model is model
+
+
+def test_run_and_adopt_rejects_malformed_reference_coverage_atomically(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project, sample, _ = configured_project()
+    model = ManualModelState(
+        background=BackgroundModel.CONSTANT,
+        b0=intent(0.5, 0.0, 2.0, free=True),
+    )
+    draft = open_manual_fit_draft(project, sample).with_model(0, model)
+    fit_result = run_manual_fit(project, draft, 0)
+    malformed = replace(
+        fit_result,
+        parameters=(replace(fit_result.parameters[0], references=()),),
+    )
+    monkeypatch.setattr(
+        manual_workflow_module,
+        "fit_single_q",
+        lambda *args, **kwargs: malformed,
+    )
+
+    outcome = run_and_adopt_manual_fit(project, draft, 0)
+
+    assert not outcome.success
+    assert outcome.fit_result is malformed
+    assert outcome.adopted_draft is None
+    assert outcome.diagnostics[0].code is (
+        WorkflowDiagnosticCode.MANUAL_FIT_ADOPTION_FAILED
+    )
+    assert "exact parameter-reference coverage" in outcome.diagnostics[0].message
+    assert draft.setup(0).model is model
+
+
+def test_run_and_adopt_revalidates_complete_adopted_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project, sample, _ = configured_project()
+    model = ManualModelState(
+        background=BackgroundModel.CONSTANT,
+        b0=intent(0.5, 0.0, 2.0, free=True),
+    )
+    draft = open_manual_fit_draft(project, sample).with_model(0, model)
+    actual_readiness = fitting_module.manual_fit_readiness
+    calls = 0
+
+    def staged_readiness(
+        prepared_resolution: PreparedResolution,
+        selection: FittingSelection,
+        group_index: int,
+        fit_model: SpectralModelDefinition,
+    ) -> ManualFitReadiness:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return actual_readiness(
+                prepared_resolution,
+                selection,
+                group_index,
+                fit_model,
+            )
+        return ManualFitReadiness(
+            False,
+            (
+                ManualFitReadinessDiagnostic(
+                    ManualFitDiagnosticCode.INVALID_PARAMETER_CONFIGURATION,
+                    DiagnosticSeverity.ERROR,
+                    "forced adopted-state validation failure",
+                ),
+            ),
+        )
+
+    monkeypatch.setattr(
+        manual_workflow_module,
+        "manual_fit_readiness",
+        staged_readiness,
+    )
+
+    outcome = run_and_adopt_manual_fit(project, draft, 0)
+
+    assert calls == 2
+    assert not outcome.success
+    assert outcome.fit_result is not None
+    assert outcome.adopted_draft is None
+    assert outcome.diagnostics[0].code is (
+        WorkflowDiagnosticCode.MANUAL_FIT_ADOPTION_FAILED
+    )
+    assert "forced adopted-state validation failure" in outcome.diagnostics[0].message
+    assert draft.setup(0).model is model

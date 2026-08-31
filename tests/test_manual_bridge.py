@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import math
+from dataclasses import replace
+from typing import cast
 
 import numpy as np
 import numpy.typing as npt
@@ -580,6 +582,114 @@ def test_materialization_without_or_with_valid_user_limits() -> None:
     assert limited.fit_configuration.lower_bound == -0.5
     assert limited.fit_configuration.upper_bound == 0.5
     assert limited.fit_configuration.initial_value == 0.2
+
+
+@pytest.mark.parametrize(
+    ("lower", "upper", "expected_lower", "expected_upper"),
+    [
+        (None, None, -np.inf, np.inf),
+        (-0.5, None, -0.5, np.inf),
+        (None, 0.5, -np.inf, 0.5),
+        (-0.5, 0.5, -0.5, 0.5),
+    ],
+)
+def test_enabled_user_bounds_support_every_optional_side_combination(
+    lower: float | None,
+    upper: float | None,
+    expected_lower: float,
+    expected_upper: float,
+) -> None:
+    materialized = materialize_manual_parameter(
+        ManualParameterIntent(
+            0.2,
+            user_lower_limit=lower,
+            user_upper_limit=upper,
+            user_bounds_enabled=True,
+        ),
+        ManualParameterKind.UNCONSTRAINED,
+    )
+
+    assert materialized.fit_configuration.lower_bound == expected_lower
+    assert materialized.fit_configuration.upper_bound == expected_upper
+
+
+def test_disabled_user_bounds_are_dormant_while_core_bounds_remain_active() -> None:
+    dormant = ManualParameterIntent(
+        0.4,
+        user_lower_limit=0.8,
+        user_upper_limit=0.2,
+        user_bounds_enabled=False,
+    )
+
+    materialized = materialize_manual_parameter(
+        dormant,
+        ManualParameterKind.NONNEGATIVE_AREA,
+    )
+
+    assert materialized.intent is dormant
+    assert materialized.intent.user_lower_limit == 0.8
+    assert materialized.intent.user_upper_limit == 0.2
+    assert not materialized.intent.user_bounds_enabled
+    assert materialized.fit_configuration.lower_bound == 0.0
+    assert np.isposinf(materialized.fit_configuration.upper_bound)
+
+
+def test_reenabling_user_bounds_reuses_stored_values() -> None:
+    dormant = ManualParameterIntent(
+        0.3,
+        user_lower_limit=0.1,
+        user_upper_limit=0.5,
+        user_bounds_enabled=False,
+    )
+    disabled = materialize_manual_parameter(
+        dormant,
+        ManualParameterKind.UNCONSTRAINED,
+    )
+    enabled = materialize_manual_parameter(
+        replace(dormant, user_bounds_enabled=True),
+        ManualParameterKind.UNCONSTRAINED,
+    )
+
+    assert np.isneginf(disabled.fit_configuration.lower_bound)
+    assert np.isposinf(disabled.fit_configuration.upper_bound)
+    assert enabled.fit_configuration.lower_bound == 0.1
+    assert enabled.fit_configuration.upper_bound == 0.5
+
+
+def test_enabled_inverted_dormant_bounds_become_invalid() -> None:
+    dormant = ManualParameterIntent(
+        0.3,
+        user_lower_limit=0.8,
+        user_upper_limit=0.2,
+        user_bounds_enabled=False,
+    )
+
+    materialize_manual_parameter(dormant, ManualParameterKind.UNCONSTRAINED)
+    with pytest.raises(ManualMaterializationError, match="lower limit"):
+        materialize_manual_parameter(
+            replace(dormant, user_bounds_enabled=True),
+            ManualParameterKind.UNCONSTRAINED,
+        )
+
+
+def test_disabled_user_bounds_still_require_finite_stored_values() -> None:
+    with pytest.raises(ManualMaterializationError, match="finite"):
+        materialize_manual_parameter(
+            ManualParameterIntent(
+                0.3,
+                user_lower_limit=np.nan,
+                user_bounds_enabled=False,
+            ),
+            ManualParameterKind.UNCONSTRAINED,
+        )
+
+
+def test_user_bounds_enabled_must_be_boolean() -> None:
+    with pytest.raises(ManualMaterializationError, match="must be a boolean"):
+        materialize_manual_parameter(
+            ManualParameterIntent(0.3, user_bounds_enabled=cast(bool, "enabled")),
+            ManualParameterKind.UNCONSTRAINED,
+        )
 
 
 @pytest.mark.parametrize(

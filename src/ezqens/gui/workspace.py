@@ -477,6 +477,9 @@ class WorkspaceSidebar(QWidget):
         self._scientific_replacement_resolver: (
             Callable[[ProjectState, DatasetState], DatasetState | None] | None
         ) = None
+        self._fitting_started_resolver: (
+            Callable[[ProjectState, DatasetState], bool] | None
+        ) = None
 
         title = QLabel("ezQENS")
         title.setObjectName("workspaceTitle")
@@ -844,6 +847,37 @@ class WorkspaceSidebar(QWidget):
         """Set the application preflight used before scientific replacement."""
 
         self._scientific_replacement_resolver = resolver
+
+    def set_fitting_started_resolver(
+        self,
+        resolver: Callable[[ProjectState, DatasetState], bool],
+    ) -> None:
+        """Derive dataset-level fitting progress from application workflow state."""
+
+        self._fitting_started_resolver = resolver
+
+    def refresh_dataset_analysis(self, project: ProjectState) -> None:
+        """Refresh only the presentation derived for one Project's Data rows."""
+
+        self._rebuild_dataset_items(self._project_index(project))
+
+    def dataset_analysis_state_for(
+        self,
+        project: ProjectState,
+        dataset: DatasetState,
+    ) -> DatasetAnalysisState:
+        """Return the current derived Workspace indicator state for one dataset."""
+
+        self.validate_dataset_membership(project, dataset)
+        fitting_started = (
+            self._fitting_started_resolver(project, dataset)
+            if self._fitting_started_resolver is not None
+            else False
+        )
+        return dataset_analysis_state(
+            dataset.dataset,
+            fitting_started=fitting_started,
+        )
 
     def _resolve_scientific_replacement_target(
         self,
@@ -1289,7 +1323,10 @@ class WorkspaceSidebar(QWidget):
         item.setData(0, ACTIVE_DATASET_ROLE, is_active)
         item.setData(1, ACTIVE_DATASET_ROLE, is_active)
         item.setToolTip(0, _dataset_source_tooltip(dataset))
-        analysis_state = dataset_analysis_state(dataset.dataset)
+        analysis_state = self.dataset_analysis_state_for(
+            self._projects[project_index],
+            dataset,
+        )
         item.setIcon(
             1,
             _analysis_state_icon(self._analysis_state_colors[analysis_state]),
@@ -1320,25 +1357,24 @@ def dataset_analysis_state(
     dataset: ReducedDataset,
     *,
     fitted_group_count: int | None = None,
+    fitting_started: bool = False,
 ) -> DatasetAnalysisState:
-    """Map known metadata and future fit coverage to the four semantic states.
-
-    Slice 1 has no fit-presence interface, so calls from the Workspace leave
-    ``fitted_group_count`` unset and can truthfully display only REQUIRED or
-    READY. Fit quality is intentionally not an input to this mapping.
-    """
+    """Map metadata, fitting start, and future fit coverage to semantic states."""
 
     if _dataset_information_is_incomplete(dataset):
         return DatasetAnalysisState.REQUIRED
     if dataset.role is SpectrumRole.RESOLUTION:
         return DatasetAnalysisState.COMPLETE
-    if fitted_group_count is None or fitted_group_count == 0:
-        return DatasetAnalysisState.READY
-    if not 0 <= fitted_group_count <= len(dataset.spectra):
-        raise ValueError("fitted group count is outside the dataset")
-    if fitted_group_count == len(dataset.spectra):
-        return DatasetAnalysisState.FULLY_FIT
-    return DatasetAnalysisState.PARTIALLY_FIT
+    if fitted_group_count is not None:
+        if not 0 <= fitted_group_count <= len(dataset.spectra):
+            raise ValueError("fitted group count is outside the dataset")
+        if fitted_group_count == len(dataset.spectra):
+            return DatasetAnalysisState.FULLY_FIT
+        if fitted_group_count:
+            return DatasetAnalysisState.PARTIALLY_FIT
+    if fitting_started:
+        return DatasetAnalysisState.PARTIALLY_FIT
+    return DatasetAnalysisState.READY
 
 
 def _dataset_information_is_incomplete(dataset: ReducedDataset) -> bool:
@@ -1406,8 +1442,10 @@ def _dataset_state_tooltip(
         DatasetAnalysisState.REQUIRED: (
             "Information required before normal analysis can be complete."
         ),
-        DatasetAnalysisState.READY: "Ready for analysis; no groups have been fit.",
-        DatasetAnalysisState.PARTIALLY_FIT: "At least one group has been fit.",
+        DatasetAnalysisState.READY: "Ready for Fit; fitting has not started.",
+        DatasetAnalysisState.PARTIALLY_FIT: (
+            "Fitting has started; dataset Groups are not yet fully completed."
+        ),
         DatasetAnalysisState.FULLY_FIT: "Every group has been fit.",
         DatasetAnalysisState.COMPLETE: (
             "Required metadata are complete; Resolution has no fit-coverage state."

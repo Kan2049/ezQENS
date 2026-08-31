@@ -87,12 +87,13 @@ class LorentzianInteractionSeed:
 
 @dataclass(frozen=True, slots=True)
 class ManualParameterIntent:
-    """One caller-owned current value with optional user limits and free state."""
+    """Caller-owned value, dormant-capable user limits, and free state."""
 
     current_value: float
     user_lower_limit: float | None = None
     user_upper_limit: float | None = None
     free: bool = True
+    user_bounds_enabled: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -500,12 +501,19 @@ def materialize_manual_parameter(
         raise ManualMaterializationError("kind must be a ManualParameterKind")
     if not isinstance(intent.free, bool):
         raise ManualMaterializationError("free must be a boolean")
+    if not isinstance(intent.user_bounds_enabled, bool):
+        raise ManualMaterializationError("user_bounds_enabled must be a boolean")
     current = _intent_number(intent.current_value, name="current_value")
     if current is None:  # excluded by the non-optional field
         raise ManualMaterializationError("current_value must be finite")
     user_lower = _intent_number(intent.user_lower_limit, name="user_lower_limit")
     user_upper = _intent_number(intent.user_upper_limit, name="user_upper_limit")
-    if user_lower is not None and user_upper is not None and user_lower > user_upper:
+    if (
+        intent.user_bounds_enabled
+        and user_lower is not None
+        and user_upper is not None
+        and user_lower > user_upper
+    ):
         raise ManualMaterializationError("user lower limit must not exceed upper limit")
 
     scientific_lower = -np.inf
@@ -545,13 +553,15 @@ def materialize_manual_parameter(
         upper_bound=scientific_upper,
         free=intent.free,
     )
+    active_user_lower = user_lower if intent.user_bounds_enabled else None
+    active_user_upper = user_upper if intent.user_bounds_enabled else None
     fit_lower = max(
         scientific_lower,
-        user_lower if user_lower is not None else -np.inf,
+        active_user_lower if active_user_lower is not None else -np.inf,
     )
     fit_upper = min(
         scientific_upper,
-        user_upper if user_upper is not None else np.inf,
+        active_user_upper if active_user_upper is not None else np.inf,
     )
     if fit_lower > fit_upper:
         raise ManualMaterializationError(

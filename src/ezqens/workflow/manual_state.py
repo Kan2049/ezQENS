@@ -64,14 +64,10 @@ def _structural_configuration(
             raise ValueError(
                 "Manual parameter values and supplied limits must be finite"
             )
-    if (
-        intent.user_lower_limit is not None
-        and intent.user_upper_limit is not None
-        and intent.user_lower_limit > intent.user_upper_limit
-    ):
-        raise ValueError("user lower limit must not exceed user upper limit")
     if not isinstance(intent.free, bool):
         raise ValueError("Manual parameter free state must be boolean")
+    if not isinstance(intent.user_bounds_enabled, bool):
+        raise ValueError("Manual user-bounds-enabled state must be boolean")
     current = float(intent.current_value)
     lower = -np.inf
     if kind is ManualParameterKind.NONNEGATIVE_AREA:

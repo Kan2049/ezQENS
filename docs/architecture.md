@@ -356,7 +356,10 @@ pending component interactions, parameter edits, explicit same-family equality
 ties, component removal, and group-local cloning. They delegate scientific
 initialization, preview, readiness, and fitting to the established core.
 Persistent editable parameter state is `ManualParameterIntent`: Current Value,
-optional user limits (including genuine `None`), and Free/Fixed state. The
+optional stored user limits (including genuine `None`), an explicit user-bounds
+enabled state, and Free/Fixed state. Disabled user bounds retain their stored
+values but do not participate in fit materialization; scientific/core bounds
+remain active. The
 workflow derives parameter kind from each typed reference and materializes
 separate preview and fit configurations for the active group. Optimizer-boundary
 projection never mutates stored intent. Cloning copies intent and topology, then

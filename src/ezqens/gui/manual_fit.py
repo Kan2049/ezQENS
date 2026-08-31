@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import StrEnum
+from typing import cast
 
-from PySide6.QtCore import QPoint, Qt, Signal
-from PySide6.QtGui import QDoubleValidator, QFocusEvent
+from PySide6.QtCore import QLocale, QPoint, Qt, Signal
+from PySide6.QtGui import QDoubleValidator, QFocusEvent, QValidator
 from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -25,6 +27,7 @@ from ezqens.fitting import (
     ELASTIC_COMPONENT,
     BackgroundModel,
     ComponentIdentity,
+    FitResult,
     ParameterDimension,
     ParameterFamily,
     ParameterMetadata,
@@ -36,6 +39,7 @@ from ezqens.workflow import (
     ManualModelState,
     ManualParameterEdit,
     ManualWorkflowReadiness,
+    WorkflowDiagnostic,
     WorkflowDiagnosticCode,
 )
 
@@ -48,7 +52,27 @@ class _ParameterControls:
     lower: CompactNumberEdit
     upper: CompactNumberEdit
     fixed: QToolButton
+    bounds_enabled: QToolButton
     chain: QToolButton | None
+
+
+@dataclass(frozen=True)
+class _ResultParameterWidgets:
+    """Read-only widgets for one identity-mapped result parameter row."""
+
+    name: QLabel
+    value: QLabel
+    uncertainty: QLabel
+    details: QLabel
+
+
+class ManualFitLifecycle(StrEnum):
+    """Small GUI-only lifecycle for the active single-Q Manual task."""
+
+    READY = "ready"
+    FITTING = "fitting"
+    CURRENT = "current"
+    NEEDS_FIT = "needs_fit"
 
 
 _FALLBACK_METADATA = {
@@ -60,14 +84,33 @@ _FALLBACK_METADATA = {
 }
 
 
+class _OptionalDoubleValidator(QDoubleValidator):
+    """Accept an empty optional bound while retaining numeric validation."""
+
+    def validate(
+        self,
+        input_text: str,
+        position: int,
+    ) -> tuple[QValidator.State, str, int]:
+        if not input_text.strip():
+            return QValidator.State.Acceptable, input_text, position
+        return cast(
+            tuple[QValidator.State, str, int],
+            super().validate(input_text, position),
+        )
+
+
 class CompactNumberEdit(QLineEdit):
     """Compact unfocused float text with lossless untouched-value round trips."""
 
-    def __init__(self, value: float | None) -> None:
+    def __init__(self, value: float | None, *, optional: bool = False) -> None:
         super().__init__()
         self._stored_value = None if value is None else float(value)
         self._dirty = False
-        validator = QDoubleValidator(self)
+        validator = (
+            _OptionalDoubleValidator(self) if optional else QDoubleValidator(self)
+        )
+        validator.setLocale(QLocale.c())
         validator.setNotation(QDoubleValidator.Notation.ScientificNotation)
         self.setValidator(validator)
         self.setText(_compact_float(self._stored_value))
@@ -79,6 +122,17 @@ class CompactNumberEdit(QLineEdit):
         """Return the exact immutable value represented before any user edit."""
 
         return self._stored_value
+
+    @property
+    def user_edited(self) -> bool:
+        """Return whether real user text editing occurred since the last completion."""
+
+        return self._dirty
+
+    def finish_user_edit(self) -> None:
+        """Consume the local dirty state after one commit attempt."""
+
+        self._dirty = False
 
     def precise_value(self, *, required: bool = False) -> float | None:
         """Return edited text, or the untouched exact value without reparsing."""
@@ -96,13 +150,13 @@ class CompactNumberEdit(QLineEdit):
 
     def focusInEvent(self, event: QFocusEvent) -> None:  # noqa: N802 - Qt virtual.
         if not self._dirty:
-            self.setText(_round_trip_float(self._stored_value))
+            self.setText(_focused_float(self._stored_value))
         super().focusInEvent(event)
 
     def focusOutEvent(self, event: QFocusEvent) -> None:  # noqa: N802 - Qt virtual.
         super().focusOutEvent(event)
-        if not self._dirty:
-            self.setText(_compact_float(self._stored_value))
+        self._dirty = False
+        self.setText(_compact_float(self._stored_value))
 
     def _mark_dirty(self, _text: str) -> None:
         self._dirty = True
@@ -119,7 +173,9 @@ class ManualFitEditor(QFrame):
     join_tie_requested = Signal(object, str)
     component_removal_requested = Signal(object)
     apply_resolution_requested = Signal()
-    close_requested = Signal()
+    run_requested = Signal()
+    clear_model_requested = Signal()
+    expanded_changed = Signal(bool)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -127,6 +183,7 @@ class ManualFitEditor(QFrame):
         self._model: ManualModelState | None = None
         self._metadata: dict[ParameterReference, ParameterMetadata] = {}
         self._controls: dict[ParameterReference, _ParameterControls] = {}
+        self._result_rows: dict[ParameterReference, _ResultParameterWidgets] = {}
         self._current_readiness: ManualWorkflowReadiness | None = None
         self._icon_colors = {
             "neutral": "#676764",
@@ -135,7 +192,7 @@ class ManualFitEditor(QFrame):
             "violet": "#8d819d",
         }
 
-        self.title = QLabel("Manual Fit")
+        self.title = QLabel("Fitting Parameters")
         self.title.setObjectName("manualFitTitle")
         self.model_label = QLabel("Model    N/A")
         self.model_label.setObjectName("manualModelSummary")
@@ -154,10 +211,20 @@ class ManualFitEditor(QFrame):
         )
         self.add_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.add_button.setMenu(self._component_menu())
+        self.clear_model_button = QToolButton()
+        self.clear_model_button.setObjectName("manualModelClearButton")
+        self.clear_model_button.setText("Clear")
+        self.clear_model_button.setToolTip("Clear all functions from this Group")
+        self.clear_model_button.setEnabled(False)
+        self.clear_model_button.clicked.connect(self.clear_model_requested)
         self.status_label = QLabel()
         self.status_label.setObjectName("manualFitReadiness")
         self.status_label.setProperty("secondary", True)
         self.status_label.setWordWrap(True)
+        self.run_button = QToolButton()
+        self.run_button.setObjectName("manualRunFitButton")
+        self.run_button.setText("Run Fit")
+        self.run_button.clicked.connect(self.run_requested)
         self.diagnostics_button = QToolButton()
         self.diagnostics_button.setObjectName("manualDiagnosticsToggle")
         self.diagnostics_button.setText("Diagnostics / readiness")
@@ -182,48 +249,199 @@ class ManualFitEditor(QFrame):
         self.apply_resolution_button.setText("Apply Resolution…")
         self.apply_resolution_button.clicked.connect(self.apply_resolution_requested)
         self.apply_resolution_button.hide()
-        self.close_button = QToolButton()
-        self.close_button.setText("Close")
-        self.close_button.clicked.connect(self.close_requested)
+        self.result_section = QFrame(self)
+        self.result_section.setObjectName("manualFitResultSection")
+        result_layout = QVBoxLayout(self.result_section)
+        result_layout.setContentsMargins(0, 7, 0, 0)
+        result_layout.setSpacing(4)
+        self.result_toggle_button = QToolButton(self.result_section)
+        self.result_toggle_button.setObjectName("manualFitResultToggle")
+        self.result_toggle_button.setText("Fit Result")
+        self.result_toggle_button.setCheckable(True)
+        self.result_toggle_button.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonTextBesideIcon,
+        )
+        self.result_toggle_button.setLayoutDirection(
+            Qt.LayoutDirection.RightToLeft,
+        )
+        apply_disclosure_icon(
+            self.result_toggle_button,
+            expanded=False,
+            color=self._icon_colors["neutral"],
+        )
+        self.result_toggle_button.toggled.connect(self._set_result_expanded)
+        self.result_content = QWidget(self.result_section)
+        result_content_layout = QVBoxLayout(self.result_content)
+        result_content_layout.setContentsMargins(0, 0, 0, 0)
+        result_content_layout.setSpacing(4)
+        self.result_summary_label = QLabel()
+        self.result_summary_label.setObjectName("manualFitResultSummary")
+        self.result_summary_label.setProperty("secondary", True)
+        self.result_statistics_widget = QWidget(self.result_content)
+        result_statistics_layout = QGridLayout(self.result_statistics_widget)
+        result_statistics_layout.setContentsMargins(0, 0, 0, 0)
+        result_statistics_layout.setHorizontalSpacing(8)
+        result_statistics_layout.setVerticalSpacing(1)
+        self.result_statistics: dict[str, QLabel] = {}
+        for row, (key, label) in enumerate(
+            (
+                ("chi_square", "χ²"),
+                ("reduced_chi_square", "Reduced χ²"),
+                ("nominal_degrees_of_freedom", "DOF"),
+                ("observations", "Points"),
+            )
+        ):
+            title = QLabel(label)
+            title.setProperty("secondary", True)
+            value = QLabel("—")
+            value.setAlignment(Qt.AlignmentFlag.AlignRight)
+            result_statistics_layout.addWidget(title, row, 0)
+            result_statistics_layout.addWidget(value, row, 1)
+            self.result_statistics[key] = value
+        result_statistics_layout.setColumnStretch(0, 1)
+        self.result_parameters = QWidget(self.result_content)
+        self._result_parameters_layout = QGridLayout(self.result_parameters)
+        self._result_parameters_layout.setContentsMargins(0, 2, 0, 0)
+        self._result_parameters_layout.setHorizontalSpacing(5)
+        self._result_parameters_layout.setVerticalSpacing(2)
+        self.result_important_label = QLabel()
+        self.result_important_label.setObjectName("manualFitResultImportant")
+        self.result_important_label.setWordWrap(True)
+        self.result_diagnostics_button = QToolButton()
+        self.result_diagnostics_button.setObjectName("manualResultDiagnosticsToggle")
+        self.result_diagnostics_button.setText("Result diagnostics")
+        self.result_diagnostics_button.setCheckable(True)
+        self.result_diagnostics_button.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonTextBesideIcon,
+        )
+        self.result_diagnostics_button.setLayoutDirection(
+            Qt.LayoutDirection.RightToLeft
+        )
+        apply_disclosure_icon(
+            self.result_diagnostics_button,
+            expanded=False,
+            color=self._icon_colors["neutral"],
+        )
+        self.result_diagnostics_button.toggled.connect(
+            self._set_result_diagnostics_expanded
+        )
+        self.result_diagnostics_label = QLabel()
+        self.result_diagnostics_label.setObjectName("manualResultDiagnosticsDetails")
+        self.result_diagnostics_label.setProperty("secondary", True)
+        self.result_diagnostics_label.setWordWrap(True)
+        self.result_diagnostics_label.hide()
+        result_content_layout.addWidget(self.result_summary_label)
+        result_content_layout.addWidget(self.result_statistics_widget)
+        result_content_layout.addWidget(self.result_parameters)
+        result_content_layout.addWidget(self.result_important_label)
+        result_content_layout.addWidget(
+            self.result_diagnostics_button,
+            alignment=Qt.AlignmentFlag.AlignLeft,
+        )
+        result_content_layout.addWidget(self.result_diagnostics_label)
+        result_layout.addWidget(
+            self.result_toggle_button,
+            alignment=Qt.AlignmentFlag.AlignLeft,
+        )
+        result_layout.addWidget(self.result_content)
+        self.result_content.hide()
+        self.result_section.hide()
+        self.collapse_button = QToolButton()
+        self.collapse_button.setObjectName("manualFitCollapseButton")
+        self.collapse_button.setCheckable(True)
+        self.collapse_button.setChecked(True)
+        self.collapse_button.setToolTip("Collapse Manual Fit")
+        apply_disclosure_icon(
+            self.collapse_button,
+            expanded=True,
+            color=self._icon_colors["neutral"],
+        )
+        self.collapse_button.toggled.connect(self._set_manual_fit_expanded)
 
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
         header.addWidget(self.title)
         header.addStretch(1)
-        header.addWidget(self.close_button)
+        header.addWidget(self.collapse_button)
         composition = QHBoxLayout()
         composition.setContentsMargins(0, 0, 0, 0)
         composition.addWidget(self.model_label)
         composition.addStretch(1)
         composition.addWidget(self.add_button)
+        composition.addWidget(self.clear_model_button)
+        status = QHBoxLayout()
+        status.setContentsMargins(0, 0, 0, 0)
+        status.addWidget(self.status_label, 1)
+        status.addWidget(self.run_button)
 
         self.sections = QWidget(self)
         self._sections_layout = QVBoxLayout(self.sections)
         self._sections_layout.setContentsMargins(0, 0, 0, 0)
         self._sections_layout.setSpacing(6)
+        self.body = QWidget(self)
+        self.body.setObjectName("manualFitBody")
+        body_layout = QVBoxLayout(self.body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(6)
+        body_layout.addLayout(composition)
+        body_layout.addLayout(status)
+        body_layout.addWidget(
+            self.apply_resolution_button,
+            alignment=Qt.AlignmentFlag.AlignLeft,
+        )
+        body_layout.addWidget(self.sections)
+        body_layout.addWidget(self.result_section)
+        body_layout.addWidget(
+            self.diagnostics_button,
+            alignment=Qt.AlignmentFlag.AlignLeft,
+        )
+        body_layout.addWidget(self.diagnostics_label)
+        body_layout.addStretch(1)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 10, 0, 0)
         layout.setSpacing(6)
         layout.addLayout(header)
-        layout.addLayout(composition)
-        layout.addWidget(self.status_label)
-        layout.addWidget(
-            self.apply_resolution_button,
-            alignment=Qt.AlignmentFlag.AlignLeft,
-        )
-        layout.addWidget(self.sections)
-        layout.addWidget(
-            self.diagnostics_button,
-            alignment=Qt.AlignmentFlag.AlignLeft,
-        )
-        layout.addWidget(self.diagnostics_label)
-        layout.addStretch(1)
+        layout.addWidget(self.body)
 
     @property
     def parameter_controls(self) -> dict[ParameterReference, _ParameterControls]:
         """Expose the compact cells for focused GUI tests and presentation refresh."""
 
         return dict(self._controls)
+
+    @property
+    def result_parameter_rows(
+        self,
+    ) -> dict[ParameterReference, _ResultParameterWidgets]:
+        """Expose identity-keyed read-only result rows for focused GUI tests."""
+
+        return dict(self._result_rows)
+
+    def reset_result_disclosure(self) -> None:
+        """Restore the default collapsed presentation for a new Manual Fit task."""
+
+        self.result_toggle_button.setChecked(False)
+
+    def set_expanded(self, expanded: bool) -> None:
+        """Set presentation disclosure without mutating rendered Manual state."""
+
+        self.collapse_button.setChecked(expanded)
+
+    def populated_parameter_minimum_width(self) -> int:
+        """Return the natural minimum width of the populated parameter grids."""
+
+        if not self._controls:
+            return 0
+        for section in self.sections.findChildren(
+            QFrame,
+            options=Qt.FindChildOption.FindDirectChildrenOnly,
+        ):
+            section_layout = section.layout()
+            if section_layout is not None:
+                section_layout.activate()
+        self._sections_layout.activate()
+        layout = self.sections.layout()
+        return 0 if layout is None else layout.minimumSize().width()
 
     def set_icon_colors(
         self,
@@ -263,6 +481,9 @@ class ManualFitEditor(QFrame):
         model: ManualModelState | None,
         metadata: tuple[ParameterMetadata, ...],
         readiness: ManualWorkflowReadiness,
+        lifecycle: ManualFitLifecycle = ManualFitLifecycle.READY,
+        execution_diagnostics: tuple[WorkflowDiagnostic, ...] = (),
+        fit_result: FitResult | None = None,
     ) -> None:
         """Render immutable workflow state without deriving scientific values."""
 
@@ -272,7 +493,12 @@ class ManualFitEditor(QFrame):
         self._controls = {}
         self._clear_sections()
         self.model_label.setText(f"Model    {self._composition_summary(model)}")
-        self._render_status(readiness)
+        self.clear_model_button.setEnabled(model is not None)
+        self._render_status(readiness, lifecycle, execution_diagnostics)
+        self._render_fit_result(
+            fit_result if lifecycle is ManualFitLifecycle.CURRENT else None,
+            execution_diagnostics,
+        )
         self._add_fixed_section(
             "δ",
             ELASTIC_COMPONENT,
@@ -332,9 +558,15 @@ class ManualFitEditor(QFrame):
                 continue
             widget = item.widget()
             if widget is not None:
+                widget.hide()
                 widget.deleteLater()
 
-    def _render_status(self, readiness: ManualWorkflowReadiness) -> None:
+    def _render_status(
+        self,
+        readiness: ManualWorkflowReadiness,
+        lifecycle: ManualFitLifecycle,
+        execution_diagnostics: tuple[WorkflowDiagnostic, ...],
+    ) -> None:
         scientific_diagnostics = (
             ()
             if readiness.scientific_readiness is None
@@ -343,22 +575,208 @@ class ManualFitEditor(QFrame):
         blocker_count = sum(
             item.severity.value == "error" for item in readiness.workflow_diagnostics
         ) + sum(item.severity.value == "error" for item in scientific_diagnostics)
-        status = "Ready"
-        if not readiness.runnable:
+        if lifecycle is ManualFitLifecycle.FITTING:
+            status = "Fitting"
+        elif not readiness.runnable:
             suffix = "blocker" if blocker_count == 1 else "blockers"
-            status = f"Not ready · {blocker_count} {suffix}"
+            status = f"Blocked · {blocker_count} {suffix}"
+        elif lifecycle is ManualFitLifecycle.CURRENT:
+            status = "Fit current"
+        elif lifecycle is ManualFitLifecycle.NEEDS_FIT:
+            status = "Needs fit"
+        else:
+            status = "Ready · Not yet fit"
         self.status_label.setText(status)
         messages = [item.message for item in readiness.workflow_diagnostics]
         messages.extend(item.message for item in scientific_diagnostics)
+        messages.extend(item.message for item in execution_diagnostics)
         self.status_label.setToolTip("\n".join(messages))
         self.diagnostics_label.setText("\n".join(messages) or "No diagnostics")
+        fitting = lifecycle is ManualFitLifecycle.FITTING
+        self.run_button.setText("Fitting…" if fitting else "Run Fit")
+        self.run_button.setEnabled(readiness.runnable and not fitting)
         resolution_missing = any(
             item.code is WorkflowDiagnosticCode.NO_APPLIED_RESOLUTION
             for item in readiness.workflow_diagnostics
         )
         self.apply_resolution_button.setVisible(resolution_missing)
         if resolution_missing:
-            self.status_label.setText("Resolution required for preview and fitting")
+            self.status_label.setText(
+                "Blocked · Resolution required for preview and fitting"
+            )
+
+    def _render_fit_result(
+        self,
+        result: FitResult | None,
+        execution_diagnostics: tuple[WorkflowDiagnostic, ...],
+    ) -> None:
+        """Render one current public FitResult without deriving scientific values."""
+
+        self._clear_result_parameter_rows()
+        if result is None or self._model is None:
+            self.result_section.hide()
+            self.result_content.hide()
+            return
+        self.result_summary_label.setText(
+            f"Converged · {result.provenance.group_label} · "
+            f"Q = {_result_float(result.provenance.q_value)}"
+        )
+        statistics = result.statistics
+        self.result_statistics["chi_square"].setText(
+            _result_float(statistics.chi_square)
+        )
+        self.result_statistics["reduced_chi_square"].setText(
+            _result_float(statistics.reduced_chi_square)
+        )
+        self.result_statistics["nominal_degrees_of_freedom"].setText(
+            str(statistics.nominal_degrees_of_freedom)
+        )
+        self.result_statistics["observations"].setText(str(statistics.observations))
+        for column, text in enumerate(("Parameter", "Estimate", "Uncertainty", "")):
+            header = QLabel(text)
+            header.setProperty("secondary", True)
+            self._result_parameters_layout.addWidget(header, 0, column)
+        active_labels: list[str] = []
+        for row_index, reference in enumerate(
+            self._model.parameter_references(),
+            start=1,
+        ):
+            estimate = result.parameter_by_reference(reference)
+            name_text = self._result_reference_label(reference)
+            metadata = self._metadata.get(reference, _fallback_metadata(reference))
+            name = QLabel(name_text)
+            value = QLabel(_result_float(estimate.value))
+            uncertainty = QLabel(
+                "—"
+                if estimate.standard_error is None
+                else _result_float(estimate.standard_error)
+            )
+            for label in (name, value, uncertainty):
+                label.setToolTip(metadata.unit)
+            details_parts: list[str] = []
+            tie = self._model.tie_for(reference)
+            if tie is not None:
+                tie_index = self._model.parameter_ties.index(tie) + 1
+                details_parts.append(f"Chain {tie_index}")
+            bounds: list[str] = []
+            if estimate.active_lower_bound:
+                bounds.append("lower")
+            if estimate.active_upper_bound:
+                bounds.append("upper")
+            if bounds:
+                bound_text = "/".join(bounds) + " bound"
+                details_parts.append(bound_text)
+                active_labels.append(name_text)
+            details = QLabel(" · ".join(details_parts))
+            details.setProperty("secondary", True)
+            details.setProperty("activeBound", bool(bounds))
+            value.setAlignment(Qt.AlignmentFlag.AlignRight)
+            uncertainty.setAlignment(Qt.AlignmentFlag.AlignRight)
+            self._result_parameters_layout.addWidget(name, row_index, 0)
+            self._result_parameters_layout.addWidget(value, row_index, 1)
+            self._result_parameters_layout.addWidget(uncertainty, row_index, 2)
+            self._result_parameters_layout.addWidget(details, row_index, 3)
+            self._result_rows[reference] = _ResultParameterWidgets(
+                name,
+                value,
+                uncertainty,
+                details,
+            )
+        self._result_parameters_layout.setColumnStretch(0, 1)
+        important: list[str] = []
+        if not result.diagnostics.covariance_available:
+            important.append("Covariance unavailable")
+        if active_labels:
+            important.append(f"Active bound: {', '.join(active_labels)}")
+        important.extend(
+            f"{item.severity.value.title()}: {item.message}"
+            for item in execution_diagnostics
+        )
+        self.result_important_label.setText("\n".join(important))
+        self.result_important_label.setVisible(bool(important))
+        diagnostics = result.diagnostics
+        maximum_correlation = (
+            "—"
+            if diagnostics.maximum_absolute_correlation is None
+            else _result_float(diagnostics.maximum_absolute_correlation)
+        )
+        self.result_diagnostics_label.setText(
+            "\n".join(
+                (
+                    "Optimizer: converged",
+                    f"Function evaluations: {diagnostics.function_evaluations}",
+                    f"Jacobian rank: {diagnostics.jacobian_rank}",
+                    f"Condition number: {_result_float(diagnostics.condition_number)}",
+                    "Covariance: "
+                    + (
+                        "available"
+                        if diagnostics.covariance_available
+                        else "unavailable"
+                    ),
+                    f"Maximum |correlation|: {maximum_correlation}",
+                    f"Residual RMS: {_result_float(diagnostics.residual.rms)}",
+                    "Maximum |residual|: "
+                    f"{_result_float(diagnostics.residual.maximum_absolute)}",
+                    f"Active-bound parameters: {len(set(active_labels))}",
+                )
+            )
+        )
+        self.result_section.show()
+        self.result_content.setVisible(self.result_toggle_button.isChecked())
+
+    def _clear_result_parameter_rows(self) -> None:
+        self._result_rows = {}
+        while self._result_parameters_layout.count():
+            item = self._result_parameters_layout.takeAt(0)
+            if item is None:
+                continue
+            widget = item.widget()
+            if widget is not None:
+                widget.hide()
+                widget.deleteLater()
+
+    def _result_reference_label(self, reference: ParameterReference) -> str:
+        assert self._model is not None
+        if reference.component == ELASTIC_COMPONENT:
+            component = "δ"
+        elif reference.component == BACKGROUND_COMPONENT:
+            component = "Background"
+        else:
+            component = next(
+                f"L{index}"
+                for index, item in enumerate(self._model.lorentzians, start=1)
+                if item.identity == reference.component
+            )
+        metadata = self._metadata.get(reference, _fallback_metadata(reference))
+        return f"{component} {metadata.display_label}"
+
+    def _set_result_diagnostics_expanded(self, expanded: bool) -> None:
+        apply_disclosure_icon(
+            self.result_diagnostics_button,
+            expanded=expanded,
+            color=self._icon_colors["neutral"],
+        )
+        self.result_diagnostics_label.setVisible(expanded)
+
+    def _set_manual_fit_expanded(self, expanded: bool) -> None:
+        apply_disclosure_icon(
+            self.collapse_button,
+            expanded=expanded,
+            color=self._icon_colors["neutral"],
+        )
+        self.collapse_button.setToolTip(
+            "Collapse Manual Fit" if expanded else "Expand Manual Fit",
+        )
+        self.body.setVisible(expanded)
+        self.expanded_changed.emit(expanded)
+
+    def _set_result_expanded(self, expanded: bool) -> None:
+        apply_disclosure_icon(
+            self.result_toggle_button,
+            expanded=expanded,
+            color=self._icon_colors["neutral"],
+        )
+        self.result_content.setVisible(expanded and not self.result_section.isHidden())
 
     def _set_diagnostics_expanded(self, expanded: bool) -> None:
         apply_disclosure_icon(
@@ -517,6 +935,7 @@ class ManualFitEditor(QFrame):
         button = QToolButton()
         button.setObjectName("manualComponentRowLabel")
         button.setText(text)
+        button.setFixedWidth(32)
         button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         button.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
         apply_disclosure_icon(
@@ -594,10 +1013,24 @@ class ManualFitEditor(QFrame):
         second = QHBoxLayout()
         second.setContentsMargins(0, 0, 0, 0)
         second.setSpacing(1)
-        lower = _numeric_edit(intent.user_lower_limit)
-        upper = _numeric_edit(intent.user_upper_limit)
+        lower = _numeric_edit(intent.user_lower_limit, optional=True)
+        upper = _numeric_edit(intent.user_upper_limit, optional=True)
+        bounds_enabled = QToolButton()
+        bounds_enabled.setObjectName("manualBoundsEnabledButton")
+        bounds_enabled.setProperty("boundsControl", True)
+        bounds_enabled.setCheckable(True)
+        bounds_enabled.setChecked(intent.user_bounds_enabled)
+        bounds_enabled.setText("✓" if intent.user_bounds_enabled else "×")
+        bounds_enabled.setToolTip(
+            "User bounds enabled"
+            if intent.user_bounds_enabled
+            else "User bounds disabled"
+        )
+        bounds_enabled.setFixedWidth(20)
         lower.setAccessibleName(f"{metadata.display_label} Lower bound")
         upper.setAccessibleName(f"{metadata.display_label} Upper bound")
+        lower.setProperty("boundsEnabled", intent.user_bounds_enabled)
+        upper.setProperty("boundsEnabled", intent.user_bounds_enabled)
         lower.setEnabled(intent.free)
         upper.setEnabled(intent.free)
         second.addWidget(lower, 1)
@@ -606,6 +1039,7 @@ class ManualFitEditor(QFrame):
         separator.setAlignment(Qt.AlignmentFlag.AlignCenter)
         second.addWidget(separator)
         second.addWidget(upper, 1)
+        second.addWidget(bounds_enabled)
         outer.addLayout(first)
         outer.addLayout(second)
         scientific_diagnostics = (
@@ -618,11 +1052,21 @@ class ManualFitEditor(QFrame):
             "manualWarning",
             any(item.parameter == reference for item in scientific_diagnostics),
         )
-        controls = _ParameterControls(current, lower, upper, fixed, chain)
+        controls = _ParameterControls(
+            current,
+            lower,
+            upper,
+            fixed,
+            bounds_enabled,
+            chain,
+        )
         self._controls[reference] = controls
         for edit in (current, lower, upper):
             edit.editingFinished.connect(
-                lambda value=reference: self._emit_parameter_edit(value),
+                lambda value=reference, source=edit: self._commit_parameter_text_edit(
+                    value,
+                    source,
+                ),
             )
             edit.selectionChanged.connect(
                 lambda value=reference: self.parameter_focused.emit(value),
@@ -630,7 +1074,35 @@ class ManualFitEditor(QFrame):
         fixed.clicked.connect(
             lambda _checked=False, value=reference: self._emit_parameter_edit(value),
         )
+        bounds_enabled.clicked.connect(
+            lambda checked, button=bounds_enabled: self._set_bounds_button_state(
+                button,
+                checked,
+            ),
+        )
+        bounds_enabled.clicked.connect(
+            lambda _checked=False, value=reference: self._emit_parameter_edit(value),
+        )
         return cell
+
+    def _commit_parameter_text_edit(
+        self,
+        reference: ParameterReference,
+        source: CompactNumberEdit,
+    ) -> None:
+        """Commit exactly one real user text edit, never focus navigation alone."""
+
+        if not source.user_edited:
+            return
+        try:
+            self._emit_parameter_edit(reference)
+        finally:
+            source.finish_user_edit()
+
+    @staticmethod
+    def _set_bounds_button_state(button: QToolButton, enabled: bool) -> None:
+        button.setText("✓" if enabled else "×")
+        button.setToolTip("User bounds enabled" if enabled else "User bounds disabled")
 
     def _reference(
         self,
@@ -686,6 +1158,7 @@ class ManualFitEditor(QFrame):
                 user_lower_limit=_numeric_value(controls.lower),
                 user_upper_limit=_numeric_value(controls.upper),
                 free=not controls.fixed.isChecked(),
+                user_bounds_enabled=controls.bounds_enabled.isChecked(),
             )
         except ValueError:
             return
@@ -712,11 +1185,15 @@ def _fallback_metadata(reference: ParameterReference) -> ParameterMetadata:
     return ParameterMetadata(reference, label, dimension, "")
 
 
-def _numeric_edit(value: float | None) -> CompactNumberEdit:
-    edit = CompactNumberEdit(value)
+def _numeric_edit(
+    value: float | None,
+    *,
+    optional: bool = False,
+) -> CompactNumberEdit:
+    edit = CompactNumberEdit(value, optional=optional)
     edit.setMinimumWidth(30)
     edit.setSizePolicy(
-        QSizePolicy.Policy.Expanding,
+        QSizePolicy.Policy.Ignored,
         QSizePolicy.Policy.Fixed,
     )
     return edit
@@ -731,16 +1208,24 @@ def _numeric_value(
 
 
 def _compact_float(value: float | None) -> str:
+    return _display_float(value, decimal_places=2)
+
+
+def _focused_float(value: float | None) -> str:
+    return _display_float(value, decimal_places=3)
+
+
+def _display_float(value: float | None, *, decimal_places: int) -> str:
     if value is None:
         return ""
     numeric = float(value)
     magnitude = abs(numeric)
     if magnitude == 0.0:
         return "0"
-    decimal = format(numeric, ".2f").rstrip("0").rstrip(".")
+    decimal = format(numeric, f".{decimal_places}f").rstrip("0").rstrip(".")
     digit_positions = sum(character.isdigit() for character in decimal)
     if magnitude < 0.01 or digit_positions >= 6:
-        mantissa, exponent = format(numeric, ".2e").lower().split("e")
+        mantissa, exponent = format(numeric, f".{decimal_places}e").lower().split("e")
         mantissa = mantissa.rstrip("0").rstrip(".")
         return f"{mantissa}e{int(exponent)}"
     return decimal
@@ -748,6 +1233,12 @@ def _compact_float(value: float | None) -> str:
 
 def _round_trip_float(value: float | None) -> str:
     return "" if value is None else repr(float(value))
+
+
+def _result_float(value: float) -> str:
+    """Format a read-only result without changing its authoritative value."""
+
+    return _display_float(float(value), decimal_places=3)
 
 
 def _tie_color(model: ManualModelState, group_id: str) -> str:

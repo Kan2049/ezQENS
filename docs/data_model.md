@@ -447,9 +447,14 @@ application identity to the scientific `ReducedDataset` model:
   that retain underlying resolution-preparation diagnostics.
 - `ManualFitDraft` contains ordered group-local setups whose `ManualModelState`
   may be absent. Each active independent parameter stores a
-  `ManualParameterIntent`: Current Value, optional user lower/upper limits, and
-  Free/Fixed state. This application empty state does not weaken the core rule
-  that an empty `SpectralModelDefinition` is invalid.
+  `ManualParameterIntent`: Current Value, optional stored user lower/upper
+  limits, an explicit user-bounds-enabled flag, and Free/Fixed state. Disabled
+  user bounds remain stored for later re-enabling but do not replace scientific
+  constraints during materialization. The enable flag is independent of whether
+  either numeric side is present: clearing one side does not disable the other,
+  and dormant limits need not be mutually ordered until re-enabled. This
+  application empty state does not weaken the core rule that an empty
+  `SpectralModelDefinition` is invalid.
 - `PendingManualInteraction` records an Add command without modifying the
   scientific model. Completion retains the existing measured-resolution-aware
   initializer's result as editable Manual intent rather than persisting a
@@ -462,20 +467,22 @@ Joining adopts the tie's shared intent. Untying one member copies the group's
 current authoritative intent into that departing independent parameter while
 preserving any nonempty remainder, including a singleton; only an empty group is
 removed. Component removal follows the same nonempty-remainder rule.
-Cloning to another Q group copies composition, Current Values, optional user
-limits, Free/Fixed state, and tie structure while regenerating Lorentzian
-component, center-group, and tie-group identities and remapping their parameter
-references. Target scientific center coverage is rematerialized from the
-target `ManualFitContext`; source-Q scientific bounds are never copied as user
-limits. No mutable or cross-group shared parameter state is retained; the
+Cloning to another Q group copies composition, Current Values, optional stored
+user limits, bounds-enabled state, Free/Fixed state, and tie structure while
+regenerating Lorentzian component, center-group, and tie-group identities and
+remapping their parameter references. Target scientific center coverage is
+rematerialized from the target `ManualFitContext`; source-Q scientific bounds
+are never copied as user limits. No mutable or cross-group shared parameter
+state is retained; the
 frozen elastic/background singleton identities remain scientifically local to
 each setup's immutable parameter values.
 
 `ManualModelMaterialization` is transient and contains separate preview and fit
 `SpectralModelDefinition` values plus per-reference materialization facts.
 Preview preserves Current Value and ignores user limits while retaining
-intrinsic constraints. Fit materialization intersects optional user limits with
-core constraints and may adjust only the optimizer start into a usable
+intrinsic constraints. Fit materialization intersects enabled optional user
+limits with core constraints, ignores disabled user limits without deleting
+them, and may adjust only the optimizer start into a usable
 interior. It never writes the adjusted value back into `ManualModelState`.
 
 These are in-memory application values, not scientific persistence entities or

@@ -28,7 +28,11 @@ from ezqens.domain import (
     SpectrumRole,
 )
 from ezqens.gui import MainWindow, create_application
-from ezqens.gui.dataset_view import OVERVIEW_ACTIVE_COLOR, OVERVIEW_COLORMAP
+from ezqens.gui.dataset_view import (
+    OVERVIEW_ACTIVE_ALPHA,
+    OVERVIEW_ACTIVE_COLOR,
+    OVERVIEW_COLORMAP,
+)
 from ezqens.gui.main_window import ImportBatchResult, _supported_reduced_data_files
 from ezqens.gui.scientific_canvas import SCIENTIFIC_BACKGROUND
 from ezqens.gui.theme import (
@@ -398,14 +402,14 @@ def test_spectrum_view_scale_and_lock_controls_preserve_source_arrays(
     for spectrum, snapshot in zip(dataset.dataset.spectra, snapshots, strict=True):
         np.testing.assert_array_equal(spectrum.intensity, snapshot)
 
-    unlocked_limits = view.spectrum_axes.get_ylim()
-    view.set_y_range_locked(True)
+    default_locked_limits = view.spectrum_axes.get_ylim()
+    assert view.y_range_locked
     view.set_current_group(1)
-    assert view.spectrum_axes.get_ylim() == pytest.approx(unlocked_limits)
+    assert view.spectrum_axes.get_ylim() == pytest.approx(default_locked_limits)
     view.set_y_range_locked(False)
     view.set_current_group(0)
     view.set_current_group(1)
-    assert view.spectrum_axes.get_ylim() != pytest.approx(unlocked_limits)
+    assert view.spectrum_axes.get_ylim() != pytest.approx(default_locked_limits)
     window.close()
 
 
@@ -620,7 +624,7 @@ def test_overview_preserves_unequal_grids_without_interpolation(
     window.close()
 
 
-def test_overview_active_band_covers_current_cell_and_uses_cividis(
+def test_overview_active_band_brightens_full_current_cell_without_changing_data(
     application: QApplication,
 ) -> None:
     window = MainWindow()
@@ -631,13 +635,27 @@ def test_overview_active_band_covers_current_cell_and_uses_cividis(
     assert _highlight_x_bounds(window) == view.overview_x_cell_bounds[0]
     highlight = view.overview_active_highlight
     assert highlight is not None
+    facecolor = np.asarray(highlight.get_facecolor(), dtype=float)
+    edgecolor = np.asarray(highlight.get_edgecolor(), dtype=float)
     assert to_hex(highlight.get_facecolor()) == OVERVIEW_ACTIVE_COLOR
-    assert highlight.get_alpha() == pytest.approx(0.18)
+    assert facecolor[-1] == pytest.approx(OVERVIEW_ACTIVE_ALPHA)
+    assert to_hex(highlight.get_edgecolor()) == OVERVIEW_ACTIVE_COLOR
+    assert edgecolor[-1] == pytest.approx(1.0)
+    assert highlight.get_linewidth() == pytest.approx(1.25)
+    rendered_values = tuple(
+        np.array(mesh.get_array(), copy=True) for mesh in view.overview_meshes
+    )
     assert not view.overview_axes.lines
     assert all(mesh.cmap.name == OVERVIEW_COLORMAP for mesh in view.overview_meshes)
 
     view.set_current_group(1)
     assert _highlight_x_bounds(window) == view.overview_x_cell_bounds[1]
+    for rendered, spectrum in zip(
+        rendered_values,
+        dataset.dataset.spectra,
+        strict=True,
+    ):
+        np.testing.assert_array_equal(rendered.ravel(), spectrum.intensity)
     window.close()
 
 
@@ -1126,7 +1144,7 @@ def test_dataset_state_indicator_is_compact_and_truthful(
     assert complete_state.dataset is complete
     complete_item = data_item.child(1)
     assert complete_item is not None
-    assert "Ready for analysis" in complete_item.toolTip(1)
+    assert "Ready for Fit" in complete_item.toolTip(1)
     window.close()
 
 

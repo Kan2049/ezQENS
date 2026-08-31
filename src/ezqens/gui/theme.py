@@ -211,8 +211,14 @@ QMainWindow, #applicationShell, QSplitter {{
 #workspaceSidebar {{
     background: {tokens.surface_sidebar};
 }}
-#inspectorPanel {{
+#inspectorPanel,
+#inspectorScrollArea,
+#inspectorScrollViewport,
+#inspectorScrollBody {{
     background: {tokens.surface_inspector};
+}}
+#inspectorScrollArea {{
+    border: 0;
 }}
 QLabel {{
     color: {tokens.text_primary};
@@ -359,13 +365,15 @@ QToolButton[compactDisclosure="true"]::menu-indicator {{
     border: 0;
 }}
 #manualDiagnosticsToggle,
+#manualResultDiagnosticsToggle,
 #inspectorDatasetToggle,
 #inspectorSourceToggle {{
     border-color: transparent;
     padding-left: 0;
     padding-right: 2px;
 }}
-#manualDiagnosticsDetails {{
+#manualDiagnosticsDetails,
+#manualResultDiagnosticsDetails {{
     font-size: {TYPOGRAPHY.secondary_size}px;
 }}
 #manualInteractionInstruction {{
@@ -383,6 +391,28 @@ QToolButton[compactDisclosure="true"]::menu-indicator {{
 }}
 #manualModelSummary, #manualFitReadiness {{
     font-size: {TYPOGRAPHY.secondary_size}px;
+}}
+#manualRunFitButton {{
+    background: {tokens.surface_selected};
+    border-color: {tokens.border_focus};
+    font-weight: 600;
+}}
+#manualFitResultSection {{
+    border-top: 1px solid {tokens.canvas_boundary};
+}}
+#manualFitResultToggle {{
+    font-weight: 600;
+}}
+#manualFitResultSummary,
+#manualFitResultSection QLabel[secondary="true"] {{
+    font-size: {TYPOGRAPHY.secondary_size}px;
+    color: {tokens.text_secondary};
+}}
+#manualFitResultImportant {{
+    color: {indicators.warning};
+}}
+#manualFitResultSection QLabel[activeBound="true"] {{
+    color: {indicators.warning};
 }}
 #manualFunctionSection {{
     border-top: 1px solid {tokens.canvas_boundary};
@@ -406,11 +436,15 @@ QToolButton[compactDisclosure="true"]::menu-indicator {{
     color: {tokens.text_secondary};
 }}
 #manualFitEditor QToolButton[fixedControl="true"],
-#manualFitEditor QToolButton[chainControl="true"] {{
+#manualFitEditor QToolButton[chainControl="true"],
+#manualFitEditor QToolButton[boundsControl="true"] {{
     min-width: 18px;
     max-width: 20px;
     padding: 1px;
     border-color: transparent;
+}}
+#manualFitEditor QLineEdit[boundsEnabled="false"] {{
+    color: {tokens.text_muted};
 }}
 #manualComponentRowLabel {{
     min-width: 20px;
@@ -419,6 +453,10 @@ QToolButton[compactDisclosure="true"]::menu-indicator {{
     border-color: transparent;
 }}
 #manualFitEditor QToolButton[fixedControl="true"]:checked {{
+    background: {tokens.surface_selected};
+    border-color: {tokens.border_focus};
+}}
+#manualFitEditor QToolButton[boundsControl="true"]:checked {{
     background: {tokens.surface_selected};
     border-color: {tokens.border_focus};
 }}

@@ -11,10 +11,12 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from matplotlib.colors import to_hex
-from PySide6.QtCore import QRect, Qt
-from PySide6.QtWidgets import QApplication, QLabel
+from PySide6.QtCore import QRect, Qt, QTimer
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QDialog, QLabel, QPushButton
 
 from ezqens.gui import MainWindow, create_application
+from ezqens.gui.dialogs import DialogChoice, choose_dialog
 from ezqens.gui.main_window import (
     INSPECTOR_PREFERRED_WIDTH,
     inspector_outward_expansion_width,
@@ -49,6 +51,44 @@ def test_gui_package_and_application_imports(application: QApplication) -> None:
     assert QApplication.instance() is application
     assert application.applicationName() == "ezQENS"
     assert create_application(["already-running"]) is application
+
+
+@pytest.mark.parametrize(
+    ("button_text", "expected"),
+    (("Cancel", "cancel"), ("Continue", "accept")),
+)
+def test_choose_dialog_real_button_click_returns_captured_choice(
+    application: QApplication,
+    button_text: str,
+    expected: str,
+) -> None:
+    clicked_dialogs: list[QDialog] = []
+
+    def click_choice() -> None:
+        dialog = application.activeModalWidget()
+        assert isinstance(dialog, QDialog)
+        clicked_dialogs.append(dialog)
+        button = next(
+            item
+            for item in dialog.findChildren(QPushButton)
+            if item.text() == button_text
+        )
+        QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+
+    QTimer.singleShot(0, click_choice)
+    selected = choose_dialog(
+        None,
+        "Confirm action",
+        "Choose one action.",
+        (
+            DialogChoice("Cancel", "cancel"),
+            DialogChoice("Continue", "accept", default=True),
+        ),
+        cancel_value="cancel",
+    )
+
+    assert clicked_dialogs
+    assert selected == expected
 
 
 def test_main_window_constructs_with_expected_shell_regions(

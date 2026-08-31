@@ -13,10 +13,12 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import numpy as np
 import pytest
 from matplotlib.backend_bases import KeyEvent, MouseButton, MouseEvent
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QKeyEvent
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
     QLabel,
     QPushButton,
     QToolButton,
@@ -1022,6 +1024,47 @@ def test_reset_all_requires_confirmation_and_preserves_existing_proposal(
     window.close()
 
 
+def test_reset_all_button_absorbs_checked_and_uses_real_confirmation(
+    application: QApplication,
+) -> None:
+    window = MainWindow()
+    project = window.workspace.new_project()
+    state = window.workspace.add_dataset(
+        project,
+        _dataset(group_count=2, units=("meV", "counts")),
+    )
+    window.open_dataset(project, state)
+    window.enter_mask_task()
+    assert window._mask_draft is not None
+    assert window._mask_draft.exclude_points(0, [False, False, True, False, False])
+    seen_dialogs: list[QDialog] = []
+
+    def confirm_reset() -> None:
+        dialog = application.activeModalWidget()
+        assert isinstance(dialog, QDialog)
+        assert dialog.windowTitle() == "Reset All Groups"
+        seen_dialogs.append(dialog)
+        button = next(
+            item
+            for item in dialog.findChildren(QPushButton)
+            if item.text() == "Reset All"
+        )
+        QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+
+    window.mask_reset_all_button.setCheckable(True)
+    window.show()
+    application.processEvents()
+    QTimer.singleShot(0, confirm_reset)
+    QTest.mouseClick(window.mask_reset_all_button, Qt.MouseButton.LeftButton)
+    application.processEvents()
+
+    assert window.mask_reset_all_button.isChecked()
+    assert seen_dialogs
+    assert window._mask_draft is not None
+    assert not window._mask_draft.has_manual_edits
+    window.close()
+
+
 def test_rerun_auto_mask_invokes_the_core_proposal_path_and_replaces_baseline(
     application: QApplication,
     monkeypatch: pytest.MonkeyPatch,
@@ -1048,6 +1091,59 @@ def test_rerun_auto_mask_invokes_the_core_proposal_path_and_replaces_baseline(
 
     assert window.rerun_auto_mask(confirmed=True)
     assert len(proposals) == 1
+    assert window._mask_draft._padding is proposals[0].padding
+    assert not window._mask_draft.has_manual_edits
+    window.close()
+
+
+def test_rerun_button_absorbs_checked_and_uses_real_confirmation(
+    application: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = MainWindow()
+    project = window.workspace.new_project()
+    state = window.workspace.add_dataset(project, _padding_dataset())
+    window.open_dataset(project, state)
+    window.enter_mask_task()
+    assert window._mask_draft is not None
+    assert window._mask_draft.exclude_points(
+        0,
+        [False, False, False, False, False, True, False],
+    )
+    original = masking_module.create_auto_mask_state
+    proposals: list[AutoMaskState] = []
+
+    def rerun(dataset: ReducedDataset) -> AutoMaskState:
+        proposal = original(dataset)
+        proposals.append(proposal)
+        return proposal
+
+    monkeypatch.setattr(masking_module, "create_auto_mask_state", rerun)
+    seen_dialogs: list[QDialog] = []
+
+    def confirm_rerun() -> None:
+        dialog = application.activeModalWidget()
+        assert isinstance(dialog, QDialog)
+        assert dialog.windowTitle() == "Re-run AutoMask"
+        seen_dialogs.append(dialog)
+        button = next(
+            item
+            for item in dialog.findChildren(QPushButton)
+            if item.text() == "Re-run AutoMask"
+        )
+        QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+
+    window.mask_rerun_button.setCheckable(True)
+    window.show()
+    application.processEvents()
+    QTimer.singleShot(0, confirm_rerun)
+    QTest.mouseClick(window.mask_rerun_button, Qt.MouseButton.LeftButton)
+    application.processEvents()
+
+    assert window.mask_rerun_button.isChecked()
+    assert seen_dialogs
+    assert len(proposals) == 1
+    assert window._mask_draft is not None
     assert window._mask_draft._padding is proposals[0].padding
     assert not window._mask_draft.has_manual_edits
     window.close()
@@ -2089,9 +2185,8 @@ def test_wheel_zoom_respects_plot_and_axis_regions_and_not_lock_y(
     window.close()
 
 
-def test_symlog_is_explicit_display_only_and_log_is_not_substituted(
+def test_symlog_and_log_are_explicit_display_only_for_signed_data(
     application: QApplication,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     window = MainWindow()
     project = window.workspace.new_project()
@@ -2099,17 +2194,93 @@ def test_symlog_is_explicit_display_only_and_log_is_not_substituted(
     before = state.dataset.spectra[0].intensity.copy()
     window.open_dataset(project, state)
     view = window.dataset_view
+    selection = view.selection
+    assert selection is not None
+    manual_mask = np.array([True, True, True, False, False])
+    masked_selection = FittingSelection(
+        dataset=selection.dataset,
+        padding=selection.padding,
+        ranges=selection.ranges,
+        manual_exclusion_masks=(manual_mask,),
+        manual_auto_reinclusion_masks=selection.manual_auto_reinclusion_masks,
+    )
+    view.set_selection(masked_selection)
+    mask_before = masked_selection.manual_exclusion_mask(0).copy()
 
     assert view.set_y_scale("symlog")
     assert view.spectrum_axes is not None
     assert view.spectrum_axes.get_yscale() == "symlog"
-    monkeypatch.setattr(
-        "ezqens.gui.dataset_view.show_message_dialog",
-        lambda *_args: None,
-    )
-    assert not view.set_y_scale("log")
-    assert view.y_scale == "symlog"
+    assert view.set_y_scale("log")
+    assert view.y_scale == "log"
+    assert view.spectrum_axes.get_yscale() == "log"
+    displayed = np.asarray(view.spectrum_axes.lines[0].get_ydata(), dtype=float)
+    assert np.all(displayed > 0.0)
     np.testing.assert_array_equal(state.dataset.spectra[0].intensity, before)
+    np.testing.assert_array_equal(
+        masked_selection.manual_exclusion_mask(0),
+        mask_before,
+    )
+    assert view.selection is masked_selection
+    view.set_selection(selection)
+    assert view.y_scale == "log"
+    assert view.spectrum_axes is not None
+    displayed_runs = tuple(
+        np.asarray(line.get_ydata(), dtype=float) for line in view.spectrum_axes.lines
+    )
+    assert displayed_runs
+    assert all(np.all(run > 0.0) for run in displayed_runs)
+    window.close()
+
+
+def test_all_nonpositive_data_keeps_log_with_an_empty_display_state(
+    application: QApplication,
+) -> None:
+    source = _signed_dataset()
+    spectrum = source.spectra[0]
+    dataset = ReducedDataset(
+        role=SpectrumRole.SAMPLE,
+        spectra=(
+            Spectrum(
+                role=SpectrumRole.SAMPLE,
+                group_index=0,
+                group_label="Group 1",
+                energy=spectrum.energy,
+                intensity=np.array([-2.0, -1.0, 0.0, -3.0, -0.5]),
+                uncertainty=spectrum.uncertainty,
+                energy_unit=spectrum.energy_unit,
+                intensity_unit=spectrum.intensity_unit,
+                uncertainty_unit=spectrum.uncertainty_unit,
+            ),
+        ),
+    )
+    window = MainWindow()
+    project = window.workspace.new_project()
+    state = window.workspace.add_dataset(project, dataset)
+    window.open_dataset(project, state)
+    view = window.dataset_view
+    arrays = (
+        spectrum.energy.copy(),
+        state.dataset.spectra[0].intensity.copy(),
+        state.dataset.spectra[0].uncertainty.copy(),
+    )
+    selection = view.selection
+    workflow = window._workflow_project_for(project)
+    lock_state = view.y_range_locked
+
+    assert view.set_y_scale("log")
+
+    assert view.y_scale == "log"
+    assert view.y_range_locked is lock_state
+    assert view.spectrum_axes is not None
+    assert view.spectrum_axes.get_yscale() == "log"
+    assert view.spectrum_log_empty_message is not None
+    assert "No positive values" in view.spectrum_log_empty_message.get_text()
+    assert np.asarray(view.spectrum_axes.lines[0].get_ydata()).size == 0
+    assert view.selection is selection
+    assert window._workflow_project_for(project) is workflow
+    np.testing.assert_array_equal(state.dataset.spectra[0].energy, arrays[0])
+    np.testing.assert_array_equal(state.dataset.spectra[0].intensity, arrays[1])
+    np.testing.assert_array_equal(state.dataset.spectra[0].uncertainty, arrays[2])
     window.close()
 
 
