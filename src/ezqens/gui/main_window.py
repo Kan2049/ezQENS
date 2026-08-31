@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass
+from collections.abc import Iterable
+from dataclasses import dataclass, field
 from pathlib import Path
 
+import numpy as np
 from PySide6.QtCore import QRect, QSignalBlocker, QSize, Qt, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QKeySequence
 from PySide6.QtWidgets import (
@@ -71,7 +73,7 @@ from ezqens.gui.workspace import (
 )
 from ezqens.io import parse_dave_q_bins
 from ezqens.io.importers import import_reduced_data
-from ezqens.preprocessing import BoundarySide
+from ezqens.preprocessing import BoundarySide, FittingSelection
 from ezqens.workflow import (
     ManualComponentKind,
     ManualFitDraft,
@@ -141,17 +143,61 @@ class ImportBatchResult:
 
 
 @dataclass(eq=False, slots=True)
+class ManualFitExecutionState:
+    """Execution-only state owned independently by one Sample Group."""
+
+    lifecycle: ManualFitLifecycle = ManualFitLifecycle.READY
+    fit_result: FitResult | None = None
+    diagnostics: tuple[WorkflowDiagnostic, ...] = ()
+
+
+@dataclass(eq=False, slots=True)
 class ManualFitSession:
     """One authoritative in-session Manual working state for one Sample."""
 
     owner: tuple[ProjectState, str]
     draft: ManualFitDraft
     group_index: int
-    lifecycle: ManualFitLifecycle = ManualFitLifecycle.READY
-    fit_result: FitResult | None = None
-    execution_diagnostics: tuple[WorkflowDiagnostic, ...] = ()
+    execution_by_group: dict[int, ManualFitExecutionState] = field(default_factory=dict)
     editor_expanded: bool = True
     result_expanded: bool = False
+
+    def execution_state(
+        self,
+        group_index: int | None = None,
+    ) -> ManualFitExecutionState:
+        """Return the retained execution state for one validated draft Group."""
+
+        target = self.group_index if group_index is None else group_index
+        self.draft.setup(target)
+        return self.execution_by_group.setdefault(target, ManualFitExecutionState())
+
+    @property
+    def lifecycle(self) -> ManualFitLifecycle:
+        return self.execution_state().lifecycle
+
+    @lifecycle.setter
+    def lifecycle(self, lifecycle: ManualFitLifecycle) -> None:
+        self.execution_state().lifecycle = lifecycle
+
+    @property
+    def fit_result(self) -> FitResult | None:
+        return self.execution_state().fit_result
+
+    @fit_result.setter
+    def fit_result(self, result: FitResult | None) -> None:
+        self.execution_state().fit_result = result
+
+    @property
+    def execution_diagnostics(self) -> tuple[WorkflowDiagnostic, ...]:
+        return self.execution_state().diagnostics
+
+    @execution_diagnostics.setter
+    def execution_diagnostics(
+        self,
+        diagnostics: tuple[WorkflowDiagnostic, ...],
+    ) -> None:
+        self.execution_state().diagnostics = diagnostics
 
 
 @dataclass(slots=True)
@@ -159,6 +205,31 @@ class SampleViewSession:
     """Presentation-only Spectrum preferences retained for one Sample."""
 
     y_scale: str = "linear"
+
+
+def _changed_fitting_selection_groups(
+    before: FittingSelection | None,
+    after: FittingSelection | None,
+    group_count: int,
+) -> tuple[int, ...]:
+    """Identify Groups whose public effective fitting selection changed."""
+
+    if before is None or after is None:
+        return () if before is after else tuple(range(group_count))
+    if (
+        len(before.dataset.spectra) != group_count
+        or len(after.dataset.spectra) != group_count
+    ):
+        return tuple(range(group_count))
+    return tuple(
+        group_index
+        for group_index in range(group_count)
+        if before.ranges[group_index] != after.ranges[group_index]
+        or not np.array_equal(
+            before.excluded_mask(group_index),
+            after.excluded_mask(group_index),
+        )
+    )
 
 
 def _active_application() -> QApplication:
@@ -336,6 +407,7 @@ class MainWindow(QMainWindow):
         self.workspace.dataset_removal_requested.connect(self.remove_dataset)
         self.workspace.q_method_removal_requested.connect(self.remove_q_method)
         self.dataset_view.group_changed.connect(self._refresh_inspector_context)
+        self.dataset_view.group_changed.connect(self._sync_mask_controls)
         self.dataset_view.y_scale_changed.connect(self._on_y_scale_changed)
         self.dataset_view.q_assignment_requested.connect(self.show_q_editor)
         self.dataset_view.units_requested.connect(self.show_units_editor)
@@ -590,6 +662,14 @@ class MainWindow(QMainWindow):
         self.mask_boundary_button = QToolButton()
         self.mask_boundary_button.setText("Boundary")
         self.mask_boundary_button.setToolTip("Drag a visible Mask boundary")
+        self.mask_boundary_all_button = QToolButton()
+        self.mask_boundary_all_button.setText("Apply to All Groups…")
+        self.mask_boundary_all_button.setToolTip(
+            "Apply the current energy boundary to every Group",
+        )
+        self.mask_boundary_all_button.clicked.connect(
+            lambda _checked=False: self._apply_mask_boundary_to_all_groups(),
+        )
         self.mask_rectangle_button = QToolButton()
         self.mask_rectangle_button.setText("Rectangle")
         self.mask_rectangle_button.setToolTip(
@@ -674,6 +754,7 @@ class MainWindow(QMainWindow):
         tool_layout.addWidget(title)
         tool_layout.addStretch(1)
         tool_layout.addWidget(self.mask_boundary_button)
+        tool_layout.addWidget(self.mask_boundary_all_button)
         tool_layout.addWidget(self.mask_rectangle_button)
         tool_layout.addWidget(self.mask_lasso_button)
         tool_layout.addSpacing(6)
@@ -1495,19 +1576,31 @@ class MainWindow(QMainWindow):
         self._refresh_manual_fit()
         return True
 
-    def _invalidate_manual_session(self, session: ManualFitSession) -> None:
-        """Mark one affected Sample's retained current fit stale."""
+    def _invalidate_manual_session(
+        self,
+        session: ManualFitSession,
+        group_indices: Iterable[int] | None = None,
+    ) -> None:
+        """Mark the affected Groups in one retained Sample session stale."""
 
-        if session.lifecycle is ManualFitLifecycle.CURRENT:
-            session.lifecycle = ManualFitLifecycle.NEEDS_FIT
-        session.fit_result = None
-        session.execution_diagnostics = ()
+        targets = (
+            range(len(session.draft.setups)) if group_indices is None else group_indices
+        )
+        for group_index in targets:
+            execution = session.execution_state(group_index)
+            if execution.lifecycle is ManualFitLifecycle.CURRENT:
+                execution.lifecycle = ManualFitLifecycle.NEEDS_FIT
+            execution.fit_result = None
+            execution.diagnostics = ()
 
     def _invalidate_manual_fit(self) -> None:
-        """Conservatively mark the one active fitted state stale."""
+        """Mark only the active Group's retained fitted state stale."""
 
         if self._active_manual_session is not None:
-            self._invalidate_manual_session(self._active_manual_session)
+            self._invalidate_manual_session(
+                self._active_manual_session,
+                (self.dataset_view.current_group_index,),
+            )
 
     def _run_manual_fit(self) -> None:
         """Run and atomically adopt one group through the public workflow seam."""
@@ -1850,14 +1943,13 @@ class MainWindow(QMainWindow):
             self._discard_pending_manual_interaction()
 
     def _on_manual_group_changed(self, _group_index: int) -> None:
-        """Keep independently stored group setups intact while the viewer navigates."""
+        """Project one Group's retained draft and execution state without mutation."""
 
         self.dataset_view.cancel_manual_component_interaction()
         if self._active_manual_session is not None:
             self._active_manual_session.group_index = (
                 self.dataset_view.current_group_index
             )
-        self._invalidate_manual_fit()
         self._refresh_manual_fit()
 
     def _refresh_manual_fit(self) -> None:
@@ -2369,7 +2461,7 @@ class MainWindow(QMainWindow):
         if auto_mask is None:
             return
         try:
-            self._mask_draft = MaskTaskDraft(auto_mask)
+            self._mask_draft = MaskTaskDraft(auto_mask, self._open_dataset.dataset)
         except ValueError as error:
             show_message_dialog(self, "Mask", str(error))
             return
@@ -2490,7 +2582,7 @@ class MainWindow(QMainWindow):
         state = masking.create_auto_mask_state(self._open_dataset.dataset)
         try:
             # Validate the new core proposal before replacing the committed baseline.
-            MaskTaskDraft(state)
+            MaskTaskDraft(state, self._open_dataset.dataset)
             current = self.workspace.update_auto_mask(
                 self._open_project,
                 self._open_dataset,
@@ -2499,7 +2591,10 @@ class MainWindow(QMainWindow):
             self._open_dataset = current
             if current.auto_mask is None:
                 return False
-            self._mask_draft = MaskTaskDraft(current.auto_mask)
+            self._mask_draft = MaskTaskDraft(
+                current.auto_mask,
+                current.dataset,
+            )
             self._mask_draft_owner = current
         except ValueError as error:
             show_message_dialog(self, "Re-run AutoMask", str(error))
@@ -2678,6 +2773,35 @@ class MainWindow(QMainWindow):
         else:
             self.dataset_view.set_selection(self._mask_draft.selection)
 
+    def _apply_mask_boundary_to_all_groups(
+        self,
+        *,
+        confirmed: bool = False,
+    ) -> bool:
+        """Apply the current energy boundary to every Group as one Mask edit."""
+
+        if self._mask_draft is None:
+            return False
+        if not confirmed:
+            accepted = confirm_dialog(
+                self,
+                "Apply Boundary to All Groups",
+                "Apply the current energy boundary to all Groups?",
+                accept_text="Apply to All Groups",
+            )
+            if not accepted:
+                return False
+        try:
+            changed = self._mask_draft.apply_boundary_to_all_groups(
+                self.dataset_view.current_group_index,
+            )
+        except ValueError as error:
+            show_message_dialog(self, "Apply Boundary to All Groups", str(error))
+            return False
+        if changed:
+            self._refresh_mask_preview()
+        return changed
+
     def _undo_mask(self) -> None:
         if self._mask_draft is None:
             return
@@ -2730,12 +2854,18 @@ class MainWindow(QMainWindow):
         self.dataset_view.set_selection(self._mask_draft.selection)
         self._sync_mask_controls()
 
-    def _sync_mask_controls(self) -> None:
+    def _sync_mask_controls(self, _group_index: int | None = None) -> None:
         draft = self._mask_draft
         self.mask_undo_button.setEnabled(draft is not None and draft.can_undo)
         self.mask_redo_button.setEnabled(draft is not None and draft.can_redo)
         self.mask_disable_auto_button.setEnabled(
             draft is not None and draft.can_disable_auto_mask,
+        )
+        self.mask_boundary_all_button.setEnabled(
+            draft is not None
+            and draft.can_apply_boundary_to_all_groups(
+                self.dataset_view.current_group_index
+            ),
         )
 
     def _refresh_context_label(self) -> None:
@@ -2940,6 +3070,7 @@ class MainWindow(QMainWindow):
         tokens = DEFAULT_LAYOUT_TOKENS
         for control in (
             self.mask_boundary_button,
+            self.mask_boundary_all_button,
             self.mask_rectangle_button,
             self.mask_lasso_button,
             self.mask_exclude_button,
@@ -3098,15 +3229,34 @@ class MainWindow(QMainWindow):
             session is self._active_manual_session for session in affected_sessions
         )
         self._workflow_project_for(project)
-        if (
+        selection_only_update = (
             current.dataset is previous.dataset
             and current.auto_mask is not previous.auto_mask
-        ):
+        )
+        changed_selection_groups: tuple[int, ...] | None = None
+        if selection_only_update:
             self._commit_explicit_fitting_selection(project, current)
+            before_selection = (
+                None if previous.auto_mask is None else previous.auto_mask.selection
+            )
+            after_selection = (
+                None if current.auto_mask is None else current.auto_mask.selection
+            )
+            changed_selection_groups = _changed_fitting_selection_groups(
+                before_selection,
+                after_selection,
+                len(current.dataset.spectra),
+            )
         if manual_context_affected:
             self._discard_pending_manual_interaction()
         for session in affected_sessions:
-            self._invalidate_manual_session(session)
+            group_indices = (
+                changed_selection_groups
+                if selection_only_update
+                and session.owner[1] == previous.workflow_dataset_id
+                else None
+            )
+            self._invalidate_manual_session(session, group_indices)
         if self._open_project is project and self._open_dataset is previous:
             self._open_dataset = current
             if (

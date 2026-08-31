@@ -13,7 +13,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import numpy as np
 import pytest
 from matplotlib.backend_bases import KeyEvent, MouseButton, MouseEvent
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QPoint, Qt, QTimer
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
@@ -32,7 +32,7 @@ from ezqens.gui.q_editor import Q_CENTER, Q_EDGES, QAssignmentEditor
 from ezqens.gui.units_editor import SourceUnitsDialog
 from ezqens.gui.workspace import DatasetAnalysisState, dataset_analysis_state
 from ezqens.io import parse_dave_q_bins
-from ezqens.preprocessing import BoundarySide, FittingSelection
+from ezqens.preprocessing import BoundarySide, FittingRange, FittingSelection
 
 Q_FIXTURES = Path(__file__).parent / "fixtures" / "q_bins"
 REDUCED_FIXTURES = Path(__file__).parent / "fixtures" / "reduced_data"
@@ -772,6 +772,336 @@ def test_mask_draft_uses_reversible_core_selection_and_keeps_history_local() -> 
     np.testing.assert_array_equal(draft.selection.excluded_mask(0), before)
     draft.redo()
     assert not np.any(draft.selection.excluded_mask(0)[:5])
+
+
+def test_absent_auto_selection_still_allows_manual_boundary_on_valid_data(
+    application: QApplication,
+) -> None:
+    source = _dataset(group_count=1, units=("meV", "counts"))
+    spectrum = source.spectra[0]
+    dataset = ReducedDataset(
+        role=SpectrumRole.SAMPLE,
+        spectra=(
+            Spectrum(
+                role=SpectrumRole.SAMPLE,
+                group_index=0,
+                group_label="Group 1",
+                energy=spectrum.energy,
+                intensity=spectrum.intensity,
+                uncertainty=np.array([1.0, 1.0, np.nan, 1.0, 1.0]),
+                energy_unit=spectrum.energy_unit,
+                intensity_unit=spectrum.intensity_unit,
+                uncertainty_unit=spectrum.uncertainty_unit,
+            ),
+        ),
+    )
+    proposal = create_auto_mask_state(dataset)
+    absent = AutoMaskState(
+        padding=proposal.padding,
+        selection=None,
+        diagnostic="AutoMask baseline unavailable",
+    )
+    window = MainWindow()
+    project = window.workspace.new_project()
+    state = window.workspace.add_dataset(project, dataset)
+    state = window.workspace.update_auto_mask(project, state, absent)
+    assert state.auto_mask is not None
+    auto_before = state.auto_mask.padding.spectra[0].auto_mask.copy()
+
+    assert state.mask_editable
+    assert window.open_dataset(project, state)
+    window.enter_mask_task()
+    assert window._mask_draft is not None
+    assert window.mask_boundary_button.isEnabled()
+    assert window._mask_draft.set_auto_boundary(
+        0,
+        side=BoundarySide.LEFT,
+        energy=-1.0,
+    )
+    assert window._mask_draft.set_auto_boundary(
+        0,
+        side=BoundarySide.RIGHT,
+        energy=1.0,
+    )
+    selection = window._mask_draft.selection
+    assert selection.excluded_mask(0)[0]
+    assert selection.excluded_mask(0)[2]
+    assert selection.excluded_mask(0)[4]
+    np.testing.assert_array_equal(
+        window._mask_draft.saved_state().padding.spectra[0].auto_mask,
+        auto_before,
+    )
+    assert window._mask_draft.saved_state().diagnostic == absent.diagnostic
+    window.close()
+
+
+def test_axes_edge_boundaries_are_hittable_and_require_explicit_manual_intent(
+    application: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dataset = _dataset(group_count=2, units=("meV", "counts"))
+    proposal = create_auto_mask_state(dataset)
+    absent = AutoMaskState(
+        padding=proposal.padding,
+        selection=None,
+        diagnostic="AutoMask baseline unavailable",
+    )
+    window = MainWindow()
+    project = window.workspace.new_project()
+    state = window.workspace.add_dataset(project, dataset)
+    state = window.workspace.update_auto_mask(project, state, absent)
+    assert window.open_dataset(project, state)
+    window.enter_mask_task()
+    view = window.dataset_view
+    draft = window._mask_draft
+    assert draft is not None
+    assert not draft.manual_boundary_groups
+    assert not window.mask_boundary_all_button.isEnabled()
+
+    window.show()
+    application.processEvents()
+    view._spectrum_x_limits = (-2.0, 2.0)
+    view.canvas.draw()  # type: ignore[no-untyped-call]
+    axes = view.spectrum_axes
+    assert axes is not None
+    axes.set_xlim(-2.0, 2.0)
+    view.canvas.draw()  # type: ignore[no-untyped-call]
+    assert axes.get_xlim() == pytest.approx((-2.0, 2.0))
+    y_pixel = float((axes.bbox.y0 + axes.bbox.y1) / 2.0)
+    left_x = float(axes.transData.transform((-2.0, 0.0))[0])
+
+    with monkeypatch.context() as high_dpi:
+        high_dpi.setattr(view.canvas, "devicePixelRatioF", lambda: 2.0)
+        high_dpi_press = MouseEvent(
+            "button_press_event",
+            view.canvas,
+            round(left_x - 12.0),
+            round(y_pixel),
+            button=MouseButton.LEFT,
+        )
+        assert high_dpi_press.inaxes is None
+        view.canvas.callbacks.process("button_press_event", high_dpi_press)
+        assert view._boundary_drag_side == "left"
+        view._cancel_mask_gesture()
+
+    view.set_mask_tool("rectangle")
+    view.canvas.callbacks.process("button_press_event", high_dpi_press)
+    assert view._boundary_drag_side is None
+    view.set_mask_tool(None)
+    view.canvas.callbacks.process("button_press_event", high_dpi_press)
+    assert view._spectrum_zoom_start is None
+    view.set_mask_tool("boundary")
+
+    device_ratio = float(view.canvas.devicePixelRatioF())
+    left_start = QPoint(
+        round((left_x - 1.0) / device_ratio),
+        round(view.canvas.height() - y_pixel / device_ratio),
+    )
+    left_target_x, left_target_y = axes.transData.transform((-1.0, 2.0))
+    left_target = QPoint(
+        round(left_target_x / device_ratio),
+        round(view.canvas.height() - left_target_y / device_ratio),
+    )
+    delivered_presses: list[tuple[object | None, float | None]] = []
+    callback_id = view.canvas.mpl_connect(
+        "button_press_event",
+        lambda event: delivered_presses.append((event.inaxes, event.xdata)),
+    )
+    QTest.mousePress(
+        view.canvas,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+        left_start,
+    )
+    application.processEvents()
+    view.canvas.mpl_disconnect(callback_id)
+    assert delivered_presses[-1] == (None, None)
+    assert view._boundary_drag_side == "left"
+    QTest.mouseMove(view.canvas, left_target)
+    application.processEvents()
+    assert view._boundary_drag_side == "left"
+    QTest.mouseRelease(
+        view.canvas,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+        left_target,
+    )
+    application.processEvents()
+
+    assert draft.manual_boundary_groups == frozenset({0})
+    assert draft.selection.excluded_mask(0)[0]
+    assert window.mask_boundary_all_button.isEnabled()
+    assert view.spectrum_axes is not None
+    assert view.spectrum_axes.patches
+
+    axes = view.spectrum_axes
+    right_x = float(axes.transData.transform((2.0, 0.0))[0])
+    right_y = float((axes.bbox.y0 + axes.bbox.y1) / 2.0)
+    right_start = QPoint(
+        round((right_x + 1.0) / device_ratio),
+        round(view.canvas.height() - right_y / device_ratio),
+    )
+    right_target_x, right_target_y = axes.transData.transform((1.0, 2.0))
+    right_target = QPoint(
+        round(right_target_x / device_ratio),
+        round(view.canvas.height() - right_target_y / device_ratio),
+    )
+    QTest.mousePress(
+        view.canvas,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+        right_start,
+    )
+    application.processEvents()
+    assert view._boundary_drag_side == "right"
+    QTest.mouseMove(view.canvas, right_target)
+    application.processEvents()
+    QTest.mouseRelease(
+        view.canvas,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+        right_target,
+    )
+    application.processEvents()
+    assert draft.selection.excluded_mask(0)[4]
+
+    assert window.save_mask_task()
+    assert window._mask_draft is not None
+    assert window._mask_draft.manual_boundary_groups == frozenset({0})
+    assert window.mask_boundary_all_button.isEnabled()
+    assert window._open_dataset is not None
+    assert window._open_dataset.auto_mask is not None
+    assert window._open_dataset.auto_mask.manual_boundary_groups == frozenset({0})
+    assert window._open_dataset.auto_mask.auto_baseline_absent
+    assert window._mask_draft.reset_group(0)
+    assert not window._mask_draft.manual_boundary_groups
+    assert not np.any(window._mask_draft.selection.excluded_mask(0))
+    assert window._mask_draft.saved_state().auto_baseline_absent
+    window.close()
+
+
+def test_apply_boundary_to_all_is_one_range_only_history_transition() -> None:
+    spectra = (
+        Spectrum(
+            role=SpectrumRole.SAMPLE,
+            group_index=0,
+            group_label="Group 1",
+            energy=np.array([-2.0, -1.0, 0.0, 1.0, 2.0]),
+            intensity=np.ones(5),
+            uncertainty=np.ones(5),
+            energy_unit="meV",
+            intensity_unit="counts",
+            uncertainty_unit="counts",
+        ),
+        Spectrum(
+            role=SpectrumRole.SAMPLE,
+            group_index=1,
+            group_label="Group 2",
+            energy=np.array([-3.0, -0.5, 0.0, 0.5, 3.0]),
+            intensity=np.ones(5),
+            uncertainty=np.array([1.0, 1.0, np.nan, 1.0, 1.0]),
+            energy_unit="meV",
+            intensity_unit="counts",
+            uncertainty_unit="counts",
+        ),
+        Spectrum(
+            role=SpectrumRole.SAMPLE,
+            group_index=2,
+            group_label="Group 3",
+            energy=np.array([-4.0, -2.0, 0.0, 0.5, 4.0]),
+            intensity=np.ones(5),
+            uncertainty=np.ones(5),
+            energy_unit="meV",
+            intensity_unit="counts",
+            uncertainty_unit="counts",
+        ),
+    )
+    dataset = ReducedDataset(role=SpectrumRole.SAMPLE, spectra=spectra)
+    state = create_auto_mask_state(dataset)
+    assert state.selection is not None
+    draft = MaskTaskDraft(state)
+    assert draft.exclude_points(2, [False, False, True, False, False])
+    assert draft.set_auto_boundary(0, side=BoundarySide.LEFT, energy=-1.0)
+    assert draft.set_auto_boundary(0, side=BoundarySide.RIGHT, energy=1.0)
+    before_batch = draft.selection
+    auto_before = tuple(item.auto_mask.copy() for item in state.padding.spectra)
+
+    assert draft.apply_boundary_to_all_groups(0)
+    applied = draft.selection
+    assert draft.manual_boundary_groups == frozenset({0, 1, 2})
+    assert applied.ranges == (FittingRange(-1.0, 1.0),) * 3
+    assert applied.manual_exclusion_mask(2)[2]
+    assert applied.invalid_mask(1)[2]
+    assert applied.excluded_mask(1)[2]
+    for current, original in zip(state.padding.spectra, auto_before, strict=True):
+        np.testing.assert_array_equal(current.auto_mask, original)
+
+    draft.undo()
+    assert draft.selection is before_batch
+    assert draft.manual_boundary_groups == frozenset({0})
+    assert draft.selection.manual_exclusion_mask(2)[2]
+    draft.redo()
+    assert draft.selection is applied
+    assert draft.manual_boundary_groups == frozenset({0, 1, 2})
+    assert draft.selection.manual_exclusion_mask(2)[2]
+
+
+def test_visible_apply_boundary_to_all_uses_real_confirmation_atomically(
+    application: QApplication,
+) -> None:
+    window = MainWindow()
+    project = window.workspace.new_project()
+    state = window.workspace.add_dataset(
+        project,
+        _dataset(group_count=2, units=("meV", "counts")),
+    )
+    window.open_dataset(project, state)
+    window.enter_mask_task()
+    assert window._mask_draft is not None
+    assert not window.mask_boundary_all_button.isEnabled()
+    assert window._mask_draft.set_auto_boundary(
+        0,
+        side=BoundarySide.LEFT,
+        energy=-1.0,
+    )
+    assert window._mask_draft.set_auto_boundary(
+        0,
+        side=BoundarySide.RIGHT,
+        energy=1.0,
+    )
+    window._refresh_mask_preview()
+    before = window._mask_draft.selection
+    seen_titles: list[str] = []
+
+    def click_dialog_button(text: str) -> None:
+        dialog = application.activeModalWidget()
+        assert isinstance(dialog, QDialog)
+        seen_titles.append(dialog.windowTitle())
+        button = next(
+            item for item in dialog.findChildren(QPushButton) if item.text() == text
+        )
+        QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+
+    window.show()
+    application.processEvents()
+    assert window.mask_boundary_all_button.isVisible()
+    QTimer.singleShot(0, lambda: click_dialog_button("Cancel"))
+    QTest.mouseClick(window.mask_boundary_all_button, Qt.MouseButton.LeftButton)
+    assert window._mask_draft.selection is before
+
+    QTimer.singleShot(0, lambda: click_dialog_button("Apply to All Groups"))
+    QTest.mouseClick(window.mask_boundary_all_button, Qt.MouseButton.LeftButton)
+    application.processEvents()
+
+    assert seen_titles == [
+        "Apply Boundary to All Groups",
+        "Apply Boundary to All Groups",
+    ]
+    assert window._mask_draft.selection.ranges == (FittingRange(-1.0, 1.0),) * 2
+    window.dataset_view.set_current_group(1)
+    assert window.dataset_view.selection is window._mask_draft.selection
+    assert window.dataset_view.selection.ranges[1] == FittingRange(-1.0, 1.0)
+    window.close()
 
 
 def test_reset_group_restores_only_its_existing_auto_mask_baseline() -> None:
@@ -1798,6 +2128,7 @@ def test_mask_toolbar_groups_direct_tools_above_task_actions(
         button.text() for button in window.mask_tool_row.findChildren(QToolButton)
     ] == [
         "Boundary",
+        "Apply to All Groups…",
         "Rectangle",
         "Lasso",
         "Exclude",

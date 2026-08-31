@@ -30,6 +30,20 @@ class AutoMaskState:
     padding: EdgePaddingDetectionResult
     selection: FittingSelection | None
     diagnostic: str | None = None
+    manual_boundary_groups: frozenset[int] = frozenset()
+    auto_baseline_absent: bool = False
+
+    def __post_init__(self) -> None:
+        if self.selection is None:
+            object.__setattr__(self, "auto_baseline_absent", True)
+
+
+@dataclass(frozen=True, slots=True)
+class _MaskDraftState:
+    """One selection and its Manual-boundary intent in the shared undo history."""
+
+    selection: FittingSelection
+    manual_boundary_groups: frozenset[int]
 
 
 def create_auto_mask_state(dataset: ReducedDataset) -> AutoMaskState:
@@ -57,6 +71,8 @@ def rebind_auto_mask_state(
             padding=state.padding,
             selection=None,
             diagnostic=state.diagnostic,
+            manual_boundary_groups=state.manual_boundary_groups,
+            auto_baseline_absent=state.auto_baseline_absent,
         )
     if not measured_point_correspondence_exactly_unchanged(
         state.selection.dataset,
@@ -84,26 +100,73 @@ def rebind_auto_mask_state(
             selection=None,
             diagnostic=str(error),
         )
-    return AutoMaskState(padding=state.padding, selection=selection)
+    return AutoMaskState(
+        padding=state.padding,
+        selection=selection,
+        diagnostic=state.diagnostic,
+        manual_boundary_groups=state.manual_boundary_groups,
+        auto_baseline_absent=state.auto_baseline_absent,
+    )
 
 
 class MaskTaskDraft:
     """Task-local, undoable edits delegated to ``FittingSelection`` semantics."""
 
-    def __init__(self, state: AutoMaskState) -> None:
-        if state.selection is None:
-            message = state.diagnostic or "AutoMask selection is unavailable"
-            raise ValueError(message)
+    def __init__(
+        self,
+        state: AutoMaskState,
+        dataset: ReducedDataset | None = None,
+    ) -> None:
+        selection = state.selection
+        if selection is None:
+            if dataset is None:
+                message = state.diagnostic or "AutoMask selection is unavailable"
+                raise ValueError(message)
+            selection = _manual_selection_without_auto_baseline(state, dataset)
         self._padding = state.padding
-        self._history = [state.selection]
+        self._diagnostic = state.diagnostic
+        self._auto_baseline_absent = state.auto_baseline_absent
+        self._baseline_ranges = (
+            tuple(
+                _full_energy_range(spectrum.energy)
+                for spectrum in selection.dataset.spectra
+            )
+            if state.auto_baseline_absent
+            else selection.ranges
+        )
+        self._baseline_reinclusions = (
+            tuple(padding.auto_mask for padding in state.padding.spectra)
+            if state.auto_baseline_absent
+            else tuple(
+                np.zeros(spectrum.energy.size, dtype=np.bool_)
+                for spectrum in selection.dataset.spectra
+            )
+        )
+        self._history = [
+            _MaskDraftState(selection, state.manual_boundary_groups),
+        ]
         self._position = 0
-        self._boundary_positions = _effective_boundary_positions(state.selection)
+        self._boundary_positions = _effective_boundary_positions(selection)
 
     @property
     def selection(self) -> FittingSelection:
         """Return the current preview selection."""
 
-        return self._history[self._position]
+        return self._history[self._position].selection
+
+    @property
+    def manual_boundary_groups(self) -> frozenset[int]:
+        """Return Groups with a deliberate Manual Boundary in this history state."""
+
+        return self._history[self._position].manual_boundary_groups
+
+    def can_apply_boundary_to_all_groups(self, source_group_index: int) -> bool:
+        """Return whether the current Group owns explicit Manual boundary intent."""
+
+        return (
+            len(self.selection.dataset.spectra) > 1
+            and source_group_index in self.manual_boundary_groups
+        )
 
     @property
     def can_undo(self) -> bool:
@@ -121,9 +184,12 @@ class MaskTaskDraft:
     def has_manual_edits(self) -> bool:
         """Return whether the current preview differs from its AutoMask baseline."""
 
-        return any(
+        return self.selection.ranges != self._baseline_ranges or any(
             np.any(self.selection.manual_exclusion_mask(group_index))
-            or np.any(self.selection.manual_auto_reinclusion_mask(group_index))
+            or np.any(
+                self.selection.manual_auto_reinclusion_mask(group_index)
+                != self._baseline_reinclusions[group_index]
+            )
             for group_index in range(len(self.selection.dataset.spectra))
         )
 
@@ -240,7 +306,14 @@ class MaskTaskDraft:
             side=side,
             energy=energy,
         )
-        changed = self._push(replacement)
+        previous_energy = self._boundary_positions[group_index][side]
+        manual_boundary_groups = self.manual_boundary_groups
+        if energy != previous_energy:
+            manual_boundary_groups = manual_boundary_groups | {group_index}
+        changed = self._push(
+            replacement,
+            manual_boundary_groups=frozenset(manual_boundary_groups),
+        )
         if changed:
             self._boundary_positions[group_index][side] = energy
         return changed
@@ -280,15 +353,54 @@ class MaskTaskDraft:
         replacement = selection.with_group_manual_exclusion(group_index, manual)
         return replacement.with_group_manual_auto_reinclusion(group_index, reincluded)
 
+    def apply_boundary_to_all_groups(self, source_group_index: int) -> bool:
+        """Apply one Group's energy boundary to every Group in one history entry."""
+
+        if not self.can_apply_boundary_to_all_groups(source_group_index):
+            raise ValueError(
+                "Adjust the current Group's Manual Boundary before applying it "
+                "to all Groups"
+            )
+        source = self._boundary_positions[source_group_index]
+        lower_energy = source[BoundarySide.LEFT]
+        upper_energy = source[BoundarySide.RIGHT]
+        replacement = self.selection
+        for group_index in range(len(replacement.dataset.spectra)):
+            replacement = replacement.with_group_range(
+                group_index,
+                lower_energy=lower_energy,
+                upper_energy=upper_energy,
+            )
+        changed = self._push(
+            replacement,
+            manual_boundary_groups=frozenset(range(len(replacement.dataset.spectra))),
+        )
+        if changed:
+            self._boundary_positions = _effective_boundary_positions(replacement)
+        return changed
+
     def reset_group(self, group_index: int) -> bool:
         """Restore one Group to its existing AutoMask proposal without recomputing."""
 
         selection = self.selection
         manual = np.zeros_like(selection.manual_exclusion_mask(group_index))
-        reincluded = np.zeros_like(
-            selection.manual_auto_reinclusion_mask(group_index),
+        reincluded = self._baseline_reinclusions[group_index]
+        replacement = selection.with_group_manual_exclusion(group_index, manual)
+        replacement = replacement.with_group_manual_auto_reinclusion(
+            group_index,
+            reincluded,
         )
-        changed = self._replace_group_masks(group_index, manual, reincluded)
+        baseline = self._baseline_ranges[group_index]
+        replacement = replacement.with_group_range(
+            group_index,
+            lower_energy=baseline.lower_energy,
+            upper_energy=baseline.upper_energy,
+        )
+        manual_boundary_groups = self.manual_boundary_groups - {group_index}
+        changed = self._push(
+            replacement,
+            manual_boundary_groups=frozenset(manual_boundary_groups),
+        )
         if changed:
             self._boundary_positions = _effective_boundary_positions(self.selection)
         return changed
@@ -339,9 +451,13 @@ class MaskTaskDraft:
         replacement = FittingSelection(
             dataset=selection.dataset,
             padding=selection.padding,
-            ranges=selection.ranges,
+            ranges=self._baseline_ranges,
+            manual_auto_reinclusion_masks=self._baseline_reinclusions,
         )
-        changed = self._push(replacement)
+        changed = self._push(
+            replacement,
+            manual_boundary_groups=frozenset(),
+        )
         if changed:
             self._boundary_positions = _effective_boundary_positions(replacement)
         return changed
@@ -354,18 +470,47 @@ class MaskTaskDraft:
     def replace_auto_mask(self, state: AutoMaskState) -> None:
         """Use a newly confirmed core proposal as this task's fresh baseline."""
 
-        if state.selection is None:
-            message = state.diagnostic or "AutoMask selection is unavailable"
-            raise ValueError(message)
+        selection = state.selection
+        if selection is None:
+            selection = _manual_selection_without_auto_baseline(
+                state,
+                self.selection.dataset,
+            )
         self._padding = state.padding
-        self._history = [state.selection]
+        self._diagnostic = state.diagnostic
+        self._auto_baseline_absent = state.auto_baseline_absent
+        self._history = [
+            _MaskDraftState(selection, state.manual_boundary_groups),
+        ]
+        self._baseline_ranges = (
+            tuple(
+                _full_energy_range(spectrum.energy)
+                for spectrum in selection.dataset.spectra
+            )
+            if state.auto_baseline_absent
+            else selection.ranges
+        )
+        self._baseline_reinclusions = (
+            tuple(padding.auto_mask for padding in state.padding.spectra)
+            if state.auto_baseline_absent
+            else tuple(
+                np.zeros(spectrum.energy.size, dtype=np.bool_)
+                for spectrum in selection.dataset.spectra
+            )
+        )
         self._position = 0
-        self._boundary_positions = _effective_boundary_positions(state.selection)
+        self._boundary_positions = _effective_boundary_positions(selection)
 
     def saved_state(self) -> AutoMaskState:
         """Return the current task selection paired with its immutable proposal."""
 
-        return AutoMaskState(padding=self._padding, selection=self.selection)
+        return AutoMaskState(
+            padding=self._padding,
+            selection=self.selection,
+            diagnostic=self._diagnostic,
+            manual_boundary_groups=self.manual_boundary_groups,
+            auto_baseline_absent=self._auto_baseline_absent,
+        )
 
     def _replace_group_masks(
         self,
@@ -384,11 +529,25 @@ class MaskTaskDraft:
             return False
         return self._push(replacement)
 
-    def _push(self, selection: FittingSelection) -> bool:
+    def _push(
+        self,
+        selection: FittingSelection,
+        *,
+        manual_boundary_groups: frozenset[int] | None = None,
+    ) -> bool:
         if selection is self.selection:
             return False
         self._history = self._history[: self._position + 1]
-        self._history.append(selection)
+        self._history.append(
+            _MaskDraftState(
+                selection,
+                (
+                    self.manual_boundary_groups
+                    if manual_boundary_groups is None
+                    else manual_boundary_groups
+                ),
+            )
+        )
         self._position += 1
         return True
 
@@ -399,6 +558,36 @@ def _full_energy_range(energy: npt.ArrayLike) -> FittingRange:
     if not finite.size:
         raise ValueError("spectrum has no finite energy values for AutoMask selection")
     return FittingRange(float(np.min(finite)), float(np.max(finite)))
+
+
+def mask_task_available(state: AutoMaskState, dataset: ReducedDataset) -> bool:
+    """Return whether Auto or valid measured state can seed Manual Mask editing."""
+
+    if state.selection is not None:
+        return True
+    try:
+        _manual_selection_without_auto_baseline(state, dataset)
+    except ValueError:
+        return False
+    return True
+
+
+def _manual_selection_without_auto_baseline(
+    state: AutoMaskState,
+    dataset: ReducedDataset,
+) -> FittingSelection:
+    """Seed Manual editing while retaining an unavailable Auto proposal verbatim."""
+
+    if len(state.padding.spectra) != len(dataset.spectra):
+        raise ValueError("padding result must match dataset group count")
+    ranges = tuple(_full_energy_range(spectrum.energy) for spectrum in dataset.spectra)
+    reinclusions = tuple(padding.auto_mask for padding in state.padding.spectra)
+    return FittingSelection(
+        dataset=dataset,
+        padding=state.padding,
+        ranges=ranges,
+        manual_auto_reinclusion_masks=reinclusions,
+    )
 
 
 def _boolean_mask(

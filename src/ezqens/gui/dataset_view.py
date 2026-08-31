@@ -51,6 +51,7 @@ OVERVIEW_ACTIVE_COLOR = "#ffffff"
 OVERVIEW_ACTIVE_ALPHA = 0.26
 NAVIGATOR_INACTIVE_COLOR = "#8d969d"
 SPECTRUM_ZOOM_DRAG_THRESHOLD_PX = 4.0
+BOUNDARY_HIT_RADIUS_LOGICAL_PX = 8.0
 
 
 def axis_label(quantity: str, unit: str) -> str:
@@ -602,6 +603,11 @@ class ReducedDatasetView(QWidget):
             else:
                 self._spectrum_y_limits = None
         self.current_group_index = group_index
+        # The application projects the new Group's Manual state after the signal.
+        # Clear the old Group's presentation before this intermediate redraw.
+        self._manual_preview = None
+        self._manual_fit_result = None
+        self._manual_pending_evaluation = None
         blocker = QSignalBlocker(self.group_spinbox)
         self.group_spinbox.setValue(group_index + 1)
         del blocker
@@ -1299,18 +1305,17 @@ class ReducedDatasetView(QWidget):
         if self._mask_tool is None:
             self._handle_spectrum_zoom_press(event)
             return
-        if (
-            event.button is not MouseButton.LEFT
-            or event.inaxes is not self.spectrum_axes
-        ):
+        if event.button is not MouseButton.LEFT:
             return
         if self._mask_tool == "boundary":
-            if event.xdata is None:
+            if not self.mask_inspection_mode:
                 return
             side = self._boundary_side_at(event)
             if side is None:
                 return
             self._boundary_drag_side = side
+            return
+        if event.inaxes is not self.spectrum_axes:
             return
         if event.xdata is None or event.ydata is None:
             return
@@ -1691,13 +1696,26 @@ class ReducedDatasetView(QWidget):
     def _boundary_side_at(self, event: MouseEvent) -> str | None:
         """Resolve a press near one visible handle, without midpoint inference."""
 
-        if self.spectrum_axes is None or event.xdata is None:
+        if self.spectrum_axes is None:
             return None
-        if event.x is not None:
+        event_x = getattr(event, "x", None)
+        event_y = getattr(event, "y", None)
+        if event_x is not None:
+            tolerance = BOUNDARY_HIT_RADIUS_LOGICAL_PX * max(
+                1.0, float(self.canvas.devicePixelRatioF())
+            )
+            if event_y is not None and not (
+                self.spectrum_axes.bbox.y0 - tolerance
+                <= float(event_y)
+                <= self.spectrum_axes.bbox.y1 + tolerance
+            ):
+                return None
             for side, x_data in self._boundary_handle_positions.items():
                 handle_x = self.spectrum_axes.transData.transform((x_data, 0.0))[0]
-                if abs(event.x - handle_x) <= 8.0:
+                if abs(float(event_x) - handle_x) <= tolerance:
                     return side
+            return None
+        if event.xdata is None:
             return None
         left, right = self.spectrum_axes.get_xlim()
         tolerance = abs(right - left) * 0.02
@@ -1744,7 +1762,7 @@ class ReducedDatasetView(QWidget):
     def _set_boundary_cursor(self, event: MouseEvent) -> None:
         if (
             self._mask_tool == "boundary"
-            and event.inaxes is self.spectrum_axes
+            and self.mask_inspection_mode
             and self._boundary_side_at(event) is not None
         ):
             self.canvas.setCursor(Qt.CursorShape.SizeHorCursor)

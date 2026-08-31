@@ -66,6 +66,7 @@ from ezqens.gui.icons import IconName, load_icon
 from ezqens.gui.masking import (
     AutoMaskState,
     create_auto_mask_state,
+    mask_task_available,
     rebind_auto_mask_state,
 )
 from ezqens.gui.theme import DEFAULT_LAYOUT_TOKENS
@@ -410,7 +411,7 @@ class DatasetState:
         return (
             self.dataset.role is SpectrumRole.SAMPLE
             and self.auto_mask is not None
-            and self.auto_mask.selection is not None
+            and mask_task_available(self.auto_mask, self.dataset)
         )
 
 

@@ -52,6 +52,7 @@ from ezqens.gui.manual_fit import (
 )
 from ezqens.gui.theme import indicator_tokens_for, tokens_for
 from ezqens.gui.workspace import DatasetAnalysisState, DatasetState, ProjectState
+from ezqens.preprocessing import BoundarySide
 from ezqens.workflow import (
     ManualCenterGroupState,
     ManualComponentKind,
@@ -502,6 +503,89 @@ def test_saved_mask_baseline_cancels_pending_scientific_preview(
     )
     assert current.auto_mask is not None
     assert committed.selection is current.auto_mask.selection
+    window.close()
+
+
+def test_saved_batch_boundary_uses_existing_fit_invalidation_lifecycle(
+    application: QApplication,
+) -> None:
+    window, _project, _sample = _window_with_manual_resolution(application)
+    _set_runnable_background(window)
+    window.manual_fit_editor.run_button.click()
+    assert _lifecycle(window) is ManualFitLifecycle.CURRENT
+    assert window._manual_fit_result is not None
+    window.dataset_view.set_current_group(1)
+    _set_runnable_background(window)
+    window.manual_fit_editor.run_button.click()
+    assert _lifecycle(window) is ManualFitLifecycle.CURRENT
+    assert window._manual_fit_result is not None
+    session = window._active_manual_session
+    assert session is not None
+    assert session.execution_state(0).lifecycle is ManualFitLifecycle.CURRENT
+    assert session.execution_state(1).lifecycle is ManualFitLifecycle.CURRENT
+    window.dataset_view.set_current_group(0)
+
+    window.enter_mask_task()
+    assert window._mask_draft is not None
+    assert window._mask_draft.set_auto_boundary(
+        0,
+        side=BoundarySide.LEFT,
+        energy=-1.0,
+    )
+    assert window._mask_draft.set_auto_boundary(
+        0,
+        side=BoundarySide.RIGHT,
+        energy=1.0,
+    )
+    assert window._mask_draft.apply_boundary_to_all_groups(0)
+    window._refresh_mask_preview()
+
+    assert window.save_mask_task()
+
+    assert _lifecycle(window) is ManualFitLifecycle.NEEDS_FIT
+    assert window._manual_fit_result is None
+    assert session.execution_state(0).lifecycle is ManualFitLifecycle.NEEDS_FIT
+    assert session.execution_state(1).lifecycle is ManualFitLifecycle.NEEDS_FIT
+    assert session.execution_state(0).fit_result is None
+    assert session.execution_state(1).fit_result is None
+    assert window.dataset_view.residual_axes is None
+    window.close()
+
+
+def test_saved_group_local_mask_invalidates_only_that_group_result(
+    application: QApplication,
+) -> None:
+    window, _project, _sample_state = _window_with_manual_resolution(application)
+    _set_runnable_background(window)
+    window.manual_fit_editor.run_button.click()
+    result_a = window._manual_fit_result
+    assert result_a is not None
+    window.dataset_view.set_current_group(1)
+    _set_runnable_background(window)
+    window.manual_fit_editor.run_button.click()
+    result_b = window._manual_fit_result
+    assert result_b is not None
+    session = window._active_manual_session
+    assert session is not None
+
+    window.dataset_view.set_current_group(0)
+    window.enter_mask_task()
+    assert window._mask_draft is not None
+    assert window._mask_draft.exclude_points(
+        0,
+        np.array([True, False, False, False, False]),
+    )
+    window._refresh_mask_preview()
+    assert window.save_mask_task()
+
+    assert session.execution_state(0).lifecycle is ManualFitLifecycle.NEEDS_FIT
+    assert session.execution_state(0).fit_result is None
+    assert session.execution_state(1).lifecycle is ManualFitLifecycle.CURRENT
+    assert session.execution_state(1).fit_result is result_b
+    window.dataset_view.set_current_group(1)
+    assert window._manual_fit_result is result_b
+    assert window.dataset_view._manual_fit_result is result_b
+    assert window.dataset_view.residual_axes is not None
     window.close()
 
 
@@ -2645,7 +2729,7 @@ def test_tied_bounds_state_is_shared_and_untie_copies_it(
     window.close()
 
 
-def test_component_group_and_resolution_changes_invalidate_current_fit(
+def test_navigation_restores_current_fit_and_scientific_changes_invalidate_it(
     application: QApplication,
 ) -> None:
     window, project, sample = _window_with_manual_resolution(application)
@@ -2654,16 +2738,20 @@ def test_component_group_and_resolution_changes_invalidate_current_fit(
     assert _lifecycle(window) is ManualFitLifecycle.CURRENT
     assert window.dataset_view.residual_axes is not None
     assert not window.manual_fit_editor.result_section.isHidden()
+    result = window._manual_fit_result
+    assert result is not None
 
-    window._on_manual_group_changed(1)
-    assert _lifecycle(window) is ManualFitLifecycle.NEEDS_FIT
+    window.dataset_view.set_current_group(1)
+    assert _lifecycle(window) is ManualFitLifecycle.READY
     assert window._manual_fit_result is None
     assert window.dataset_view.residual_axes is None
     assert window.manual_fit_editor.result_section.isHidden()
 
     window.dataset_view.set_current_group(0)
-    window.manual_fit_editor.run_button.click()
     assert _lifecycle(window) is ManualFitLifecycle.CURRENT
+    assert window._manual_fit_result is result
+    assert window.dataset_view._manual_fit_result is result
+    assert window.dataset_view.residual_axes is not None
     window._remove_manual_component(BACKGROUND_COMPONENT)
     assert _lifecycle(window) is ManualFitLifecycle.NEEDS_FIT
 
@@ -2679,6 +2767,97 @@ def test_component_group_and_resolution_changes_invalidate_current_fit(
     )
     assert _lifecycle(window) is ManualFitLifecycle.NEEDS_FIT
     assert window._manual_fit_result is None
+    window.close()
+
+
+def test_two_groups_retain_results_and_invalidate_only_edited_group(
+    application: QApplication,
+) -> None:
+    window, _project, _sample_state = _window_with_manual_resolution(application)
+    offset = _set_runnable_background(window)
+    window.manual_fit_editor.run_button.click()
+    result_a = window._manual_fit_result
+    assert result_a is not None
+    assert result_a.provenance.group_index == 0
+    fitted_a = window._manual_draft
+    assert fitted_a is not None
+    adopted_a = fitted_a.setup(0).model
+    assert adopted_a is not None
+
+    window.dataset_view.set_current_group(1)
+    _set_runnable_background(window)
+    window.manual_fit_editor.run_button.click()
+    result_b = window._manual_fit_result
+    assert result_b is not None
+    assert result_b is not result_a
+    assert result_b.provenance.group_index == 1
+    session = window._active_manual_session
+    assert session is not None
+    assert session.execution_state(0).fit_result is result_a
+    assert session.execution_state(1).fit_result is result_b
+
+    window.dataset_view.set_current_group(0)
+    rendered_group_one_results: list[object | None] = []
+    callback_id = window.dataset_view.canvas.mpl_connect(
+        "draw_event",
+        lambda _event: (
+            rendered_group_one_results.append(window.dataset_view._manual_fit_result)
+            if window.dataset_view.current_group_index == 1
+            else None
+        ),
+    )
+    window.dataset_view.set_current_group(1)
+    application.processEvents()
+    window.dataset_view.canvas.mpl_disconnect(callback_id)
+    assert all(item is not result_a for item in rendered_group_one_results)
+    assert any(item is result_b for item in rendered_group_one_results)
+
+    for group_index, expected in ((0, result_a), (1, result_b), (0, result_a)):
+        draft_before = window._manual_draft
+        window.dataset_view.set_current_group(group_index)
+        application.processEvents()
+        assert window._manual_draft is draft_before
+        assert _lifecycle(window) is ManualFitLifecycle.CURRENT
+        assert window._manual_fit_result is expected
+        assert window.dataset_view._manual_fit_result is expected
+        assert window.dataset_view.standardized_residual_line is not None
+        np.testing.assert_array_equal(
+            window.dataset_view.standardized_residual_line.get_ydata(),
+            expected.standardized_residuals,
+        )
+
+    assert window._manual_draft is not None
+    current_a = window._manual_draft.setup(0).model
+    assert current_a is not None
+    assert current_a is adopted_a
+    intent = current_a.parameter_intent(offset)
+    window._update_manual_parameter(
+        offset,
+        ManualParameterEdit(
+            intent.current_value + 0.01,
+            intent.user_lower_limit,
+            intent.user_upper_limit,
+            intent.free,
+            intent.user_bounds_enabled,
+        ),
+    )
+    assert session.execution_state(0).lifecycle is ManualFitLifecycle.NEEDS_FIT
+    assert session.execution_state(0).fit_result is None
+    assert session.execution_state(1).lifecycle is ManualFitLifecycle.CURRENT
+    assert session.execution_state(1).fit_result is result_b
+
+    window.manual_fit_editor.run_button.click()
+    assert session.execution_state(0).lifecycle is ManualFitLifecycle.CURRENT
+    assert window._manual_draft.setup(0).model is not adopted_a
+    window._remove_manual_component(BACKGROUND_COMPONENT)
+    assert session.execution_state(0).lifecycle is ManualFitLifecycle.NEEDS_FIT
+    assert session.execution_state(1).lifecycle is ManualFitLifecycle.CURRENT
+    assert session.execution_state(1).fit_result is result_b
+
+    window.dataset_view.set_current_group(1)
+    assert window._manual_fit_result is result_b
+    assert window.dataset_view._manual_fit_result is result_b
+    assert window.dataset_view.residual_axes is not None
     window.close()
 
 
@@ -3489,8 +3668,16 @@ def test_resolution_invalidation_requires_active_sample_and_changed_association(
     _set_runnable_background(window)
     window.manual_fit_editor.run_button.click()
     assert _lifecycle(window) is ManualFitLifecycle.CURRENT
-    result = window._manual_fit_result
-    assert result is not None
+    result_a = window._manual_fit_result
+    assert result_a is not None
+    window.dataset_view.set_current_group(1)
+    _set_runnable_background(window)
+    window.manual_fit_editor.run_button.click()
+    result_b = window._manual_fit_result
+    assert result_b is not None
+    session = window._active_manual_session
+    assert session is not None
+    window.dataset_view.set_current_group(0)
     window._begin_manual_component_interaction(ManualComponentKind.ELASTIC)
     pending = window._pending_manual_interaction
     assert pending is not None
@@ -3502,8 +3689,9 @@ def test_resolution_invalidation_requires_active_sample_and_changed_association(
         replace_confirmed=True,
     )
     assert _lifecycle(window) is ManualFitLifecycle.CURRENT
-    assert window._manual_fit_result is result
-    assert window.dataset_view._manual_fit_result is result
+    assert window._manual_fit_result is result_a
+    assert window.dataset_view._manual_fit_result is result_a
+    assert session.execution_state(1).fit_result is result_b
     assert window._pending_manual_interaction is pending
 
     assert window.apply_resolution_for_sample(
@@ -3513,8 +3701,9 @@ def test_resolution_invalidation_requires_active_sample_and_changed_association(
         replace_confirmed=True,
     )
     assert _lifecycle(window) is ManualFitLifecycle.CURRENT
-    assert window._manual_fit_result is result
-    assert window.dataset_view._manual_fit_result is result
+    assert window._manual_fit_result is result_a
+    assert window.dataset_view._manual_fit_result is result_a
+    assert session.execution_state(1).fit_result is result_b
     assert window._pending_manual_interaction is pending
 
     assert window.apply_resolution_for_sample(
@@ -3528,6 +3717,10 @@ def test_resolution_invalidation_requires_active_sample_and_changed_association(
     assert window.dataset_view._manual_fit_result is None
     assert window.dataset_view.residual_axes is None
     assert window._pending_manual_interaction is None
+    assert session.execution_state(0).lifecycle is ManualFitLifecycle.NEEDS_FIT
+    assert session.execution_state(1).lifecycle is ManualFitLifecycle.NEEDS_FIT
+    assert session.execution_state(0).fit_result is None
+    assert session.execution_state(1).fit_result is None
     window.close()
 
 
