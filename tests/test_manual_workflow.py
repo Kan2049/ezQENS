@@ -53,6 +53,7 @@ from ezqens.workflow import (
     WorkflowError,
     WorkflowProject,
     add_project_dataset,
+    adopt_single_q_auto_fit_candidate,
     applied_resolution,
     apply_manual_setup_to_all_groups,
     apply_resolution,
@@ -64,6 +65,7 @@ from ezqens.workflow import (
     complete_lorentzian_interaction,
     create_parameter_tie,
     create_project,
+    join_center_group,
     join_parameter_tie,
     manual_workflow_readiness,
     materialize_manual_setup,
@@ -80,6 +82,8 @@ from ezqens.workflow import (
     resolve_manual_fit_context,
     run_and_adopt_manual_fit,
     run_manual_fit,
+    run_single_q_auto_fit,
+    untie_center_group_parameter,
     untie_parameter,
     update_manual_parameter,
 )
@@ -205,6 +209,273 @@ def configured_project_with_distinct_group_coverage() -> tuple[
     project = commit_fitting_selection(project, sample, selection)
     project = apply_resolution(project, sample, resolution)
     return project, sample, resolution
+
+
+def test_single_q_autofit_adopts_typed_fitted_candidate_without_label_parsing() -> None:
+    q_values = (0.5,)
+    resolution_data = make_dataset(SpectrumRole.RESOLUTION, q_values)
+    resolution_spectrum = resolution_data.spectra[0]
+    normalized_resolution = resolution_spectrum.intensity / np.trapezoid(
+        resolution_spectrum.intensity,
+        resolution_spectrum.energy,
+    )
+    sample_data = ReducedDataset(
+        role=SpectrumRole.SAMPLE,
+        spectra=(
+            replace(
+                make_dataset(SpectrumRole.SAMPLE, q_values).spectra[0],
+                intensity=2.0 * normalized_resolution,
+            ),
+        ),
+        q_bins=QBins.from_q_values(q_values),
+    )
+    project = create_project("autofit", project_id="project-autofit")
+    project, sample = add_project_dataset(project, sample_data, dataset_id="sample")
+    project, resolution = add_project_dataset(
+        project,
+        resolution_data,
+        dataset_id="resolution",
+    )
+    project = commit_fitting_selection(
+        project,
+        sample,
+        FittingSelection.uniform(
+            sample_data,
+            detect_edge_padding(sample_data),
+            lower_energy=-0.5,
+            upper_energy=0.5,
+        ),
+    )
+    project = apply_resolution(project, sample, resolution)
+    draft = open_manual_fit_draft(project, sample)
+
+    outcome = run_single_q_auto_fit(project, draft, 0)
+
+    assert outcome.project_id == project.project_id
+    assert outcome.sample_id == sample.dataset_id
+    assert outcome.group_index == 0
+    assert len(outcome.recommendation.candidate_results) == 9
+    chosen = next(
+        candidate
+        for candidate in outcome.recommendation.candidate_results
+        if candidate.success
+        and candidate.candidate.background is BackgroundModel.LINEAR
+        and candidate.candidate.lorentzian_count == 2
+    )
+    adoption = adopt_single_q_auto_fit_candidate(
+        project,
+        draft,
+        outcome,
+        chosen,
+    )
+
+    assert draft.setup(0).model is None
+    assert adoption.success
+    assert adoption.fit_result is chosen.fit
+    assert adoption.adopted_draft is not None
+    adopted = adoption.adopted_draft.setup(0).model
+    assert adopted is not None
+    assert chosen.fit is not None
+    fitted = chosen.fit.fitted_model
+    assert fitted is not None
+    assert fitted.energy_shift is not None
+    assert adopted.energy_shift is None
+    assert len(adopted.center_groups) == 1
+    shared_center = adopted.center_groups[0]
+    assert shared_center.intent.current_value == fitted.energy_shift.initial_value
+    assert shared_center.intent.user_lower_limit == fitted.energy_shift.lower_bound
+    assert shared_center.intent.user_upper_limit == fitted.energy_shift.upper_bound
+    assert shared_center.intent.free is fitted.energy_shift.free
+    center_references = tuple(
+        reference
+        for reference in adopted.parameter_references()
+        if reference.family is ParameterFamily.CENTER
+    )
+    assert adopted.center_group_members(shared_center.group_id) == center_references
+    assert adopted.elastic_center_group == shared_center.group_id
+    assert all(
+        component.center is None and component.center_group == shared_center.group_id
+        for component in adopted.lorentzians
+    )
+    assert adopted.elastic_area is not None
+    assert adopted.elastic_area.user_lower_limit == 0.0
+    assert tuple(item.identity for item in adopted.lorentzians) == tuple(
+        item.identity for item in fitted.lorentzians
+    )
+    assert all(item.area.user_lower_limit == 0.0 for item in adopted.lorentzians)
+    assert all(
+        item.fwhm.user_lower_limit is not None and item.fwhm.user_lower_limit > 0.0
+        for item in adopted.lorentzians
+    )
+    assert adopted.b0 is not None
+    assert adopted.b0.user_lower_limit is None
+    assert adopted.b0.user_upper_limit is None
+    assert adopted.b1 is not None
+    assert adopted.b1.user_lower_limit is None
+    assert adopted.b1.user_upper_limit is None
+    adopted_result = adoption.fit_result
+    assert adopted_result is not None
+    np.testing.assert_array_equal(
+        adopted_result.evaluation.total,
+        chosen.fit.evaluation.total,
+    )
+    np.testing.assert_array_equal(
+        adopted_result.standardized_residuals,
+        chosen.fit.standardized_residuals,
+    )
+
+    updated_center = replace(
+        shared_center.intent,
+        current_value=shared_center.intent.current_value + 0.01,
+        user_lower_limit=-0.2,
+        user_upper_limit=0.2,
+    )
+    edited_draft = update_manual_parameter(
+        adoption.adopted_draft,
+        0,
+        center_references[0],
+        ManualParameterEdit(
+            current_value=updated_center.current_value,
+            user_lower_limit=updated_center.user_lower_limit,
+            user_upper_limit=updated_center.user_upper_limit,
+            free=updated_center.free,
+            user_bounds_enabled=updated_center.user_bounds_enabled,
+        ),
+    )
+    edited = edited_draft.setup(0).model
+    assert edited is not None
+    assert all(
+        edited.parameter_intent(reference) == updated_center
+        for reference in center_references
+    )
+    detached_draft = untie_center_group_parameter(
+        edited_draft,
+        0,
+        center_references[-1],
+    )
+    detached = detached_draft.setup(0).model
+    assert detached is not None
+    assert detached.center_group_for(center_references[-1]) is None
+    assert detached.parameter_intent(center_references[-1]) == updated_center
+    retied_draft = join_center_group(
+        detached_draft,
+        0,
+        shared_center.group_id,
+        center_references[-1],
+    )
+    retied = retied_draft.setup(0).model
+    assert retied is not None
+    assert retied.center_group_members(shared_center.group_id) == center_references
+
+    prior_model = ManualModelState(
+        background=BackgroundModel.CONSTANT,
+        b0=ManualParameterIntent(0.25),
+    )
+    working_draft = draft.with_model(0, prior_model)
+
+    def assert_stale_rejected(changed_project: WorkflowProject) -> None:
+        rejected = adopt_single_q_auto_fit_candidate(
+            changed_project,
+            working_draft,
+            outcome,
+            chosen,
+        )
+        assert not rejected.success
+        assert rejected.adopted_draft is None
+        assert rejected.fit_result is None
+        assert rejected.diagnostics[0].code is (
+            WorkflowDiagnosticCode.AUTO_FIT_CONTEXT_CHANGED
+        )
+        assert working_draft.setup(0).model is prior_model
+
+    changed_sample_data = replace(
+        sample.dataset,
+        spectra=(
+            replace(
+                sample.dataset.spectra[0],
+                intensity=sample.dataset.spectra[0].intensity + 0.01,
+            ),
+        ),
+    )
+    changed_sample_project, changed_sample = replace_project_dataset(
+        project,
+        sample,
+        changed_sample_data,
+    )
+    changed_sample_project = commit_fitting_selection(
+        changed_sample_project,
+        changed_sample,
+        FittingSelection.uniform(
+            changed_sample_data,
+            detect_edge_padding(changed_sample_data),
+            lower_energy=-0.5,
+            upper_energy=0.5,
+        ),
+    )
+    assert_stale_rejected(changed_sample_project)
+
+    changed_selection = outcome.scientific_context.selection.with_group_range(
+        0,
+        lower_energy=-0.4,
+        upper_energy=0.4,
+    )
+    changed_selection_project = commit_fitting_selection(
+        project,
+        sample,
+        changed_selection,
+    )
+    assert_stale_rejected(changed_selection_project)
+
+    changed_mask = np.array(
+        outcome.scientific_context.selection.manual_exclusion_mask(0),
+        copy=True,
+    )
+    retained_indices = np.flatnonzero(
+        outcome.scientific_context.selection.retained_mask(0),
+    )
+    changed_mask[int(retained_indices[retained_indices.size // 2])] = True
+    changed_mask_selection = (
+        outcome.scientific_context.selection.with_group_manual_exclusion(
+            0,
+            changed_mask,
+        )
+    )
+    changed_mask_project = commit_fitting_selection(
+        project,
+        sample,
+        changed_mask_selection,
+    )
+    assert_stale_rejected(changed_mask_project)
+
+    changed_resolution_data = replace(
+        resolution.dataset,
+        spectra=(
+            replace(
+                resolution.dataset.spectra[0],
+                intensity=resolution.dataset.spectra[0].intensity * 1.01,
+            ),
+        ),
+    )
+    changed_resolution_project, _changed_resolution = replace_project_dataset(
+        project,
+        resolution,
+        changed_resolution_data,
+    )
+    assert_stale_rejected(changed_resolution_project)
+
+    wrong_group = adopt_single_q_auto_fit_candidate(
+        project,
+        working_draft,
+        outcome,
+        chosen,
+        group_index=1,
+    )
+    assert not wrong_group.success
+    assert wrong_group.adopted_draft is None
+    assert wrong_group.diagnostics[0].code is (
+        WorkflowDiagnosticCode.AUTO_FIT_CONTEXT_CHANGED
+    )
+    assert working_draft.setup(0).model is prior_model
 
 
 def lorentzian_identity(name: str) -> ComponentIdentity:

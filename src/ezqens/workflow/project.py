@@ -45,6 +45,7 @@ class WorkflowDiagnosticCode(StrEnum):
     MANUAL_FIT_EXECUTION_FAILED = "manual_fit_execution_failed"
     MANUAL_FIT_DID_NOT_CONVERGE = "manual_fit_did_not_converge"
     MANUAL_FIT_ADOPTION_FAILED = "manual_fit_adoption_failed"
+    AUTO_FIT_CONTEXT_CHANGED = "auto_fit_context_changed"
     INTERACTION_CONTEXT_UNAVAILABLE = "interaction_context_unavailable"
     INVALID_MANUAL_OPERATION = "invalid_manual_operation"
     TARGET_SETUP_INVALID = "target_setup_invalid"
@@ -657,7 +658,7 @@ def resolve_manual_fit_context(
     if current_sample.dataset.role is not SpectrumRole.SAMPLE:
         return _context_failure(
             WorkflowDiagnosticCode.SAMPLE_ROLE_REQUIRED,
-            "Manual Fit requires a Sample dataset",
+            "Fitting Parameters require a Sample dataset",
             group_index=group_index if isinstance(group_index, int) else None,
         )
     if (
@@ -667,7 +668,7 @@ def resolve_manual_fit_context(
     ):
         return _context_failure(
             WorkflowDiagnosticCode.INVALID_GROUP,
-            "Manual Fit group index is outside the Sample dataset",
+            "Fitting Parameters group index is outside the Sample dataset",
             group_index=group_index if isinstance(group_index, int) else None,
         )
     selection = _selection_for(project, current_sample.dataset_id)

@@ -32,7 +32,7 @@ from ezqens.gui.q_editor import Q_CENTER, Q_EDGES, QAssignmentEditor
 from ezqens.gui.units_editor import SourceUnitsDialog
 from ezqens.gui.workspace import DatasetAnalysisState, dataset_analysis_state
 from ezqens.io import parse_dave_q_bins
-from ezqens.preprocessing import BoundarySide, FittingRange, FittingSelection
+from ezqens.preprocessing import BoundarySide, FittingSelection
 
 Q_FIXTURES = Path(__file__).parent / "fixtures" / "q_bins"
 REDUCED_FIXTURES = Path(__file__).parent / "fixtures" / "reduced_data"
@@ -868,7 +868,7 @@ def test_axes_edge_boundaries_are_hittable_and_require_explicit_manual_intent(
     view.canvas.draw()  # type: ignore[no-untyped-call]
     assert axes.get_xlim() == pytest.approx((-2.0, 2.0))
     y_pixel = float((axes.bbox.y0 + axes.bbox.y1) / 2.0)
-    left_x = float(axes.transData.transform((-2.0, 0.0))[0])
+    left_x = float(axes.get_xaxis_transform().transform((-2.0, 0.5))[0])
 
     with monkeypatch.context() as high_dpi:
         high_dpi.setattr(view.canvas, "devicePixelRatioF", lambda: 2.0)
@@ -980,7 +980,284 @@ def test_axes_edge_boundaries_are_hittable_and_require_explicit_manual_intent(
     window.close()
 
 
-def test_apply_boundary_to_all_is_one_range_only_history_transition() -> None:
+@pytest.mark.parametrize("scale", ["linear", "symlog", "log"])
+def test_boundary_hit_testing_is_x_only_for_every_spectrum_y_scale(
+    application: QApplication,
+    scale: str,
+) -> None:
+    window = MainWindow()
+    project = window.workspace.new_project()
+    state = window.workspace.add_dataset(
+        project,
+        _dataset(units=("meV", "counts")),
+    )
+    window.open_dataset(project, state)
+    window.enter_mask_task()
+    view = window.dataset_view
+    assert view.set_y_scale(scale)
+    axes = view.spectrum_axes
+    assert axes is not None
+    view.canvas.draw()  # type: ignore[no-untyped-call]
+    y_positions = (float(axes.bbox.y0 + 1.0), float(axes.bbox.y1 - 1.0))
+
+    for side in ("left", "right"):
+        energy = view._boundary_handle_positions[side]
+        transform = axes.get_xaxis_transform()
+        handle_x_at_bottom = float(transform.transform((energy, 0.0))[0])
+        handle_x_at_top = float(transform.transform((energy, 1.0))[0])
+        assert handle_x_at_bottom == pytest.approx(handle_x_at_top)
+        for event_y in y_positions:
+            event = cast(
+                MouseEvent,
+                SimpleNamespace(
+                    x=handle_x_at_bottom,
+                    y=event_y,
+                    xdata=energy,
+                ),
+            )
+            assert view._boundary_side_at(event) == side
+    window.close()
+
+
+def test_log_boundary_press_drag_uses_normal_preview_and_request_path(
+    application: QApplication,
+) -> None:
+    window = MainWindow()
+    project = window.workspace.new_project()
+    state = window.workspace.add_dataset(
+        project,
+        _dataset(units=("meV", "counts")),
+    )
+    window.open_dataset(project, state)
+    window.enter_mask_task()
+    view = window.dataset_view
+    draft = window._mask_draft
+    assert draft is not None
+    assert view.set_y_scale("log")
+    axes = view.spectrum_axes
+    assert axes is not None
+    view.canvas.draw()  # type: ignore[no-untyped-call]
+    left_energy = view._boundary_handle_positions["left"]
+    left_x = float(axes.get_xaxis_transform().transform((left_energy, 0.5))[0])
+    previews: list[tuple[int, object, float]] = []
+    requests: list[tuple[int, object, float]] = []
+    view.mask_boundary_previewed.connect(
+        lambda group, side, energy: previews.append((group, side, energy))
+    )
+    view.mask_boundary_requested.connect(
+        lambda group, side, energy: requests.append((group, side, energy))
+    )
+
+    view._on_spectrum_button_press(
+        cast(
+            MouseEvent,
+            SimpleNamespace(
+                button=MouseButton.LEFT,
+                inaxes=axes,
+                x=left_x,
+                y=float((axes.bbox.y0 + axes.bbox.y1) / 2.0),
+                xdata=left_energy,
+            ),
+        )
+    )
+    assert view._boundary_drag_side == "left"
+    view._on_spectrum_mouse_motion(
+        cast(
+            MouseEvent,
+            SimpleNamespace(inaxes=axes, xdata=-1.0, x=None),
+        )
+    )
+    assert previews[-1] == (0, "left", -1.0)
+    assert view.selection is not None
+    assert view.selection.excluded_mask(0)[0]
+    view._on_spectrum_button_release(
+        cast(
+            MouseEvent,
+            SimpleNamespace(inaxes=view.spectrum_axes, xdata=-1.0, x=None),
+        )
+    )
+    assert requests[-1] == (0, "left", -1.0)
+    assert draft.selection.excluded_mask(0)[0]
+    assert draft.can_undo
+    window.close()
+
+
+def test_y_scale_switching_does_not_move_or_mutate_boundary_state(
+    application: QApplication,
+) -> None:
+    window = MainWindow()
+    project = window.workspace.new_project()
+    state = window.workspace.add_dataset(
+        project,
+        _dataset(units=("meV", "counts")),
+    )
+    window.open_dataset(project, state)
+    window.enter_mask_task()
+    view = window.dataset_view
+    draft = window._mask_draft
+    assert draft is not None
+    selection = draft.selection
+    boundary_positions = dict(view._boundary_handle_positions)
+    exclusion = selection.manual_exclusion_mask(0).copy()
+    reinclusion = selection.manual_auto_reinclusion_mask(0).copy()
+    spectrum = state.dataset.spectra[0]
+    arrays = (
+        spectrum.energy.copy(),
+        spectrum.intensity.copy(),
+        spectrum.uncertainty.copy(),
+    )
+
+    for scale in ("log", "symlog", "linear"):
+        assert view.set_y_scale(scale)
+        assert view._boundary_handle_positions == boundary_positions
+        assert view.selection is selection
+        assert draft.selection is selection
+        np.testing.assert_array_equal(selection.manual_exclusion_mask(0), exclusion)
+        np.testing.assert_array_equal(
+            selection.manual_auto_reinclusion_mask(0),
+            reinclusion,
+        )
+        np.testing.assert_array_equal(spectrum.energy, arrays[0])
+        np.testing.assert_array_equal(spectrum.intensity, arrays[1])
+        np.testing.assert_array_equal(spectrum.uncertainty, arrays[2])
+    window.close()
+
+
+@pytest.mark.parametrize(
+    ("side", "energy", "point_index"),
+    [
+        (BoundarySide.LEFT, -1.0, 1),
+        (BoundarySide.RIGHT, 1.0, 3),
+    ],
+)
+def test_explicit_boundary_survives_edge_exclusion_history_and_apply_to_all(
+    application: QApplication,
+    side: BoundarySide,
+    energy: float,
+    point_index: int,
+) -> None:
+    window = MainWindow()
+    project = window.workspace.new_project()
+    state = window.workspace.add_dataset(
+        project,
+        _dataset(group_count=2, units=("meV", "counts")),
+    )
+    window.open_dataset(project, state)
+    window.enter_mask_task()
+    draft = window._mask_draft
+    assert draft is not None
+    source_initial = draft.boundary_coordinates[0]
+    target_initial = draft.boundary_coordinates[1]
+    assert draft.set_auto_boundary(0, side=side, energy=energy)
+    window._refresh_mask_preview()
+    assert draft.boundary_coordinates[0].energy(side) == energy
+
+    source_exclusion = np.zeros(5, dtype=np.bool_)
+    source_exclusion[point_index] = True
+    assert draft.exclude_points(0, source_exclusion)
+    window._refresh_mask_preview()
+    assert draft.boundary_coordinates[0].energy(side) == energy
+    assert window.dataset_view._boundary_handle_positions[side.value] == energy
+
+    draft.undo()
+    window._refresh_mask_preview()
+    assert draft.boundary_coordinates[0].energy(side) == energy
+    assert window.dataset_view._boundary_handle_positions[side.value] == energy
+    draft.redo()
+    window._refresh_mask_preview()
+    assert draft.boundary_coordinates[0].energy(side) == energy
+    assert window.dataset_view._boundary_handle_positions[side.value] == energy
+
+    target_exclusion = np.zeros(5, dtype=np.bool_)
+    target_exclusion[2] = True
+    assert draft.exclude_points(1, target_exclusion)
+    before_apply_ranges = draft.selection.ranges
+    assert draft.apply_boundary_to_all_groups(0)
+    assert draft.boundary_coordinates[0].energy(side) == energy
+    assert draft.boundary_coordinates[1].energy(side) == energy
+    assert draft.selection.manual_exclusion_mask(0)[point_index]
+    assert draft.selection.manual_exclusion_mask(1)[2]
+    assert draft.selection.ranges == before_apply_ranges
+
+    draft.undo()
+    assert draft.boundary_coordinates[0].energy(side) == energy
+    assert draft.boundary_coordinates[1] == target_initial
+    assert draft.selection.manual_exclusion_mask(0)[point_index]
+    assert draft.selection.manual_exclusion_mask(1)[2]
+    draft.redo()
+    assert draft.boundary_coordinates[1].energy(side) == energy
+    assert draft.selection.ranges == before_apply_ranges
+    assert draft.boundary_coordinates[0] != source_initial
+    window.close()
+
+
+def test_boundary_action_history_stores_exact_canonical_measured_coordinate() -> None:
+    state = create_auto_mask_state(_dataset(units=("meV", "counts")))
+    draft = MaskTaskDraft(state)
+    initial = draft.boundary_coordinates[0]
+
+    assert draft.set_auto_boundary(
+        0,
+        side=BoundarySide.LEFT,
+        energy=-1.034,
+    )
+    assert draft.boundary_coordinates[0].left_energy == -1.0
+    draft.undo()
+    assert draft.boundary_coordinates[0] == initial
+    draft.redo()
+    assert draft.boundary_coordinates[0].left_energy == -1.0
+
+
+def test_unrelated_manual_exclusions_never_redefine_boundary_coordinates() -> None:
+    state = create_auto_mask_state(_dataset(units=("meV", "counts")))
+    draft = MaskTaskDraft(state)
+    assert draft.set_auto_boundary(0, side=BoundarySide.LEFT, energy=-1.0)
+    assert draft.set_auto_boundary(0, side=BoundarySide.RIGHT, energy=1.0)
+    explicit = draft.boundary_coordinates[0]
+
+    assert draft.exclude_points(0, [True, True, True, False, False])
+    assert draft.boundary_coordinates[0] == explicit
+    draft.undo()
+    assert draft.boundary_coordinates[0] == explicit
+    draft.redo()
+    assert draft.boundary_coordinates[0] == explicit
+
+
+def test_saved_mask_reopens_with_explicit_boundary_not_effective_edge(
+    application: QApplication,
+) -> None:
+    window = MainWindow()
+    project = window.workspace.new_project()
+    state = window.workspace.add_dataset(
+        project,
+        _dataset(units=("meV", "counts")),
+    )
+    window.open_dataset(project, state)
+    window.enter_mask_task()
+    draft = window._mask_draft
+    assert draft is not None
+    assert draft.set_auto_boundary(0, side=BoundarySide.LEFT, energy=-1.0)
+    assert draft.exclude_points(0, [False, True, False, False, False])
+    window._refresh_mask_preview()
+    assert window.dataset_view._boundary_handle_positions["left"] == -1.0
+
+    assert window.save_mask_task()
+    saved = window._open_dataset
+    assert saved is not None
+    assert saved.auto_mask is not None
+    assert saved.auto_mask.boundary_coordinates[0].left_energy == -1.0
+    assert window.close_mask_task(decision="discard")
+    window.enter_mask_task()
+
+    reopened = window._mask_draft
+    assert reopened is not None
+    assert reopened.boundary_coordinates[0].left_energy == -1.0
+    assert reopened.selection.manual_exclusion_mask(0)[1]
+    assert window.dataset_view._boundary_handle_positions["left"] == -1.0
+    window.close()
+
+
+def test_apply_boundary_to_all_is_one_reversible_boundary_history_transition() -> None:
     spectra = (
         Spectrum(
             role=SpectrumRole.SAMPLE,
@@ -1029,7 +1306,15 @@ def test_apply_boundary_to_all_is_one_range_only_history_transition() -> None:
     assert draft.apply_boundary_to_all_groups(0)
     applied = draft.selection
     assert draft.manual_boundary_groups == frozenset({0, 1, 2})
-    assert applied.ranges == (FittingRange(-1.0, 1.0),) * 3
+    assert applied.ranges == state.selection.ranges
+    np.testing.assert_array_equal(
+        applied.manual_exclusion_mask(0),
+        [True, False, False, False, True],
+    )
+    np.testing.assert_array_equal(
+        applied.manual_exclusion_mask(1),
+        [True, False, False, False, True],
+    )
     assert applied.manual_exclusion_mask(2)[2]
     assert applied.invalid_mask(1)[2]
     assert applied.excluded_mask(1)[2]
@@ -1044,6 +1329,15 @@ def test_apply_boundary_to_all_is_one_range_only_history_transition() -> None:
     assert draft.selection is applied
     assert draft.manual_boundary_groups == frozenset({0, 1, 2})
     assert draft.selection.manual_exclusion_mask(2)[2]
+
+    assert draft.set_auto_boundary(1, side=BoundarySide.LEFT, energy=-3.0)
+    assert not draft.selection.manual_exclusion_mask(1)[0]
+    assert draft.selection.ranges[1] == state.selection.ranges[1]
+    draft.undo()
+    assert draft.selection is applied
+    assert draft.selection.manual_exclusion_mask(1)[0]
+    draft.redo()
+    assert not draft.selection.manual_exclusion_mask(1)[0]
 
 
 def test_visible_apply_boundary_to_all_uses_real_confirmation_atomically(
@@ -1097,10 +1391,16 @@ def test_visible_apply_boundary_to_all_uses_real_confirmation_atomically(
         "Apply Boundary to All Groups",
         "Apply Boundary to All Groups",
     ]
-    assert window._mask_draft.selection.ranges == (FittingRange(-1.0, 1.0),) * 2
+    assert window._mask_draft.selection.ranges == before.ranges
     window.dataset_view.set_current_group(1)
     assert window.dataset_view.selection is window._mask_draft.selection
-    assert window.dataset_view.selection.ranges[1] == FittingRange(-1.0, 1.0)
+    assert window.dataset_view.selection.ranges[1] == before.ranges[1]
+    assert window._mask_draft.set_auto_boundary(
+        1,
+        side=BoundarySide.LEFT,
+        energy=float(window._mask_draft.selection.dataset.spectra[1].energy[0]),
+    )
+    assert window._mask_draft.selection.ranges[1] == before.ranges[1]
     window.close()
 
 
@@ -2238,6 +2538,106 @@ def test_mask_edit_direct_boundary_preview_commits_once_and_restores_outward(
         ),
     )
     assert not window._mask_draft.selection.manual_exclusion_mask(0)[0]
+    window.close()
+
+
+def test_boundary_preview_is_canonical_transactional_and_commits_outside_axes(
+    application: QApplication,
+) -> None:
+    window = MainWindow()
+    project = window.workspace.new_project()
+    state = window.workspace.add_dataset(project, _dataset(units=("meV", "counts")))
+    window.open_dataset(project, state)
+    window.enter_mask_task()
+    view = window.dataset_view
+    draft = window._mask_draft
+    axes = view.spectrum_axes
+    assert draft is not None
+    assert axes is not None
+
+    view._on_spectrum_button_press(
+        cast(
+            MouseEvent,
+            SimpleNamespace(
+                button=MouseButton.LEFT,
+                inaxes=axes,
+                xdata=-2.0,
+                x=None,
+            ),
+        )
+    )
+    view._on_spectrum_mouse_motion(
+        cast(MouseEvent, SimpleNamespace(inaxes=axes, xdata=-0.6, x=None))
+    )
+    assert view._boundary_handle_positions["left"] == 0.0
+    assert (
+        float(np.asarray(view._boundary_handle_artists["left"].get_xdata())[0]) == 0.0
+    )
+    view._on_spectrum_button_release(
+        cast(MouseEvent, SimpleNamespace(inaxes=None, xdata=None, x=None))
+    )
+    assert view._boundary_handle_positions["left"] == 0.0
+    assert draft.can_undo
+    np.testing.assert_array_equal(
+        draft.selection.manual_exclusion_mask(0),
+        [True, True, False, False, False],
+    )
+
+    view._on_spectrum_button_press(
+        cast(
+            MouseEvent,
+            SimpleNamespace(
+                button=MouseButton.LEFT,
+                inaxes=view.spectrum_axes,
+                xdata=0.0,
+                x=None,
+            ),
+        )
+    )
+    view._on_spectrum_mouse_motion(
+        cast(
+            MouseEvent,
+            SimpleNamespace(inaxes=view.spectrum_axes, xdata=-1.1, x=None),
+        )
+    )
+    assert view._boundary_handle_positions["left"] == -1.0
+    view._on_spectrum_button_release(
+        cast(
+            MouseEvent,
+            SimpleNamespace(inaxes=view.spectrum_axes, xdata=-1.1, x=None),
+        )
+    )
+    assert not draft.selection.manual_exclusion_mask(0)[1]
+
+    assert draft.set_auto_boundary(0, side=BoundarySide.RIGHT, energy=1.0)
+    window._refresh_mask_preview()
+    before_crossing = draft.selection
+    view._on_spectrum_button_press(
+        cast(
+            MouseEvent,
+            SimpleNamespace(
+                button=MouseButton.LEFT,
+                inaxes=view.spectrum_axes,
+                xdata=-1.0,
+                x=None,
+            ),
+        )
+    )
+    view._on_spectrum_mouse_motion(
+        cast(
+            MouseEvent,
+            SimpleNamespace(inaxes=view.spectrum_axes, xdata=2.0, x=None),
+        )
+    )
+    assert draft.selection is before_crossing
+    assert view._boundary_handle_positions == {"left": -1.0, "right": 1.0}
+    assert (
+        float(np.asarray(view._boundary_handle_artists["left"].get_xdata())[0]) == -1.0
+    )
+    view._on_spectrum_button_release(
+        cast(MouseEvent, SimpleNamespace(inaxes=None, xdata=None, x=None))
+    )
+    assert draft.selection is before_crossing
     window.close()
 
 

@@ -269,10 +269,17 @@ def test_resolution_stays_normal_and_is_pinned_before_samples(
     window.close()
 
 
-def test_manual_fit_opens_empty_without_resolution_and_cancels_geometry(
+def test_manual_fit_preflights_elastic_before_starting_geometry(
     application: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     window, project, sample = _window_with_sample(application)
+    messages: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        main_window_module,
+        "show_message_dialog",
+        lambda _parent, title, message: messages.append((title, message)),
+    )
 
     window.show_manual_fit(project, sample)
 
@@ -281,7 +288,14 @@ def test_manual_fit_opens_empty_without_resolution_and_cancels_geometry(
     assert "Resolution required" in window.manual_fit_editor.status_label.text()
     assert window._manual_draft is not None
     window._begin_manual_component_interaction(ManualComponentKind.ELASTIC)
-    assert window._pending_manual_interaction is not None
+    assert window._pending_manual_interaction is None
+    assert window.dataset_view._manual_component_kind is None
+    assert messages == [
+        (
+            "Add Fitting Function",
+            "Apply a Resolution to this Sample before adding Elastic or Lorentzian.",
+        )
+    ]
     assert window._manual_draft.setup(0).model is None
     window.dataset_view._on_spectrum_key_press(
         KeyEvent("key_press_event", window.dataset_view.canvas, key="escape"),
@@ -289,6 +303,36 @@ def test_manual_fit_opens_empty_without_resolution_and_cancels_geometry(
     assert window._pending_manual_interaction is None
     assert window._manual_draft.setup(0).model is None
     assert window._manual_preview is None
+    window.close()
+
+
+def test_manual_fit_preflights_missing_mask_with_actionable_typed_diagnostic(
+    application: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window, project, _sample = _window_with_manual_resolution(application)
+    workflow = window._workflow_project_for(project)
+    window._workflow_projects[project] = replace(workflow, fitting_selections=())
+    messages: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        main_window_module,
+        "show_message_dialog",
+        lambda _parent, title, message: messages.append((title, message)),
+    )
+
+    window._begin_manual_component_interaction(ManualComponentKind.LORENTZIAN)
+
+    assert window._pending_manual_interaction is None
+    assert window.dataset_view._manual_component_kind is None
+    assert messages == [
+        (
+            "Add Fitting Function",
+            "Prepare or save a usable Mask for this Sample before adding this "
+            "fitting function.",
+        )
+    ]
+    assert "Manual context" not in messages[0][1]
+    assert "committed fitting selection" not in messages[0][1]
     window.close()
 
 
@@ -457,7 +501,7 @@ def test_task_transition_cancels_provisional_component_geometry(
 ) -> None:
     window, project, sample = _window_with_sample(application)
     window.show_manual_fit(project, sample)
-    window._begin_manual_component_interaction(ManualComponentKind.LORENTZIAN)
+    window._begin_manual_component_interaction(ManualComponentKind.BACKGROUND)
 
     assert window._pending_manual_interaction is not None
     window.enter_mask_task()
@@ -642,7 +686,7 @@ def test_cold_import_registers_workflow_dataset_and_selection_immediately(
     window.close()
 
 
-def test_cold_import_unit_replacement_invalidates_workflow_selection(
+def test_cold_import_unit_replacement_recommits_rebound_workflow_selection(
     application: QApplication,
 ) -> None:
     window = MainWindow()
@@ -658,11 +702,27 @@ def test_cold_import_unit_replacement_invalidates_workflow_selection(
 
     assert updated is not None
     workflow = window._workflow_projects[project]
-    assert all(
-        item.sample_id != updated.workflow_dataset_id
+    committed = next(
+        item
         for item in workflow.fitting_selections
+        if item.sample_id == updated.workflow_dataset_id
     )
+    assert updated.auto_mask is not None
+    assert committed.selection is updated.auto_mask.selection
+    assert committed.selection.dataset is updated.dataset
     assert window._open_dataset is None
+    resolution = window.workspace.add_dataset(project, _resolution(updated.dataset))
+    assert window.apply_resolution_for_sample(
+        project,
+        updated,
+        resolution,
+        replace_confirmed=True,
+    )
+    window.show_manual_fit(project, updated)
+    window._begin_manual_component_interaction(ManualComponentKind.ELASTIC)
+    assert window._pending_manual_interaction is not None
+    window._discard_pending_manual_interaction()
+    assert window._open_dataset is updated
     window.close()
 
 
@@ -718,7 +778,7 @@ def test_cold_import_q_only_replacement_preserves_workflow_selection(
     window.close()
 
 
-def test_unit_replacement_invalidates_workflow_point_selection(
+def test_unit_replacement_recommits_rebound_workflow_point_selection(
     application: QApplication,
 ) -> None:
     window, project, sample = _window_with_manual_resolution(application)
@@ -746,10 +806,13 @@ def test_unit_replacement_invalidates_workflow_point_selection(
     assert unit_replacement.auto_mask.selection is not None
     assert unit_replacement.auto_mask.selection.dataset is unit_replacement.dataset
     workflow = window._workflow_project_for(project)
-    assert all(
-        item.sample_id != unit_replacement.workflow_dataset_id
+    committed = next(
+        item
         for item in workflow.fitting_selections
+        if item.sample_id == unit_replacement.workflow_dataset_id
     )
+    assert committed.selection is unit_replacement.auto_mask.selection
+    assert committed.selection.dataset is unit_replacement.dataset
     assert window._pending_manual_interaction is None
     assert window.dataset_view._manual_pending_evaluation is None
     window.close()
@@ -1481,8 +1544,7 @@ def test_parameter_sections_are_compact_typed_column_grids(
 def test_lorentzian_section_add_enters_direct_interaction_mode(
     application: QApplication,
 ) -> None:
-    window, project, sample = _window_with_sample(application)
-    window.show_manual_fit(project, sample)
+    window, _project, _sample = _window_with_manual_resolution(application)
 
     window.manual_fit_editor.lorentzian_add_button.click()
 
@@ -1923,7 +1985,7 @@ def test_central_manual_fit_entry_targets_open_dataset_and_shows_active_state(
     assert selected_item is not None
     window.workspace.tree.setCurrentItem(selected_item)
 
-    assert window.manual_fit_button.text() == "Manual Fit"
+    assert window.manual_fit_button.text() == "Fitting Parameters"
     assert not window.manual_fit_button.isHidden()
     assert window.manual_fit_button.isEnabled()
     assert not window.manual_fit_button.isChecked()
@@ -2160,8 +2222,7 @@ def test_manual_fit_panel_starts_without_redundant_inspector_heading(
 def test_add_component_focus_mode_and_escape_are_complete_and_nonmutating(
     application: QApplication,
 ) -> None:
-    window, project, sample = _window_with_sample(application)
-    window.show_manual_fit(project, sample)
+    window, _project, _sample = _window_with_manual_resolution(application)
     add_elastic = window.manual_fit_editor.findChild(QToolButton, "addElasticButton")
     assert add_elastic is not None
 
@@ -3819,8 +3880,9 @@ def test_workspace_manual_model_progress_and_inspector_heading(
     assert "Ready for Fit" in sample_state_tooltip()
     window.show_manual_fit(project, sample)
     assert window.manual_fit_editor.title.text() == "Fitting Parameters"
-    assert window.manual_fit_button.text() == "Manual Fit"
-    assert window.manual_fit_action.text() == "Manual Fit…"
+    assert window.manual_fit_button.text() == "Fitting Parameters"
+    assert window.manual_fit_action.text() == "Fitting Parameters…"
+    assert window.manual_fit_editor.add_button.toolTip() == "Add a fitting function"
     assert (
         workspace.dataset_analysis_state_for(project, sample)
         is DatasetAnalysisState.READY

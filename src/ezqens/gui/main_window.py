@@ -41,12 +41,15 @@ from ezqens.fitting import (
     BackgroundModel,
     ComponentIdentity,
     FitResult,
+    FittingError,
     ManualModelPreview,
+    ParameterFamily,
     ParameterMetadata,
     ParameterReference,
     manual_parameter_metadata,
 )
 from ezqens.gui import masking
+from ezqens.gui.auto_fit import AutoFitCandidateDialog
 from ezqens.gui.dataset_view import ReducedDatasetView
 from ezqens.gui.dialogs import (
     DialogChoice,
@@ -81,9 +84,11 @@ from ezqens.workflow import (
     PendingManualInteraction,
     ProjectDataset,
     WorkflowDiagnostic,
+    WorkflowDiagnosticCode,
     WorkflowError,
     WorkflowProject,
     add_project_dataset,
+    adopt_single_q_auto_fit_candidate,
     apply_resolution,
     begin_component_interaction,
     commit_fitting_selection,
@@ -92,9 +97,11 @@ from ezqens.workflow import (
     complete_lorentzian_interaction,
     create_parameter_tie,
     create_project,
+    join_center_group,
     join_parameter_tie,
     manual_workflow_readiness,
     materialize_manual_setup,
+    measured_point_correspondence_exactly_unchanged,
     open_manual_fit_draft,
     preflight_apply_resolution,
     preview_manual_fit,
@@ -104,7 +111,10 @@ from ezqens.workflow import (
     remove_manual_component,
     remove_project_dataset,
     replace_project_dataset,
+    resolve_manual_fit_context,
     run_and_adopt_manual_fit,
+    run_single_q_auto_fit,
+    untie_center_group_parameter,
     untie_parameter,
     update_manual_parameter,
 )
@@ -202,9 +212,11 @@ class ManualFitSession:
 
 @dataclass(slots=True)
 class SampleViewSession:
-    """Presentation-only Spectrum preferences retained for one Sample."""
+    """Presentation-only scientific-view state retained for one Sample."""
 
+    group_index: int = 0
     y_scale: str = "linear"
+    heatmap_scale: str = "linear"
 
 
 def _changed_fitting_selection_groups(
@@ -399,6 +411,7 @@ class MainWindow(QMainWindow):
         self.workspace.q_assignment_requested.connect(self.show_q_editor)
         self.workspace.mask_edit_requested.connect(self.show_mask_editor)
         self.workspace.manual_fit_requested.connect(self.show_manual_fit)
+        self.workspace.auto_fit_requested.connect(self.show_auto_fit)
         self.workspace.apply_resolution_requested.connect(
             self.apply_resolution_for_sample
         )
@@ -408,7 +421,9 @@ class MainWindow(QMainWindow):
         self.workspace.q_method_removal_requested.connect(self.remove_q_method)
         self.dataset_view.group_changed.connect(self._refresh_inspector_context)
         self.dataset_view.group_changed.connect(self._sync_mask_controls)
+        self.dataset_view.group_changed.connect(self._on_sample_group_changed)
         self.dataset_view.y_scale_changed.connect(self._on_y_scale_changed)
+        self.dataset_view.heatmap_scale_changed.connect(self._on_heatmap_scale_changed)
         self.dataset_view.q_assignment_requested.connect(self.show_q_editor)
         self.dataset_view.units_requested.connect(self.show_units_editor)
         self.dataset_view.q_method_dropped.connect(self._apply_dragged_q_method)
@@ -506,10 +521,16 @@ class MainWindow(QMainWindow):
             lambda _checked=False: self.enter_mask_task(),
         )
 
-        self.manual_fit_action = QAction("Manual Fit…", self)
+        self.manual_fit_action = QAction("Fitting Parameters…", self)
         self.manual_fit_action.setEnabled(False)
         self.manual_fit_action.triggered.connect(
             lambda _checked=False: self.show_manual_fit(),
+        )
+
+        self.auto_fit_action = QAction("AutoFit…", self)
+        self.auto_fit_action.setEnabled(False)
+        self.auto_fit_action.triggered.connect(
+            lambda _checked=False: self.show_auto_fit(),
         )
 
         self.toggle_inspector_action = QAction("Inspector", self)
@@ -571,6 +592,7 @@ class MainWindow(QMainWindow):
         analysis_menu = menu_bar.addMenu("&Analysis")
         assert analysis_menu is not None
         analysis_menu.addAction(self.edit_mask_action)
+        analysis_menu.addAction(self.auto_fit_action)
         analysis_menu.addAction(self.manual_fit_action)
 
         view_menu = menu_bar.addMenu("&View")
@@ -600,14 +622,25 @@ class MainWindow(QMainWindow):
 
         self.manual_fit_button = QToolButton()
         self.manual_fit_button.setObjectName("centralManualFitButton")
-        self.manual_fit_button.setText("Manual Fit")
+        self.manual_fit_button.setText("Fitting Parameters")
         self.manual_fit_button.setCheckable(True)
         self.manual_fit_button.setEnabled(False)
         self.manual_fit_button.setToolTip(
-            "Open Single-Q Manual Fit for the currently open dataset",
+            "Open Fitting Parameters for the currently open Sample",
         )
         self.manual_fit_button.clicked.connect(
             lambda _checked=False: self.show_manual_fit(),
+        )
+
+        self.auto_fit_button = QToolButton()
+        self.auto_fit_button.setObjectName("centralAutoFitButton")
+        self.auto_fit_button.setText("AutoFit…")
+        self.auto_fit_button.setEnabled(False)
+        self.auto_fit_button.setToolTip(
+            "Evaluate Single-Q AutoFit candidates for the current Group",
+        )
+        self.auto_fit_button.clicked.connect(
+            lambda _checked=False: self.show_auto_fit(),
         )
 
         self.inspector_button = QToolButton()
@@ -621,6 +654,7 @@ class MainWindow(QMainWindow):
         header_layout.setSpacing(8)
         header_layout.addWidget(self.project_context_label)
         header_layout.addStretch(1)
+        header_layout.addWidget(self.auto_fit_button)
         header_layout.addWidget(self.manual_fit_button)
         header_layout.addWidget(self.inspector_button)
         self._central_header_layout = header_layout
@@ -1149,7 +1183,7 @@ class MainWindow(QMainWindow):
         )
 
     def _store_open_sample_view_state(self) -> None:
-        """Retain the current display-only Y scale under stable Sample identity."""
+        """Retain current display-only state under stable Sample identity."""
 
         if (
             self._open_project is None
@@ -1161,26 +1195,41 @@ class MainWindow(QMainWindow):
             self._open_project,
             self._open_dataset.workflow_dataset_id,
         )
-        self._sample_view_sessions.setdefault(
-            owner, SampleViewSession()
-        ).y_scale = self.dataset_view.y_scale
+        session = self._sample_view_sessions.setdefault(owner, SampleViewSession())
+        session.group_index = self.dataset_view.current_group_index
+        session.y_scale = self.dataset_view.y_scale
+        session.heatmap_scale = self.dataset_view.heatmap_scale
+
+    def _on_sample_group_changed(self, group_index: int) -> None:
+        """Write through Group navigation independently of fitting state."""
+
+        session = self._open_sample_view_session()
+        if session is not None:
+            session.group_index = group_index
 
     def _on_y_scale_changed(self, scale: str) -> None:
         """Write through one display-only scale change to the open Sample session."""
 
+        session = self._open_sample_view_session()
+        if session is not None:
+            session.y_scale = scale
+
+    def _on_heatmap_scale_changed(self, scale: str) -> None:
+        """Write through one overview color-scale change to its Sample session."""
+
+        session = self._open_sample_view_session()
+        if session is not None:
+            session.heatmap_scale = scale
+
+    def _open_sample_view_session(self) -> SampleViewSession | None:
         if (
             self._open_project is None
             or self._open_dataset is None
             or self._open_dataset.dataset.role is not SpectrumRole.SAMPLE
         ):
-            return
-        owner = (
-            self._open_project,
-            self._open_dataset.workflow_dataset_id,
-        )
-        self._sample_view_sessions.setdefault(
-            owner, SampleViewSession()
-        ).y_scale = scale
+            return None
+        owner = (self._open_project, self._open_dataset.workflow_dataset_id)
+        return self._sample_view_sessions.setdefault(owner, SampleViewSession())
 
     def _commit_explicit_fitting_selection(
         self,
@@ -1355,7 +1404,6 @@ class MainWindow(QMainWindow):
         self._store_open_sample_view_state()
         self._deactivate_manual_fit()
         owner = (project, dataset.workflow_dataset_id)
-        session = self._manual_sessions.get(owner)
         view_session = (
             self._sample_view_sessions.setdefault(owner, SampleViewSession())
             if dataset.dataset.role is SpectrumRole.SAMPLE
@@ -1365,8 +1413,11 @@ class MainWindow(QMainWindow):
         self._open_dataset = dataset
         self.dataset_view.open_dataset(
             dataset.dataset,
-            group_index=0 if session is None else session.group_index,
+            group_index=0 if view_session is None else view_session.group_index,
             y_scale="linear" if view_session is None else view_session.y_scale,
+            heatmap_scale=(
+                "linear" if view_session is None else view_session.heatmap_scale
+            ),
         )
         self.dataset_view.set_selection(
             None if dataset.auto_mask is None else dataset.auto_mask.selection,
@@ -1378,7 +1429,9 @@ class MainWindow(QMainWindow):
         self._sync_manual_fit_entry()
         self._refresh_context_label()
         self._refresh_inspector_context()
+        session = self._manual_sessions.get(owner)
         if session is not None:
+            session.group_index = self.dataset_view.current_group_index
             self._activate_manual_session(session)
         return True
 
@@ -1387,7 +1440,7 @@ class MainWindow(QMainWindow):
         project: ProjectState | None = None,
         dataset: DatasetState | None = None,
     ) -> None:
-        """Open the group-local Manual Fit draft without requiring a Resolution."""
+        """Open group-local Fitting Parameters without requiring a Resolution."""
 
         target_project, target_dataset = self._editing_target(project, dataset)
         if target_project is None or target_dataset is None:
@@ -1408,7 +1461,7 @@ class MainWindow(QMainWindow):
                 )
             except WorkflowError as error:
                 self._sync_manual_fit_entry()
-                self._show_workflow_error("Manual Fit", error)
+                self._show_workflow_error("Fitting Parameters", error)
                 return
             session = ManualFitSession(
                 owner,
@@ -1418,6 +1471,88 @@ class MainWindow(QMainWindow):
             self._manual_sessions[owner] = session
             self.manual_fit_editor.reset_result_disclosure()
             self._manual_inspector_minimum_width = INSPECTOR_BASE_MINIMUM_WIDTH
+        self._activate_manual_session(session, expand=True)
+
+    def show_auto_fit(
+        self,
+        project: ProjectState | None = None,
+        dataset: DatasetState | None = None,
+    ) -> None:
+        """Evaluate and explicitly adopt one candidate for the current Group."""
+
+        target_project, target_dataset = self._editing_target(project, dataset)
+        if target_project is None or target_dataset is None:
+            return
+        if (
+            target_project is not self._open_project
+            or target_dataset is not self._open_dataset
+        ) and not self.open_dataset(target_project, target_dataset):
+            return
+        owner = (target_project, target_dataset.workflow_dataset_id)
+        workflow = self._workflow_project_for(target_project)
+        session = self._manual_sessions.get(owner)
+        try:
+            draft = (
+                session.draft
+                if session is not None
+                else open_manual_fit_draft(
+                    workflow,
+                    self._workflow_dataset(workflow, target_dataset),
+                )
+            )
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
+                outcome = run_single_q_auto_fit(
+                    workflow,
+                    draft,
+                    self.dataset_view.current_group_index,
+                )
+            finally:
+                QApplication.restoreOverrideCursor()
+        except WorkflowError as error:
+            self._show_workflow_error("AutoFit", error)
+            return
+        except (FittingError, ValueError) as error:
+            show_message_dialog(self, "AutoFit", str(error))
+            return
+
+        dialog = AutoFitCandidateDialog(outcome, self)
+        dialog.exec()
+        candidate = dialog.accepted_candidate
+        if candidate is None:
+            return
+        adoption = adopt_single_q_auto_fit_candidate(
+            workflow,
+            draft,
+            outcome,
+            candidate,
+            group_index=self.dataset_view.current_group_index,
+        )
+        if not adoption.success:
+            show_message_dialog(
+                self,
+                "AutoFit",
+                "\n".join(item.message for item in adoption.diagnostics),
+            )
+            return
+        assert adoption.adopted_draft is not None
+        assert adoption.fit_result is not None
+        if self._active_manual_session is session:
+            self._discard_pending_manual_interaction()
+        if session is None:
+            session = ManualFitSession(
+                owner,
+                adoption.adopted_draft,
+                outcome.group_index,
+            )
+            self._manual_sessions[owner] = session
+        else:
+            session.draft = adoption.adopted_draft
+            session.group_index = outcome.group_index
+        execution = session.execution_state(outcome.group_index)
+        execution.lifecycle = ManualFitLifecycle.CURRENT
+        execution.fit_result = adoption.fit_result
+        execution.diagnostics = adoption.diagnostics
         self._activate_manual_session(session, expand=True)
 
     def _activate_manual_session(
@@ -1572,6 +1707,7 @@ class MainWindow(QMainWindow):
             if active_manual_sample:
                 self._discard_pending_manual_interaction()
             self._invalidate_manual_session(target_session)
+        self._sync_manual_fit_entry()
         self._refresh_inspector_context()
         self._refresh_manual_fit()
         return True
@@ -1646,6 +1782,19 @@ class MainWindow(QMainWindow):
         if self._manual_draft is None:
             return
         group_index = self.dataset_view.current_group_index
+        if kind in {ManualComponentKind.ELASTIC, ManualComponentKind.LORENTZIAN}:
+            if self._open_project is None or self._open_dataset is None:
+                return
+            workflow = self._workflow_project_for(self._open_project)
+            sample = self._workflow_dataset(workflow, self._open_dataset)
+            resolution = resolve_manual_fit_context(workflow, sample, group_index)
+            if resolution.context is None:
+                show_message_dialog(
+                    self,
+                    "Add Fitting Function",
+                    _manual_interaction_blocker_message(resolution.diagnostics),
+                )
+                return
         self._pending_manual_interaction = begin_component_interaction(
             self._manual_draft,
             group_index,
@@ -1708,7 +1857,7 @@ class MainWindow(QMainWindow):
                     second_height=hints["second_height"],
                 )
         except WorkflowError as error:
-            self._show_workflow_error("Add Manual Function", error)
+            self._show_workflow_error("Add Fitting Function", error)
         else:
             self._manual_draft = updated
             self._invalidate_manual_fit()
@@ -1788,7 +1937,7 @@ class MainWindow(QMainWindow):
                 edit,
             )
         except WorkflowError as error:
-            self._show_workflow_error("Manual Fit", error)
+            self._show_workflow_error("Fitting Parameters", error)
         else:
             self._manual_draft = updated
             self._invalidate_manual_fit()
@@ -1809,6 +1958,12 @@ class MainWindow(QMainWindow):
                     group_index,
                     reference,
                 )
+            elif model.center_group_for(reference) is not None:
+                updated = untie_center_group_parameter(
+                    self._manual_draft,
+                    group_index,
+                    reference,
+                )
             else:
                 same_family = tuple(
                     group
@@ -1822,6 +1977,13 @@ class MainWindow(QMainWindow):
                         same_family[0].group_id,
                         reference,
                     )
+                elif reference.family is ParameterFamily.CENTER and model.center_groups:
+                    updated = join_center_group(
+                        self._manual_draft,
+                        group_index,
+                        model.center_groups[0].group_id,
+                        reference,
+                    )
                 else:
                     updated = create_parameter_tie(
                         self._manual_draft,
@@ -1830,7 +1992,7 @@ class MainWindow(QMainWindow):
                         source_member=reference,
                     )
         except WorkflowError as error:
-            self._show_workflow_error("Manual Fit", error)
+            self._show_workflow_error("Fitting Parameters", error)
         else:
             self._manual_draft = updated
             self._invalidate_manual_fit()
@@ -1848,7 +2010,7 @@ class MainWindow(QMainWindow):
                 source_member=reference,
             )
         except WorkflowError as error:
-            self._show_workflow_error("Manual Fit", error)
+            self._show_workflow_error("Fitting Parameters", error)
         else:
             self._manual_draft = updated
             self._invalidate_manual_fit()
@@ -1858,22 +2020,37 @@ class MainWindow(QMainWindow):
         self._discard_pending_manual_interaction()
         if self._manual_draft is None:
             return
+        group_index = self.dataset_view.current_group_index
+        model = self._manual_draft.setup(group_index).model
+        if model is None:
+            return
         try:
-            updated = join_parameter_tie(
-                self._manual_draft,
-                self.dataset_view.current_group_index,
-                group_id,
-                reference,
-            )
+            if any(group.group_id == group_id for group in model.center_groups):
+                updated = join_center_group(
+                    self._manual_draft,
+                    group_index,
+                    group_id,
+                    reference,
+                )
+            else:
+                updated = join_parameter_tie(
+                    self._manual_draft,
+                    group_index,
+                    group_id,
+                    reference,
+                )
         except WorkflowError as error:
-            self._show_workflow_error("Manual Fit", error)
+            self._show_workflow_error("Fitting Parameters", error)
         else:
             self._manual_draft = updated
             self._invalidate_manual_fit()
         self._refresh_manual_fit()
 
     def _remove_manual_component(self, identity: ComponentIdentity) -> None:
-        self._apply_manual_component_removal(identity, error_title="Manual Fit")
+        self._apply_manual_component_removal(
+            identity,
+            error_title="Fitting Parameters",
+        )
 
     def _apply_manual_component_removal(
         self,
@@ -1950,6 +2127,7 @@ class MainWindow(QMainWindow):
             self._active_manual_session.group_index = (
                 self.dataset_view.current_group_index
             )
+        self._sync_manual_fit_entry()
         self._refresh_manual_fit()
 
     def _refresh_manual_fit(self) -> None:
@@ -2466,6 +2644,9 @@ class MainWindow(QMainWindow):
             show_message_dialog(self, "Mask", str(error))
             return
         self._mask_draft_owner = self._open_dataset
+        self.dataset_view.set_mask_boundary_coordinates(
+            self._mask_draft.boundary_coordinates
+        )
         self.dataset_view.set_selection(self._mask_draft.selection)
         self.dataset_view.set_mask_inspection_mode(True)
         self._set_mask_tool("boundary", True)
@@ -2494,6 +2675,9 @@ class MainWindow(QMainWindow):
             return False
         self._mask_draft = MaskTaskDraft(current.auto_mask)
         self._mask_draft_owner = current
+        self.dataset_view.set_mask_boundary_coordinates(
+            self._mask_draft.boundary_coordinates
+        )
         self._sync_mask_controls()
         return True
 
@@ -2544,6 +2728,7 @@ class MainWindow(QMainWindow):
 
         self.dataset_view.set_mask_inspection_mode(False)
         self.dataset_view.set_mask_tool(None)
+        self.dataset_view.set_mask_boundary_coordinates(None)
         for button in (
             self.mask_boundary_button,
             self.mask_rectangle_button,
@@ -2599,6 +2784,9 @@ class MainWindow(QMainWindow):
         except ValueError as error:
             show_message_dialog(self, "Re-run AutoMask", str(error))
             return False
+        self.dataset_view.set_mask_boundary_coordinates(
+            self._mask_draft.boundary_coordinates
+        )
         self.dataset_view.set_selection(self._mask_draft.selection)
         self._sync_mask_controls()
         return True
@@ -2628,23 +2816,59 @@ class MainWindow(QMainWindow):
             )
         except WorkflowError as error:
             return False, "\n".join(item.message for item in error.diagnostics)
-        return True, "Open Single-Q Manual Fit for the currently open dataset"
+        return True, "Open Fitting Parameters for the currently open Sample"
+
+    def _auto_fit_capability(
+        self,
+        project: ProjectState,
+        dataset: DatasetState,
+    ) -> tuple[bool, str]:
+        """Resolve the authoritative Single-Q context without running AutoFit."""
+
+        workflow = self._workflow_project_for(project)
+        sample = self._workflow_dataset(workflow, dataset)
+        try:
+            open_manual_fit_draft(workflow, sample)
+        except WorkflowError as error:
+            return False, "\n".join(item.message for item in error.diagnostics)
+        group_index = (
+            self.dataset_view.current_group_index
+            if project is self._open_project and dataset is self._open_dataset
+            else 0
+        )
+        resolution = resolve_manual_fit_context(
+            workflow,
+            sample,
+            group_index,
+        )
+        if resolution.context is None:
+            return False, "\n".join(item.message for item in resolution.diagnostics)
+        return True, "Evaluate AutoFit candidates for the current Sample Group"
 
     def _sync_manual_fit_entry(self) -> None:
         """Keep menu and central task entry bound only to the open dataset."""
 
         available = False
-        tooltip = "Open a reduced dataset to use Manual Fit"
+        tooltip = "Open a reduced dataset to use Fitting Parameters"
+        auto_available = False
+        auto_tooltip = "Open a prepared Sample to use AutoFit"
         if self._open_project is not None and self._open_dataset is not None:
             available, tooltip = self._manual_fit_capability(
                 self._open_project,
                 self._open_dataset,
             )
+            auto_available, auto_tooltip = self._auto_fit_capability(
+                self._open_project,
+                self._open_dataset,
+            )
         self.manual_fit_action.setEnabled(available)
+        self.auto_fit_action.setEnabled(auto_available)
         if not hasattr(self, "manual_fit_button"):
             return
         self.manual_fit_button.setEnabled(available)
         self.manual_fit_button.setToolTip(tooltip)
+        self.auto_fit_button.setEnabled(auto_available)
+        self.auto_fit_button.setToolTip(auto_tooltip)
         self.manual_fit_button.setChecked(
             self._manual_draft is not None
             and self._open_project is not None
@@ -2746,13 +2970,18 @@ class MainWindow(QMainWindow):
         if self._mask_draft is None:
             return
         try:
-            selection = self._mask_draft.preview_auto_boundary(
+            selection, coordinates = self._mask_draft.preview_auto_boundary(
                 group_index,
                 side=BoundarySide(str(side)),
                 energy=energy,
             )
         except ValueError:
+            self.dataset_view.set_mask_boundary_coordinates(
+                self._mask_draft.boundary_coordinates
+            )
+            self.dataset_view.set_selection(self._mask_draft.selection)
             return
+        self.dataset_view.set_mask_boundary_coordinates(coordinates)
         self.dataset_view.set_selection(selection)
 
     def _edit_auto_boundary(
@@ -2771,6 +3000,9 @@ class MainWindow(QMainWindow):
         ):
             self._refresh_mask_preview()
         else:
+            self.dataset_view.set_mask_boundary_coordinates(
+                self._mask_draft.boundary_coordinates
+            )
             self.dataset_view.set_selection(self._mask_draft.selection)
 
     def _apply_mask_boundary_to_all_groups(
@@ -2851,6 +3083,9 @@ class MainWindow(QMainWindow):
     def _refresh_mask_preview(self) -> None:
         if self._mask_draft is None:
             return
+        self.dataset_view.set_mask_boundary_coordinates(
+            self._mask_draft.boundary_coordinates
+        )
         self.dataset_view.set_selection(self._mask_draft.selection)
         self._sync_mask_controls()
 
@@ -3233,6 +3468,15 @@ class MainWindow(QMainWindow):
             current.dataset is previous.dataset
             and current.auto_mask is not previous.auto_mask
         )
+        safe_unit_replacement = (
+            current.dataset.role is previous.dataset.role
+            and _source_unit_identity(current.dataset)
+            != _source_unit_identity(previous.dataset)
+            and measured_point_correspondence_exactly_unchanged(
+                previous.dataset,
+                current.dataset,
+            )
+        )
         changed_selection_groups: tuple[int, ...] | None = None
         if selection_only_update:
             self._commit_explicit_fitting_selection(project, current)
@@ -3247,6 +3491,12 @@ class MainWindow(QMainWindow):
                 after_selection,
                 len(current.dataset.spectra),
             )
+        elif safe_unit_replacement:
+            # Unit correction intentionally replaces dataset identity. The
+            # Workspace has already rebound the point-indexed selection after
+            # exact measured correspondence was proven, so recommit that fresh
+            # selection only on this explicit safe metadata path.
+            self._commit_explicit_fitting_selection(project, current)
         if manual_context_affected:
             self._discard_pending_manual_interaction()
         for session in affected_sessions:
@@ -3313,6 +3563,52 @@ class MainWindow(QMainWindow):
             "About ezQENS",
             "ezQENS\nStandardized analysis of reduced QENS data.",
         )
+
+
+def _source_unit_identity(
+    dataset: ReducedDataset,
+) -> tuple[tuple[str, str, str], ...]:
+    """Return only declared measured-unit identity for safe metadata routing."""
+
+    return tuple(
+        (
+            spectrum.energy_unit,
+            spectrum.intensity_unit,
+            spectrum.uncertainty_unit,
+        )
+        for spectrum in dataset.spectra
+    )
+
+
+def _manual_interaction_blocker_message(
+    diagnostics: tuple[WorkflowDiagnostic, ...],
+) -> str:
+    """Present typed interaction blockers as concise user actions."""
+
+    actions = {
+        WorkflowDiagnosticCode.FITTING_SELECTION_UNAVAILABLE: (
+            "Prepare or save a usable Mask for this Sample before adding this "
+            "fitting function."
+        ),
+        WorkflowDiagnosticCode.NO_APPLIED_RESOLUTION: (
+            "Apply a Resolution to this Sample before adding Elastic or Lorentzian."
+        ),
+        WorkflowDiagnosticCode.ASSOCIATED_RESOLUTION_INVALID: (
+            "Reapply a valid Resolution to this Sample before adding this fitting "
+            "function."
+        ),
+        WorkflowDiagnosticCode.RESOLUTION_PREPARATION_FAILED: (
+            "The applied Resolution cannot be prepared for this Sample and Group."
+        ),
+        WorkflowDiagnosticCode.SAMPLE_ROLE_REQUIRED: (
+            "Open a Sample dataset before adding this fitting function."
+        ),
+        WorkflowDiagnosticCode.INVALID_GROUP: (
+            "Select a valid Group before adding this fitting function."
+        ),
+    }
+    messages = tuple(actions.get(item.code, item.message) for item in diagnostics)
+    return "\n".join(dict.fromkeys(messages))
 
 
 def _format_import_diagnostics(diagnostics: tuple[ImportDiagnostic, ...]) -> str:

@@ -450,6 +450,7 @@ class WorkspaceSidebar(QWidget):
     q_assignment_requested = Signal(object, object)
     mask_edit_requested = Signal(object, object)
     manual_fit_requested = Signal(object, object)
+    auto_fit_requested = Signal(object, object)
     apply_resolution_requested = Signal(object, object)
     q_method_dropped = Signal(object, object, object)
     project_removal_requested = Signal(object)
@@ -1098,7 +1099,11 @@ class WorkspaceSidebar(QWidget):
                 lambda: self.mask_edit_requested.emit(project, dataset),
             )
         if dataset.dataset.role is SpectrumRole.SAMPLE:
-            manual_fit_action = menu.addAction("Manual Fit…")
+            auto_fit_action = menu.addAction("AutoFit…")
+            auto_fit_action.triggered.connect(
+                lambda: self.auto_fit_requested.emit(project, dataset),
+            )
+            manual_fit_action = menu.addAction("Fitting Parameters…")
             manual_fit_action.triggered.connect(
                 lambda: self.manual_fit_requested.emit(project, dataset),
             )

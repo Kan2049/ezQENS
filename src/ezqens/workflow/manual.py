@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from uuid import uuid4
 
+import numpy as np
 import numpy.typing as npt
 
 from ezqens.domain import DiagnosticSeverity, SpectrumRole
 from ezqens.fitting import (
     BACKGROUND_COMPONENT,
     ELASTIC_COMPONENT,
+    AutoFitRecommendation,
     BackgroundModel,
+    CandidateFitResult,
     ComponentFamily,
     ComponentIdentity,
     FitResult,
@@ -24,8 +27,12 @@ from ezqens.fitting import (
     ManualModelPreview,
     ManualParameterIntent,
     ModelEvaluation,
+    ParameterConfiguration,
     ParameterEstimate,
+    ParameterFamily,
     ParameterReference,
+    SpectralModelDefinition,
+    auto_fit_single_q,
     fit_single_q,
     initialize_background_from_interaction,
     initialize_elastic_from_interaction,
@@ -105,7 +112,7 @@ class ManualFitDraft:
         ):
             raise _workflow_error(
                 WorkflowDiagnosticCode.INVALID_GROUP,
-                "Manual Fit group index is outside the draft",
+                "Fitting Parameters group index is outside the draft",
                 group_index=group_index if isinstance(group_index, int) else None,
             )
         return self.setups[group_index]
@@ -220,6 +227,56 @@ class ManualFitExecutionOutcome:
         return self.fit_result is not None and self.adopted_draft is not None
 
 
+@dataclass(frozen=True, slots=True)
+class SingleQAutoFitOutcome:
+    """Project-bound authoritative AutoFit evidence for one Sample Group."""
+
+    scientific_context: ManualFitContext = field(repr=False)
+    recommendation: AutoFitRecommendation
+    measured_energy: npt.NDArray[np.float64] = field(repr=False)
+    measured_intensity: npt.NDArray[np.float64] = field(repr=False)
+    measured_uncertainty: npt.NDArray[np.float64] = field(repr=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.scientific_context, ManualFitContext):
+            raise ValueError("scientific_context must be a ManualFitContext")
+        arrays = (
+            ("measured_energy", self.measured_energy),
+            ("measured_intensity", self.measured_intensity),
+            ("measured_uncertainty", self.measured_uncertainty),
+        )
+        copied: list[npt.NDArray[np.float64]] = []
+        for name, value in arrays:
+            array = np.array(value, dtype=np.float64, copy=True)
+            if array.ndim != 1:
+                raise ValueError(f"{name} must be one-dimensional")
+            array.setflags(write=False)
+            copied.append(array)
+        if len({array.size for array in copied}) != 1:
+            raise ValueError("AutoFit measured arrays must have equal lengths")
+        object.__setattr__(self, "measured_energy", copied[0])
+        object.__setattr__(self, "measured_intensity", copied[1])
+        object.__setattr__(self, "measured_uncertainty", copied[2])
+
+    @property
+    def project_id(self) -> str:
+        """Return the owning Project identity for application routing."""
+
+        return self.scientific_context.project_id
+
+    @property
+    def sample_id(self) -> str:
+        """Return the bound Sample identity for application routing."""
+
+        return self.scientific_context.sample.dataset_id
+
+    @property
+    def group_index(self) -> int:
+        """Return the exact Group evaluated by AutoFit."""
+
+        return self.scientific_context.group_index
+
+
 def _workflow_error(
     code: WorkflowDiagnosticCode,
     message: str,
@@ -269,7 +326,7 @@ def open_manual_fit_draft(
     if current.dataset.role is not SpectrumRole.SAMPLE:
         raise _workflow_error(
             WorkflowDiagnosticCode.SAMPLE_ROLE_REQUIRED,
-            "Manual Fit drafts require a Sample dataset",
+            "Fitting Parameters require a Sample dataset",
         )
     return ManualFitDraft(
         project_id=project.project_id,
@@ -912,6 +969,163 @@ def untie_parameter(
     return draft.with_model(group_index, updated)
 
 
+def untie_center_group_parameter(
+    draft: ManualFitDraft,
+    group_index: int,
+    member: ParameterReference,
+) -> ManualFitDraft:
+    """Leave one ordinary center group while preserving its shared intent."""
+
+    model = _require_model(draft, group_index)
+    target = model.center_group_for(member)
+    if target is None:
+        raise _workflow_error(
+            WorkflowDiagnosticCode.INVALID_MANUAL_OPERATION,
+            "parameter is not a member of a center group",
+            group_index=group_index,
+        )
+    remaining = tuple(
+        reference
+        for reference in model.center_group_members(target.group_id)
+        if reference != member
+    )
+    center_groups = tuple(
+        group
+        for group in model.center_groups
+        if group.group_id != target.group_id or remaining
+    )
+    elastic_center_group = model.elastic_center_group
+    energy_shift = model.energy_shift
+    lorentzians = model.lorentzians
+    if member.component == ELASTIC_COMPONENT:
+        existing_legacy = any(
+            component.center is None and component.center_group is None
+            for component in model.lorentzians
+        )
+        if existing_legacy:
+            raise _workflow_error(
+                WorkflowDiagnosticCode.INVALID_MANUAL_OPERATION,
+                "elastic Center cannot leave this group while another legacy "
+                "shared Center is present",
+                group_index=group_index,
+            )
+        elastic_center_group = None
+        energy_shift = _copy_intent(target.intent)
+    else:
+        component_index = next(
+            (
+                index
+                for index, component in enumerate(model.lorentzians)
+                if component.identity == member.component
+            ),
+            None,
+        )
+        if component_index is None or member.family is not ParameterFamily.CENTER:
+            raise _workflow_error(
+                WorkflowDiagnosticCode.INVALID_MANUAL_OPERATION,
+                "center group member is not a Lorentzian Center",
+                group_index=group_index,
+            )
+        items = list(model.lorentzians)
+        items[component_index] = replace(
+            items[component_index],
+            center=_copy_intent(target.intent),
+            center_group=None,
+        )
+        lorentzians = tuple(items)
+    updated = ManualModelState(
+        energy_shift=energy_shift,
+        elastic_area=model.elastic_area,
+        lorentzians=lorentzians,
+        background=model.background,
+        b0=model.b0,
+        b1=model.b1,
+        center_groups=center_groups,
+        elastic_center_group=elastic_center_group,
+        parameter_ties=model.parameter_ties,
+    )
+    return draft.with_model(group_index, updated)
+
+
+def join_center_group(
+    draft: ManualFitDraft,
+    group_index: int,
+    center_group_id: str,
+    member: ParameterReference,
+) -> ManualFitDraft:
+    """Join an unshared Center to an existing ordinary center group."""
+
+    model = _require_model(draft, group_index)
+    if member.family is not ParameterFamily.CENTER:
+        raise _workflow_error(
+            WorkflowDiagnosticCode.INVALID_MANUAL_OPERATION,
+            "only Center parameters can join a center group",
+            group_index=group_index,
+        )
+    if model.tie_for(member) is not None or model.center_group_for(member) is not None:
+        raise _workflow_error(
+            WorkflowDiagnosticCode.INVALID_MANUAL_OPERATION,
+            "Center parameter already belongs to a shared group",
+            group_index=group_index,
+        )
+    if not any(group.group_id == center_group_id for group in model.center_groups):
+        raise _workflow_error(
+            WorkflowDiagnosticCode.INVALID_MANUAL_OPERATION,
+            "unknown center group",
+            group_index=group_index,
+        )
+    elastic_center_group = model.elastic_center_group
+    lorentzians = model.lorentzians
+    if member.component == ELASTIC_COMPONENT:
+        if model.elastic_area is None:
+            raise _workflow_error(
+                WorkflowDiagnosticCode.INVALID_MANUAL_OPERATION,
+                "elastic Center is not present",
+                group_index=group_index,
+            )
+        elastic_center_group = center_group_id
+    else:
+        component_index = next(
+            (
+                index
+                for index, component in enumerate(model.lorentzians)
+                if component.identity == member.component
+            ),
+            None,
+        )
+        if component_index is None:
+            raise _workflow_error(
+                WorkflowDiagnosticCode.INVALID_MANUAL_OPERATION,
+                "Lorentzian Center is not present",
+                group_index=group_index,
+            )
+        items = list(model.lorentzians)
+        items[component_index] = replace(
+            items[component_index],
+            center=None,
+            center_group=center_group_id,
+        )
+        lorentzians = tuple(items)
+    legacy_center_used = (
+        model.elastic_area is not None and elastic_center_group is None
+    ) or any(
+        component.center is None and component.center_group is None
+        for component in lorentzians
+    )
+    updated = ManualModelState(
+        energy_shift=model.energy_shift if legacy_center_used else None,
+        elastic_area=model.elastic_area,
+        lorentzians=lorentzians,
+        background=model.background,
+        b0=model.b0,
+        b1=model.b1,
+        center_groups=model.center_groups,
+        elastic_center_group=elastic_center_group,
+        parameter_ties=model.parameter_ties,
+    )
+    return draft.with_model(group_index, updated)
+
+
 def _component_references(
     model: ManualModelState,
     identity: ComponentIdentity,
@@ -1301,6 +1515,245 @@ def run_manual_fit(
     )
 
 
+def run_single_q_auto_fit(
+    project: WorkflowProject,
+    draft: ManualFitDraft,
+    group_index: int,
+    *,
+    max_nfev: int = 2500,
+) -> SingleQAutoFitOutcome:
+    """Run the public production AutoFit path for one bound Sample Group."""
+
+    context = _require_context(project, draft, group_index)
+    recommendation = auto_fit_single_q(
+        context.prepared_resolution,
+        context.selection,
+        group_index,
+        max_nfev=max_nfev,
+    )
+    spectrum = context.selection.dataset.spectra[group_index]
+    retained = context.selection.retained_mask(group_index)
+    return SingleQAutoFitOutcome(
+        scientific_context=context,
+        recommendation=recommendation,
+        measured_energy=spectrum.energy[retained],
+        measured_intensity=spectrum.intensity[retained],
+        measured_uncertainty=spectrum.uncertainty[retained],
+    )
+
+
+def _manual_intent_from_configuration(
+    configuration: ParameterConfiguration,
+) -> ManualParameterIntent:
+    """Preserve a core configuration as editable working-state intent."""
+
+    return ManualParameterIntent(
+        current_value=configuration.initial_value,
+        user_lower_limit=(
+            configuration.lower_bound
+            if math.isfinite(configuration.lower_bound)
+            else None
+        ),
+        user_upper_limit=(
+            configuration.upper_bound
+            if math.isfinite(configuration.upper_bound)
+            else None
+        ),
+        free=configuration.free,
+        user_bounds_enabled=True,
+    )
+
+
+def _manual_state_from_fitted_model(
+    model: SpectralModelDefinition,
+) -> ManualModelState:
+    """Translate typed fitted topology without labels or scientific inference."""
+
+    intent = _manual_intent_from_configuration
+    adopted_center_groups = [
+        ManualCenterGroupState(group.group_id, intent(group.parameter))
+        for group in model.center_groups
+    ]
+    legacy_center_group: str | None = None
+    if model.energy_shift is not None:
+        legacy_center_group = _new_group_id("center")
+        adopted_center_groups.append(
+            ManualCenterGroupState(
+                legacy_center_group,
+                intent(model.energy_shift),
+            )
+        )
+    return ManualModelState(
+        energy_shift=None,
+        elastic_area=intent(model.elastic_area) if model.elastic_area else None,
+        lorentzians=tuple(
+            ManualLorentzianState(
+                area=intent(component.area),
+                fwhm=intent(component.fwhm),
+                center=intent(component.center) if component.center else None,
+                center_group=(
+                    component.center_group
+                    if component.center is not None
+                    or component.center_group is not None
+                    else legacy_center_group
+                ),
+                identity=component.identity,
+            )
+            for component in model.lorentzians
+        ),
+        background=model.background,
+        b0=intent(model.b0) if model.b0 else None,
+        b1=intent(model.b1) if model.b1 else None,
+        center_groups=tuple(adopted_center_groups),
+        elastic_center_group=(
+            model.elastic_center_group
+            if model.elastic_center_group is not None or model.elastic_area is None
+            else legacy_center_group
+        ),
+        parameter_ties=tuple(
+            ManualParameterTieState(
+                group.group_id,
+                group.members,
+                intent(group.parameter),
+            )
+            for group in model.parameter_ties
+        ),
+    )
+
+
+def _single_q_auto_fit_context_unchanged(
+    captured: ManualFitContext,
+    current: ManualFitContext,
+) -> bool:
+    """Require the exact immutable inputs and prepared Group provenance."""
+
+    if (
+        captured.project_id != current.project_id
+        or captured.sample is not current.sample
+        or captured.group_index != current.group_index
+        or captured.group_identity != current.group_identity
+        or captured.resolution is not current.resolution
+        or captured.prepared_resolution.sample_dataset
+        is not current.prepared_resolution.sample_dataset
+        or captured.prepared_resolution.resolution_dataset
+        is not current.prepared_resolution.resolution_dataset
+    ):
+        return False
+    group_index = captured.group_index
+    return (
+        captured.selection.ranges[group_index] == current.selection.ranges[group_index]
+        and np.array_equal(
+            captured.selection.excluded_mask(group_index),
+            current.selection.excluded_mask(group_index),
+        )
+        and captured.prepared_resolution.acceptance_provenance(group_index)
+        == current.prepared_resolution.acceptance_provenance(group_index)
+    )
+
+
+def adopt_single_q_auto_fit_candidate(
+    project: WorkflowProject,
+    draft: ManualFitDraft,
+    outcome: SingleQAutoFitOutcome,
+    candidate: CandidateFitResult,
+    *,
+    group_index: int | None = None,
+) -> ManualFitExecutionOutcome:
+    """Atomically adopt one exact successful AutoFit candidate into the draft."""
+
+    outcome_group = outcome.group_index
+    if (
+        outcome.project_id != project.project_id
+        or outcome.project_id != draft.project_id
+        or outcome.sample_id != draft.sample_id
+    ):
+        return _failed_execution(
+            WorkflowDiagnosticCode.MANUAL_FIT_ADOPTION_FAILED,
+            "AutoFit evidence belongs to a different Project or Sample",
+            group_index=outcome_group,
+        )
+    if group_index is not None and group_index != outcome_group:
+        return _failed_execution(
+            WorkflowDiagnosticCode.AUTO_FIT_CONTEXT_CHANGED,
+            "the active Group changed after AutoFit; run AutoFit again",
+            group_index=group_index,
+        )
+    try:
+        draft.setup(outcome_group)
+        current_context = _require_context(project, draft, outcome_group)
+    except WorkflowError as error:
+        return ManualFitExecutionOutcome(None, None, error.diagnostics)
+    if not _single_q_auto_fit_context_unchanged(
+        outcome.scientific_context,
+        current_context,
+    ):
+        return _failed_execution(
+            WorkflowDiagnosticCode.AUTO_FIT_CONTEXT_CHANGED,
+            "the scientific context changed after AutoFit; run AutoFit again",
+            group_index=outcome_group,
+        )
+    if not any(item is candidate for item in outcome.recommendation.candidate_results):
+        return _failed_execution(
+            WorkflowDiagnosticCode.MANUAL_FIT_ADOPTION_FAILED,
+            "candidate is not part of this AutoFit evaluation",
+            group_index=outcome_group,
+        )
+    fit_result = candidate.fit
+    if fit_result is None or not fit_result.diagnostics.optimizer_success:
+        return _failed_execution(
+            WorkflowDiagnosticCode.MANUAL_FIT_ADOPTION_FAILED,
+            "only a successful AutoFit candidate can be adopted",
+            group_index=outcome_group,
+            fit_result=fit_result,
+        )
+    if fit_result.provenance.group_index != outcome_group:
+        return _failed_execution(
+            WorkflowDiagnosticCode.MANUAL_FIT_ADOPTION_FAILED,
+            "AutoFit candidate belongs to a different Group",
+            group_index=outcome_group,
+            fit_result=fit_result,
+        )
+    fitted_model = fit_result.fitted_model
+    if fitted_model is None:
+        return _failed_execution(
+            WorkflowDiagnosticCode.MANUAL_FIT_ADOPTION_FAILED,
+            "AutoFit candidate has no fitted model",
+            group_index=outcome_group,
+            fit_result=fit_result,
+        )
+    try:
+        adopted_model = _manual_state_from_fitted_model(fitted_model)
+        materialized = materialize_manual_setup(
+            project,
+            draft.with_model(outcome_group, adopted_model),
+            outcome_group,
+        )
+        readiness = manual_fit_readiness(
+            current_context.prepared_resolution,
+            current_context.selection,
+            outcome_group,
+            materialized.fit_model,
+        )
+    except (ManualMaterializationError, ValueError) as error:
+        return _failed_execution(
+            WorkflowDiagnosticCode.MANUAL_FIT_ADOPTION_FAILED,
+            str(error),
+            group_index=outcome_group,
+            fit_result=fit_result,
+        )
+    if not readiness.runnable:
+        return _failed_execution(
+            WorkflowDiagnosticCode.MANUAL_FIT_ADOPTION_FAILED,
+            "; ".join(item.message for item in readiness.diagnostics),
+            group_index=outcome_group,
+            fit_result=fit_result,
+        )
+    return ManualFitExecutionOutcome(
+        fit_result,
+        draft.with_model(outcome_group, adopted_model),
+    )
+
+
 class _ManualFitAdoptionError(ValueError):
     """Expected validation failure while constructing an adopted Manual state."""
 
@@ -1354,7 +1807,7 @@ def _readiness_execution_diagnostics(
     return (
         _execution_diagnostic(
             WorkflowDiagnosticCode.MANUAL_FIT_EXECUTION_FAILED,
-            "Manual fit is not ready to run",
+            "Fitting Parameters is not ready to run",
             group_index=group_index,
         ),
     )
@@ -1384,7 +1837,7 @@ def _validated_estimates_by_slot(
     expected_sets = tuple(frozenset(slot) for slot in expected_slots)
     if any(not isinstance(item, ParameterEstimate) for item in fit_result.parameters):
         raise _ManualFitAdoptionError(
-            "Manual fit result contains an invalid parameter estimate"
+            "Fitting result contains an invalid parameter estimate"
         )
     actual_sets = tuple(
         frozenset(estimate.references) for estimate in fit_result.parameters
@@ -1395,7 +1848,7 @@ def _validated_estimates_by_slot(
         or set(actual_sets) != set(expected_sets)
     ):
         raise _ManualFitAdoptionError(
-            "Manual fit result does not provide exact parameter-reference coverage"
+            "Fitting result does not provide exact parameter-reference coverage"
         )
     estimates = {
         frozenset(estimate.references): estimate for estimate in fit_result.parameters
@@ -1406,15 +1859,15 @@ def _validated_estimates_by_slot(
         configuration = materialized.parameter(slot[0]).fit_configuration
         if not math.isfinite(estimate.value):
             raise _ManualFitAdoptionError(
-                "Manual fit result contains a nonfinite fitted parameter value"
+                "Fitting result contains a nonfinite fitted parameter value"
             )
         if not configuration.lower_bound <= estimate.value <= configuration.upper_bound:
             raise _ManualFitAdoptionError(
-                "Manual fit result contains a value outside submitted fit bounds"
+                "Fitting result contains a value outside submitted fit bounds"
             )
         if estimate.free is not configuration.free:
             raise _ManualFitAdoptionError(
-                "Manual fit result free/fixed state differs from submitted state"
+                "Fitting result free/fixed state differs from submitted state"
             )
         validated.append((slot, estimate))
     return tuple(validated)
@@ -1498,13 +1951,13 @@ def run_and_adopt_manual_fit(
     if not isinstance(fit_result, FitResult):
         return _failed_execution(
             WorkflowDiagnosticCode.MANUAL_FIT_ADOPTION_FAILED,
-            "Manual fit did not return a FitResult",
+            "Fitting did not return a FitResult",
             group_index=group_index,
         )
     if not fit_result.diagnostics.optimizer_success:
         return _failed_execution(
             WorkflowDiagnosticCode.MANUAL_FIT_DID_NOT_CONVERGE,
-            "Manual fit optimizer did not converge",
+            "Fitting optimizer did not converge",
             group_index=group_index,
             fit_result=fit_result,
         )

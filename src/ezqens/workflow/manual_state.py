@@ -240,6 +240,30 @@ class ManualModelState:
             None,
         )
 
+    def center_group_for(
+        self,
+        reference: ParameterReference,
+    ) -> ManualCenterGroupState | None:
+        """Return the ordinary shared-center group containing a reference."""
+
+        group_id = _center_group_id(self, reference)
+        if group_id is None:
+            return None
+        return next(
+            (group for group in self.center_groups if group.group_id == group_id),
+            None,
+        )
+
+    def center_group_members(
+        self,
+        group_id: str,
+    ) -> tuple[ParameterReference, ...]:
+        """Return stable component references owned by one center group."""
+
+        if not any(group.group_id == group_id for group in self.center_groups):
+            raise KeyError(group_id)
+        return _center_group_references(self, group_id)
+
     def parameter_intent(self, reference: ParameterReference) -> ManualParameterIntent:
         """Resolve the authoritative independent or shared Manual intent."""
 

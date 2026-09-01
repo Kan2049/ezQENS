@@ -199,7 +199,7 @@ class ManualFitEditor(QFrame):
         self.add_button = QToolButton()
         self.add_button.setObjectName("manualModelAddButton")
         self.add_button.setText("+")
-        self.add_button.setToolTip("Add a Manual Fit function")
+        self.add_button.setToolTip("Add a fitting function")
         self.add_button.setToolButtonStyle(
             Qt.ToolButtonStyle.ToolButtonTextBesideIcon,
         )
@@ -350,7 +350,7 @@ class ManualFitEditor(QFrame):
         self.collapse_button.setObjectName("manualFitCollapseButton")
         self.collapse_button.setCheckable(True)
         self.collapse_button.setChecked(True)
-        self.collapse_button.setToolTip("Collapse Manual Fit")
+        self.collapse_button.setToolTip("Collapse Fitting Parameters")
         apply_disclosure_icon(
             self.collapse_button,
             expanded=True,
@@ -472,8 +472,8 @@ class ManualFitEditor(QFrame):
             controls.fixed.setIcon(load_icon(IconName.LOCK, neutral))
             if controls.chain is None:
                 continue
-            tie = self._model.tie_for(reference)
-            color = "neutral" if tie is None else _tie_color(self._model, tie.group_id)
+            group_id = _shared_group_id(self._model, reference)
+            color = "neutral" if group_id is None else _tie_color(self._model, group_id)
             controls.chain.setIcon(load_icon(IconName.CHAIN, self._icon_colors[color]))
 
     def set_state(
@@ -654,10 +654,9 @@ class ManualFitEditor(QFrame):
             for label in (name, value, uncertainty):
                 label.setToolTip(metadata.unit)
             details_parts: list[str] = []
-            tie = self._model.tie_for(reference)
-            if tie is not None:
-                tie_index = self._model.parameter_ties.index(tie) + 1
-                details_parts.append(f"Chain {tie_index}")
+            group_id = _shared_group_id(self._model, reference)
+            if group_id is not None:
+                details_parts.append(f"Chain {_tie_group_index(self._model, group_id)}")
             bounds: list[str] = []
             if estimate.active_lower_bound:
                 bounds.append("lower")
@@ -765,7 +764,7 @@ class ManualFitEditor(QFrame):
             color=self._icon_colors["neutral"],
         )
         self.collapse_button.setToolTip(
-            "Collapse Manual Fit" if expanded else "Expand Manual Fit",
+            "Collapse Fitting Parameters" if expanded else "Expand Fitting Parameters",
         )
         self.body.setVisible(expanded)
         self.expanded_changed.emit(expanded)
@@ -837,9 +836,17 @@ class ManualFitEditor(QFrame):
             )
             header_layout.addWidget(add)
         else:
+            if self._model is None:
+                raise RuntimeError("present component requires a fitting model")
             remove = self._remove_button(identity, f"Remove {title}")
             header_layout.addWidget(remove)
-            for column, family in enumerate(families, start=1):
+            present_references = set(self._model.parameter_references())
+            visible_families = tuple(
+                family
+                for family in families
+                if ParameterReference(identity, family) in present_references
+            )
+            for column, family in enumerate(visible_families, start=1):
                 reference = self._reference(identity, family)
                 layout.addWidget(self._parameter_header(reference), 1, column)
                 layout.addWidget(self._parameter_cell(reference), 2, column)
@@ -989,13 +996,15 @@ class ManualFitEditor(QFrame):
             tie_color = "neutral"
             chain.setCheckable(True)
             chain.setProperty("chainControl", True)
-            tie = self._model.tie_for(reference)
-            if tie is not None:
+            group_id = _shared_group_id(self._model, reference)
+            if group_id is not None:
                 chain.setChecked(True)
-                tie_color = _tie_color(self._model, tie.group_id)
+                tie_color = _tie_color(self._model, group_id)
                 chain.setProperty("tieColor", tie_color)
             chain.setIcon(load_icon(IconName.CHAIN, self._icon_colors[tie_color]))
-            chain.setToolTip("Leave tie group" if tie is not None else "Join Chain 1")
+            chain.setToolTip(
+                "Leave tie group" if group_id is not None else "Join Chain 1"
+            )
             chain.setFixedWidth(20)
             chain.clicked.connect(
                 lambda _checked=False, value=reference: self.chain_requested.emit(
@@ -1123,8 +1132,8 @@ class ManualFitEditor(QFrame):
         if self._model is None:
             return
         menu = QMenu(button)
-        tie = self._model.tie_for(reference)
-        if tie is not None:
+        group_id = _shared_group_id(self._model, reference)
+        if group_id is not None:
             leave = menu.addAction("Leave Tie Group")
             leave.triggered.connect(
                 lambda _checked=False: self.chain_requested.emit(reference),
@@ -1133,17 +1142,21 @@ class ManualFitEditor(QFrame):
             return
         action = menu.addAction("New Tie Group")
         action.triggered.connect(self._new_tie_group_emitter(reference))
-        matching = tuple(
-            group
+        matching = [
+            group.group_id
             for group in self._model.parameter_ties
             if group.members[0].family is reference.family
-        )
+        ]
+        if reference.family is ParameterFamily.CENTER:
+            matching.extend(group.group_id for group in self._model.center_groups)
         if matching:
             join = menu.addMenu("Join Tie Group")
-            for index, group in enumerate(matching, start=1):
-                item = join.addAction(f"Join Chain {index}")
+            for group_id in matching:
+                item = join.addAction(
+                    f"Join Chain {_tie_group_index(self._model, group_id)}"
+                )
                 item.triggered.connect(
-                    self._join_tie_emitter(reference, group.group_id),
+                    self._join_tie_emitter(reference, group_id),
                 )
         menu.exec(button.mapToGlobal(position))
 
@@ -1244,9 +1257,28 @@ def _result_float(value: float) -> str:
 def _tie_color(model: ManualModelState, group_id: str) -> str:
     """Map immutable tie-group order to the small shared presentation palette."""
 
-    index = next(
-        index
-        for index, group in enumerate(model.parameter_ties)
-        if group.group_id == group_id
-    )
+    index = _tie_group_index(model, group_id) - 1
     return ("accent", "amber", "violet")[index % 3]
+
+
+def _shared_group_id(
+    model: ManualModelState,
+    reference: ParameterReference,
+) -> str | None:
+    """Resolve either ordinary shared-state representation for chain display."""
+
+    tie = model.tie_for(reference)
+    if tie is not None:
+        return tie.group_id
+    center_group = model.center_group_for(reference)
+    return None if center_group is None else center_group.group_id
+
+
+def _tie_group_index(model: ManualModelState, group_id: str) -> int:
+    """Return one stable one-based visual chain index."""
+
+    group_ids = (
+        *(group.group_id for group in model.parameter_ties),
+        *(group.group_id for group in model.center_groups),
+    )
+    return group_ids.index(group_id) + 1

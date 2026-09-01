@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 from matplotlib.axes import Axes
 from matplotlib.backend_bases import KeyEvent, MouseButton, MouseEvent
 from matplotlib.collections import QuadMesh
-from matplotlib.colors import ListedColormap, Normalize
+from matplotlib.colors import ListedColormap, LogNorm, Normalize
 from matplotlib.lines import Line2D
 from matplotlib.patches import Rectangle
 from matplotlib.text import Text
@@ -34,8 +36,14 @@ from ezqens.fitting import (
     ManualModelPreview,
     ModelEvaluation,
 )
+from ezqens.gui.masking import BoundaryCoordinates
 from ezqens.gui.q_editor import QAssignmentEditor
-from ezqens.gui.scientific_canvas import SCIENTIFIC_BACKGROUND, ScientificCanvas
+from ezqens.gui.scientific_canvas import (
+    SCIENTIFIC_BACKGROUND,
+    ScientificCanvas,
+    log_display_values,
+    zoom_limits,
+)
 from ezqens.gui.theme import DEFAULT_LAYOUT_TOKENS
 from ezqens.gui.workspace import (
     Q_METHOD_MIME_TYPE,
@@ -80,6 +88,7 @@ class ReducedDatasetView(QWidget):
     manual_component_preview_requested = Signal(object, object)
     manual_component_cancelled = Signal()
     y_scale_changed = Signal(str)
+    heatmap_scale_changed = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -101,6 +110,7 @@ class ReducedDatasetView(QWidget):
         self._boundary_drag_side: str | None = None
         self._boundary_handle_artists: dict[str, Line2D] = {}
         self._boundary_handle_positions: dict[str, float] = {}
+        self._mask_boundary_coordinates: tuple[BoundaryCoordinates, ...] | None = None
         self._mask_preview_rectangle: Rectangle | None = None
         self._mask_preview_line: Line2D | None = None
         self._manual_component_kind: ManualComponentKind | None = None
@@ -133,6 +143,7 @@ class ReducedDatasetView(QWidget):
         self.overview_visible = True
         self._navigation_drag_active = False
         self.y_scale = "linear"
+        self.heatmap_scale = "linear"
         self.y_range_locked = True
         self._locked_y_limits: tuple[float, float] | None = None
         self._overview_surface = SCIENTIFIC_BACKGROUND
@@ -305,6 +316,7 @@ class ReducedDatasetView(QWidget):
         *,
         group_index: int = 0,
         y_scale: str = "linear",
+        heatmap_scale: str = "linear",
     ) -> None:
         """Open real imported data at a validated Group without changing arrays."""
 
@@ -312,10 +324,13 @@ class ReducedDatasetView(QWidget):
             raise ValueError("group index is outside the dataset")
         if y_scale not in {"linear", "symlog", "log"}:
             raise ValueError("y scale must be 'linear', 'symlog', or 'log'")
+        if heatmap_scale not in {"linear", "log"}:
+            raise ValueError("heatmap scale must be 'linear' or 'log'")
 
         self.cancel_manual_component_interaction()
         self.dataset = dataset
         self.selection = None
+        self._mask_boundary_coordinates = None
         self._manual_preview = None
         self._manual_fit_result = None
         self._manual_pending_evaluation = None
@@ -324,6 +339,7 @@ class ReducedDatasetView(QWidget):
         self._spectrum_x_limits = None
         self._spectrum_y_limits = None
         self.y_scale = y_scale
+        self.heatmap_scale = heatmap_scale
         self.y_range_locked = True
         self._locked_y_limits = None
         blocker = QSignalBlocker(self.group_spinbox)
@@ -342,6 +358,17 @@ class ReducedDatasetView(QWidget):
         self.selection = selection
         if self.dataset is not None:
             self._draw()
+
+    def set_mask_boundary_coordinates(
+        self,
+        coordinates: tuple[BoundaryCoordinates, ...] | None,
+    ) -> None:
+        """Set immutable Boundary-owned coordinates for the next Mask redraw."""
+
+        if coordinates is not None and self.dataset is not None:
+            if len(coordinates) != len(self.dataset.spectra):
+                raise ValueError("boundary coordinates do not match the open dataset")
+        self._mask_boundary_coordinates = coordinates
 
     def set_mask_inspection_mode(self, enabled: bool) -> None:
         """Reveal excluded points only while the focused Mask task is active."""
@@ -804,7 +831,7 @@ class ReducedDatasetView(QWidget):
                     alpha=0.52,
                     zorder=3,
                 )
-            self._draw_mask_boundary_handles(axes, spectrum.energy, retained_points)
+            self._draw_mask_boundary_handles(axes)
         self._draw_manual_preview(axes)
         axes.set_xlabel(axis_label("Energy", spectrum.energy_unit))
         axes.set_ylabel(axis_label("Intensity", spectrum.intensity_unit))
@@ -892,7 +919,7 @@ class ReducedDatasetView(QWidget):
 
         if self.y_scale != "log":
             return values
-        return np.ma.masked_where(~np.isfinite(values) | (values <= 0.0), values)
+        return log_display_values(values)
 
     def _log_display_has_positive_value(self, measured: np.ndarray) -> bool:
         """Return whether any measured or Manual display layer can appear on Log."""
@@ -912,19 +939,17 @@ class ReducedDatasetView(QWidget):
     def _draw_mask_boundary_handles(
         self,
         axes: Axes,
-        energy: np.ndarray,
-        visible_points: np.ndarray,
     ) -> None:
-        """Render the effective left/right selection edges as draggable handles."""
+        """Render the current Group's explicit Boundary-owned coordinates."""
 
-        retained_energy = energy[visible_points]
         self._boundary_handle_artists = {}
         self._boundary_handle_positions = {}
-        if not retained_energy.size:
+        if self._mask_boundary_coordinates is None:
             return
+        coordinates = self._mask_boundary_coordinates[self.current_group_index]
         for side, value in (
-            ("left", float(np.min(retained_energy))),
-            ("right", float(np.max(retained_energy))),
+            ("left", coordinates.left_energy),
+            ("right", coordinates.right_energy),
         ):
             line = axes.axvline(
                 value,
@@ -952,7 +977,7 @@ class ReducedDatasetView(QWidget):
                 for spectrum in dataset.spectra
             ]
         )
-        norm = _intensity_normalization(finite_intensities)
+        norm = _intensity_normalization(finite_intensities, self.heatmap_scale)
         meshes: list[QuadMesh] = []
         for bounds, spectrum in zip(
             self.overview_x_cell_bounds,
@@ -1385,11 +1410,12 @@ class ReducedDatasetView(QWidget):
         if self._boundary_drag_side is not None:
             side = self._boundary_drag_side
             self._boundary_drag_side = None
-            if event.inaxes is self.spectrum_axes and event.xdata is not None:
+            energy = self._boundary_handle_positions.get(side)
+            if energy is not None:
                 self.mask_boundary_requested.emit(
                     self.current_group_index,
                     side,
-                    float(event.xdata),
+                    energy,
                 )
             self._set_boundary_cursor(event)
             return
@@ -1711,7 +1737,9 @@ class ReducedDatasetView(QWidget):
             ):
                 return None
             for side, x_data in self._boundary_handle_positions.items():
-                handle_x = self.spectrum_axes.transData.transform((x_data, 0.0))[0]
+                handle_x = self.spectrum_axes.get_xaxis_transform().transform(
+                    (x_data, 0.5)
+                )[0]
                 if abs(float(event_x) - handle_x) <= tolerance:
                     return side
             return None
@@ -1849,6 +1877,17 @@ class ReducedDatasetView(QWidget):
         self.y_scale_changed.emit(scale)
         return True
 
+    def set_heatmap_scale(self, scale: str) -> bool:
+        """Select an overview-only color normalization without changing data."""
+
+        if scale not in {"linear", "log"}:
+            raise ValueError("heatmap scale must be 'linear' or 'log'")
+        self._require_dataset()
+        self.heatmap_scale = scale
+        self._draw()
+        self.heatmap_scale_changed.emit(scale)
+        return True
+
     def set_y_range_locked(self, locked: bool) -> None:
         """Preserve the current y limits across Group changes only when enabled."""
 
@@ -1908,10 +1947,29 @@ class ReducedDatasetView(QWidget):
         )
         if not axes.bbox.contains(*canvas_position):
             return
+        menu = self._build_overview_context_menu()
+        menu.exec(self.overview_canvas.mapToGlobal(position))
+
+    def _build_overview_context_menu(self) -> QMenu:
+        """Build display and workflow commands for the overview figure."""
+
         menu = QMenu(self)
+        scale_menu = menu.addMenu("Heatmap Scale")
+        assert scale_menu is not None
+        scale_group = QActionGroup(scale_menu)
+        scale_group.setExclusive(True)
+        for label, scale in (("Linear", "linear"), ("Log", "log")):
+            action = scale_menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(self.heatmap_scale == scale)
+            action.triggered.connect(
+                lambda _checked, value=scale: self.set_heatmap_scale(value)
+            )
+            scale_group.addAction(action)
+        menu.addSeparator()
         self._add_q_assignment_action(menu)
         self._add_mask_edit_action(menu)
-        menu.exec(self.overview_canvas.mapToGlobal(position))
+        return menu
 
     def _show_navigation_q_context_menu(
         self,
@@ -1977,10 +2035,10 @@ class ReducedDatasetView(QWidget):
         x_cursor, y_cursor = axes.transData.inverted().transform((event.x, event.y))
         scale = 0.8 if event.button == "up" else 1.25
         if inside_body or in_x_axis:
-            axes.set_xlim(*_zoom_limits(axes.get_xlim(), float(x_cursor), scale))
+            axes.set_xlim(*zoom_limits(axes.get_xlim(), float(x_cursor), scale))
             self._spectrum_x_limits = axes.get_xlim()
         if inside_body or in_y_axis:
-            axes.set_ylim(*_zoom_limits(axes.get_ylim(), float(y_cursor), scale))
+            axes.set_ylim(*zoom_limits(axes.get_ylim(), float(y_cursor), scale))
             self._spectrum_y_limits = axes.get_ylim()
             if self.y_range_locked:
                 self._locked_y_limits = axes.get_ylim()
@@ -2086,11 +2144,44 @@ def _center_cell_edges(centers: np.ndarray) -> np.ndarray:
     )
 
 
-def _intensity_normalization(values: np.ndarray) -> Normalize | None:
+class _NonpositiveUnderLogNorm(LogNorm):
+    """Log-normalize positives while mapping finite nonpositives below range."""
+
+    def __call__(
+        self,
+        value: Any,
+        clip: bool | None = None,
+    ) -> Any:
+        scalar = np.isscalar(value)
+        raw = np.asanyarray(value)
+        normalized = np.ma.asarray(super().__call__(value, clip=clip))
+        data = np.array(normalized.data, copy=True)
+        mask = np.array(np.ma.getmaskarray(normalized), copy=True)
+        nonpositive = np.isfinite(raw) & (raw <= 0.0)
+        data[nonpositive] = -1.0
+        mask[nonpositive] = False
+        result = np.ma.array(data, mask=mask)
+        return result[()] if scalar else result
+
+
+def _intensity_normalization(
+    values: np.ndarray,
+    scale: str = "linear",
+) -> Normalize | None:
     """Create one raw-intensity color mapping shared by every overview column."""
 
     if not values.size:
         return None
+    if scale == "log":
+        positive = values[values > 0.0]
+        if not positive.size:
+            return Normalize(vmin=0.0, vmax=1.0, clip=True)
+        return _NonpositiveUnderLogNorm(
+            vmin=float(np.min(positive)),
+            vmax=float(np.max(positive)),
+        )
+    if scale != "linear":
+        raise ValueError("heatmap scale must be 'linear' or 'log'")
     return Normalize(vmin=float(np.min(values)), vmax=float(np.max(values)))
 
 
@@ -2252,17 +2343,3 @@ def _event_hits_text(event: MouseEvent, artist: Text) -> bool:
     except RuntimeError:
         return False
     return bool(bbox.padded(5.0).contains(event.x, event.y))
-
-
-def _zoom_limits(
-    limits: tuple[float, float],
-    cursor: float,
-    scale: float,
-) -> tuple[float, float]:
-    """Scale a view around its pointer without assigning analytical meaning."""
-
-    lower, upper = limits
-    return (
-        cursor - (cursor - lower) * scale,
-        cursor + (upper - cursor) * scale,
-    )

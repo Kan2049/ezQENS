@@ -15,10 +15,16 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import numpy as np
 import pytest
 from matplotlib.backend_bases import MouseButton, MouseEvent
-from matplotlib.colors import to_hex
+from matplotlib.colors import LogNorm, to_hex
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QFont
-from PySide6.QtWidgets import QAbstractSpinBox, QApplication, QFileDialog, QMenu
+from PySide6.QtWidgets import (
+    QAbstractSpinBox,
+    QApplication,
+    QFileDialog,
+    QMenu,
+    QToolButton,
+)
 
 from ezqens.domain import (
     ImportValidationError,
@@ -32,6 +38,7 @@ from ezqens.gui.dataset_view import (
     OVERVIEW_ACTIVE_ALPHA,
     OVERVIEW_ACTIVE_COLOR,
     OVERVIEW_COLORMAP,
+    _intensity_normalization,
 )
 from ezqens.gui.main_window import ImportBatchResult, _supported_reduced_data_files
 from ezqens.gui.scientific_canvas import SCIENTIFIC_BACKGROUND
@@ -687,6 +694,137 @@ def test_overview_does_not_treat_negative_intensity_as_a_mask(
     assert mesh_values is not None
     np.testing.assert_array_equal(np.asarray(mesh_values).ravel(), [-2.0, 1.0])
     assert not np.any(np.ma.getmaskarray(mesh_values))
+    window.close()
+
+
+def test_heatmap_scale_is_independent_reversible_and_display_only(
+    application: QApplication,
+) -> None:
+    dataset = ReducedDataset(
+        role=SpectrumRole.SAMPLE,
+        spectra=(
+            Spectrum(
+                role=SpectrumRole.SAMPLE,
+                group_index=0,
+                group_label="1",
+                energy=np.arange(5, dtype=float),
+                intensity=np.array([-2.0, 0.0, 1.0, 10.0, 100.0]),
+                uncertainty=np.full(5, 0.1),
+                energy_unit="unknown",
+                intensity_unit="unknown",
+                uncertainty_unit="unknown",
+            ),
+        ),
+    )
+    window = MainWindow()
+    project = window.workspace.new_project()
+    state = window.workspace.add_dataset(project, dataset)
+    window.open_dataset(project, state)
+    view = window.dataset_view
+    intensity_snapshot = dataset.spectra[0].intensity.copy()
+    selection_snapshot = view.selection
+    linear_norm = view.overview_meshes[0].norm
+    assert not isinstance(linear_norm, LogNorm)
+    linear_midpoint = float(np.asarray(linear_norm(np.array([10.0])))[0])
+
+    assert view.set_y_scale("log")
+    assert view.heatmap_scale == "linear"
+    assert view.set_heatmap_scale("log")
+    assert view.y_scale == "log"
+    log_norm = view.overview_meshes[0].norm
+    assert isinstance(log_norm, LogNorm)
+    normalized = np.ma.asarray(log_norm(np.array([-2.0, 0.0, 1.0, 10.0, 100.0])))
+    assert not np.any(np.ma.getmaskarray(normalized))
+    assert normalized[:2].tolist() == [-1.0, -1.0]
+    assert normalized[2:].tolist() == pytest.approx([0.0, 0.5, 1.0])
+    assert float(np.asarray(log_norm(np.array([10.0])))[0]) != pytest.approx(
+        linear_midpoint
+    )
+    np.testing.assert_array_equal(
+        np.asarray(view.overview_meshes[0].get_array()).ravel(),
+        intensity_snapshot,
+    )
+    np.testing.assert_array_equal(dataset.spectra[0].intensity, intensity_snapshot)
+    assert view.selection is selection_snapshot
+
+    visible_scale_buttons = {
+        button.text() for button in view.findChildren(QToolButton) if button.isVisible()
+    }
+    assert not {"Linear", "Log"} & visible_scale_buttons
+    overview_menu = view._build_overview_context_menu()
+    heatmap_menu = overview_menu.actions()[0].menu()
+    assert isinstance(heatmap_menu, QMenu)
+    assert heatmap_menu.title() == "Heatmap Scale"
+    assert [action.text() for action in heatmap_menu.actions()] == ["Linear", "Log"]
+    assert heatmap_menu.actions()[1].isChecked()
+
+    assert view.set_heatmap_scale("linear")
+    assert view.y_scale == "log"
+    restored_norm = view.overview_meshes[0].norm
+    assert not isinstance(restored_norm, LogNorm)
+    assert float(np.asarray(restored_norm(np.array([10.0])))[0]) == pytest.approx(
+        linear_midpoint
+    )
+    np.testing.assert_array_equal(dataset.spectra[0].intensity, intensity_snapshot)
+    assert view.selection is selection_snapshot
+
+    no_positive = _intensity_normalization(np.array([-2.0, 0.0]), "log")
+    assert no_positive is not None
+    np.testing.assert_array_equal(no_positive(np.array([-2.0, 0.0])), [0.0, 0.0])
+    window.close()
+
+
+def test_sample_view_state_is_per_sample_before_and_after_manual_session(
+    application: QApplication,
+) -> None:
+    window = MainWindow()
+    project, imported = _import_two_group_dataset(window)
+    template = imported.dataset.spectra[0]
+
+    def sample(name: str) -> ReducedDataset:
+        return ReducedDataset(
+            role=SpectrumRole.SAMPLE,
+            spectra=tuple(
+                replace(
+                    template,
+                    group_index=index,
+                    group_label=f"{name} {index + 1}",
+                    intensity=template.intensity + index,
+                )
+                for index in range(4)
+            ),
+        )
+
+    first = window.workspace.add_dataset(project, sample("A"))
+    second = window.workspace.add_dataset(project, sample("B"))
+    assert window.open_dataset(project, first)
+    window.dataset_view.set_current_group(2)
+    assert window.dataset_view.set_y_scale("log")
+    assert window.dataset_view.set_heatmap_scale("log")
+    assert not window._manual_sessions
+
+    assert window.open_dataset(project, second)
+    window.dataset_view.set_current_group(1)
+    assert window.dataset_view.current_group_index == 1
+    assert window.dataset_view.y_scale == "linear"
+    assert window.dataset_view.heatmap_scale == "linear"
+    assert not window._manual_sessions
+
+    assert window.open_dataset(project, first)
+    assert window.dataset_view.current_group_index == 2
+    assert window.dataset_view.y_scale == "log"
+    assert window.dataset_view.heatmap_scale == "log"
+    window.show_manual_fit(project, first)
+    assert len(window._manual_sessions) == 1
+
+    assert window.open_dataset(project, second)
+    assert window.dataset_view.current_group_index == 1
+    assert window.dataset_view.y_scale == "linear"
+    assert window.dataset_view.heatmap_scale == "linear"
+    assert window.open_dataset(project, first)
+    assert window.dataset_view.current_group_index == 2
+    assert window.dataset_view.y_scale == "log"
+    assert window.dataset_view.heatmap_scale == "log"
     window.close()
 
 

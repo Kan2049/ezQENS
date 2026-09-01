@@ -330,7 +330,7 @@ QToolButton[controlKind="split"]::menu-arrow {{
     background: {tokens.surface_selected};
     border-color: transparent;
 }}
-#centralManualFitButton {{
+#centralManualFitButton, #centralAutoFitButton {{
     border-color: transparent;
 }}
 #centralManualFitButton:checked {{
@@ -517,9 +517,27 @@ QMenu::separator {{
     background: {tokens.border_subtle};
     margin: 4px 8px;
 }}
-#ezqensDialog {{
+#ezqensDialog, #autoFitDialog {{
     background: {tokens.surface};
     border: 1px solid {tokens.border_subtle};
+}}
+#autoFitCandidateList {{
+    background: {tokens.surface_input};
+    border: 1px solid {tokens.border_subtle};
+    border-radius: {tokens.control_radius}px;
+    color: {tokens.text_primary};
+}}
+#autoFitCandidateList::item {{
+    padding: 7px;
+}}
+#autoFitCandidateList::item:selected {{
+    background: {tokens.surface_selected};
+    color: {tokens.text_primary};
+}}
+#autoFitUseCandidateButton {{
+    background: {tokens.surface_selected};
+    border-color: {tokens.border_focus};
+    font-weight: 600;
 }}
 #ezqensDialogMessage {{
     color: {tokens.text_secondary};
