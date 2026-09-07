@@ -529,9 +529,12 @@ class WorkspaceSidebar(QWidget):
         self.tree.setObjectName("workspaceTree")
         self.tree.setHeaderHidden(True)
         self.tree.setColumnCount(2)
-        self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-        self.tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        self.tree.setColumnWidth(0, 128)
+        self.tree.header().setStretchLastSection(False)
+        self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.tree.header().setSectionResizeMode(
+            1,
+            QHeaderView.ResizeMode.ResizeToContents,
+        )
         self.tree.setIconSize(QSize(14, 14))
         self.tree.setUniformRowHeights(True)
         self.tree.setTextElideMode(Qt.TextElideMode.ElideRight)

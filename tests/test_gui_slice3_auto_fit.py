@@ -14,7 +14,7 @@ import numpy as np
 import pytest
 from matplotlib.backend_bases import MouseButton, MouseEvent
 from matplotlib.container import ErrorbarContainer
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtWidgets import QApplication, QMenu, QPushButton, QToolButton
 
 import ezqens.gui.main_window as main_window_module
@@ -219,12 +219,22 @@ def test_autofit_dialog_preview_and_explicit_adoption_are_group_local(
         )
         if button.isVisible()
     }
-    assert not {"Linear", "Log"} & visible_scale_buttons
+    assert not {"Linear", "SymLog", "Log"} & visible_scale_buttons
     preview_menu = dialog._build_preview_context_menu()
     scale_menu = preview_menu.actions()[0].menu()
     assert isinstance(scale_menu, QMenu)
-    assert [action.text() for action in scale_menu.actions()] == ["Linear", "Log"]
+    assert [action.text() for action in scale_menu.actions()] == [
+        "Linear",
+        "SymLog",
+        "Log",
+    ]
     scale_menu.actions()[1].trigger()
+    application.processEvents()
+    spectrum_axes, residual_axes = dialog.preview_canvas.figure.axes
+    assert spectrum_axes.get_yscale() == "symlog"
+    assert residual_axes.get_yscale() == "linear"
+    assert dialog.y_scale == "symlog"
+    scale_menu.actions()[2].trigger()
     application.processEvents()
     spectrum_axes, residual_axes = dialog.preview_canvas.figure.axes
     assert spectrum_axes.get_yscale() == "log"
@@ -322,6 +332,71 @@ def test_autofit_dialog_preview_and_explicit_adoption_are_group_local(
     assert chosen.fit is fit_identity
     np.testing.assert_array_equal(outcome.measured_intensity, measured_snapshot)
     np.testing.assert_array_equal(chosen.fit.evaluation.total, evaluation_snapshot)
+
+    opened_at: list[QPoint] = []
+
+    class RecordingMenu:
+        def exec(self, position: QPoint) -> None:
+            opened_at.append(position)
+
+    with monkeypatch.context() as context:
+        context.setattr(
+            dialog,
+            "_build_preview_context_menu",
+            lambda: RecordingMenu(),
+        )
+        dialog._show_preview_context_menu(
+            QPoint(
+                dialog.preview_canvas.width() // 2,
+                dialog.preview_canvas.height() - 1,
+            )
+        )
+    assert len(opened_at) == 1
+    assert (
+        dialog.preview_title.contextMenuPolicy()
+        is not Qt.ContextMenuPolicy.CustomContextMenu
+    )
+
+    signed_measured = np.linspace(-1.0, 1.0, measured_snapshot.size)
+    signed_curve = np.linspace(-0.75, 0.75, chosen.fit.evaluation.energy.size)
+    signed_evaluation = replace(
+        chosen.fit.evaluation,
+        total=signed_curve,
+        background=signed_curve,
+        component_curves=tuple(
+            replace(curve, values=signed_curve)
+            for curve in chosen.fit.evaluation.component_curves
+        ),
+    )
+    signed_fit = replace(chosen.fit, evaluation=signed_evaluation)
+    signed_candidate = replace(chosen, fit=signed_fit)
+    signed_outcome = replace(outcome, measured_intensity=signed_measured)
+    signed_dialog = AutoFitCandidateDialog(signed_outcome, window)
+    assert signed_dialog.set_y_scale("symlog")
+    signed_dialog._draw_candidate(signed_candidate)
+    signed_spectrum, signed_residual = signed_dialog.preview_canvas.figure.axes
+    measured_container = next(
+        container
+        for container in signed_spectrum.containers
+        if container.get_label() == "Measured"
+    )
+    signed_measured_line = cast(ErrorbarContainer, measured_container).lines[0]
+    assert np.any(np.asarray(signed_measured_line.get_ydata()) < 0.0)
+    signed_model_lines = tuple(
+        line
+        for line in signed_spectrum.lines
+        if line.get_label() == "Total fit"
+        or str(line.get_label()).startswith("Component ")
+    )
+    assert signed_model_lines
+    assert all(
+        np.any(np.asarray(line.get_ydata()) < 0.0) for line in signed_model_lines
+    )
+    assert signed_spectrum.get_yscale() == "symlog"
+    assert signed_residual.get_yscale() == "linear"
+    np.testing.assert_array_equal(signed_outcome.measured_intensity, signed_measured)
+    np.testing.assert_array_equal(signed_fit.evaluation.total, signed_curve)
+    signed_dialog.close()
 
     nonpositive_measured = measured_snapshot.copy()
     nonpositive_measured[:2] = (-1.0, 0.0)

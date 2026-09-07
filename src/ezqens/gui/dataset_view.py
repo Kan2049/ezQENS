@@ -42,6 +42,7 @@ from ezqens.gui.scientific_canvas import (
     SCIENTIFIC_BACKGROUND,
     ScientificCanvas,
     log_display_values,
+    symlog_linthresh,
     zoom_limits,
 )
 from ezqens.gui.theme import DEFAULT_LAYOUT_TOKENS
@@ -844,7 +845,7 @@ class ReducedDatasetView(QWidget):
         if self.y_scale == "symlog":
             axes.set_yscale(
                 "symlog",
-                linthresh=_symlog_linthresh(spectrum.intensity[visible_points]),
+                linthresh=symlog_linthresh(spectrum.intensity[visible_points]),
             )
         elif self.y_scale == "linear":
             axes.set_yscale(self.y_scale)
@@ -1931,21 +1932,12 @@ class ReducedDatasetView(QWidget):
     def _show_spectrum_context_menu(self, position: QPoint) -> None:
         if self.spectrum_axes is None:
             return
-        canvas_position = (position.x(), self.canvas.height() - position.y())
-        if not self.spectrum_axes.bbox.contains(*canvas_position):
-            return
         menu = self._build_spectrum_context_menu()
         menu.exec(self.canvas.mapToGlobal(position))
 
     def _show_overview_context_menu(self, position: QPoint) -> None:
         axes = self.overview_axes or self.navigator_axes
         if axes is None:
-            return
-        canvas_position = (
-            position.x(),
-            self.overview_canvas.height() - position.y(),
-        )
-        if not axes.bbox.contains(*canvas_position):
             return
         menu = self._build_overview_context_menu()
         menu.exec(self.overview_canvas.mapToGlobal(position))
@@ -2309,15 +2301,6 @@ def _mask_operation_color(operation: str) -> str:
     """Keep provisional mask intent visible without giving it data meaning."""
 
     return "#47785a" if operation == "restore" else "#a54a4a"
-
-
-def _symlog_linthresh(values: np.ndarray) -> float:
-    """Choose a display-only central linear band from the current plotted data."""
-
-    finite = np.abs(values[np.isfinite(values)])
-    if not finite.size:
-        return 1.0
-    return max(float(np.max(finite)) * 0.01, np.finfo(np.float64).tiny)
 
 
 def _event_touches_axes(event: MouseEvent, axes: Axes) -> bool:

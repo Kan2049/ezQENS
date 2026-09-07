@@ -26,6 +26,7 @@ from ezqens.gui.scientific_canvas import (
     SCIENTIFIC_BACKGROUND,
     ScientificCanvas,
     log_display_values,
+    symlog_linthresh,
     zoom_limits,
 )
 from ezqens.workflow import SingleQAutoFitOutcome
@@ -205,8 +206,10 @@ class AutoFitCandidateDialog(QDialog):
     def set_y_scale(self, scale: str) -> bool:
         """Change only the candidate spectrum's Matplotlib presentation scale."""
 
-        if scale not in {"linear", "log"}:
-            raise ValueError("AutoFit preview y scale must be 'linear' or 'log'")
+        if scale not in {"linear", "symlog", "log"}:
+            raise ValueError(
+                "AutoFit preview y scale must be 'linear', 'symlog', or 'log'"
+            )
         if scale == self.y_scale:
             return False
         self._capture_view_state()
@@ -229,7 +232,11 @@ class AutoFitCandidateDialog(QDialog):
         assert scale_menu is not None
         scale_group = QActionGroup(scale_menu)
         scale_group.setExclusive(True)
-        for label, scale in (("Linear", "linear"), ("Log", "log")):
+        for label, scale in (
+            ("Linear", "linear"),
+            ("SymLog", "symlog"),
+            ("Log", "log"),
+        ):
             action = scale_menu.addAction(label)
             action.setCheckable(True)
             action.setChecked(self.y_scale == scale)
@@ -243,18 +250,10 @@ class AutoFitCandidateDialog(QDialog):
         return menu
 
     def _show_preview_context_menu(self, position: QPoint) -> None:
-        axes = self._axes_at_canvas_position(position)
-        if axes is None:
+        if self.spectrum_axes is None:
             return
         menu = self._build_preview_context_menu()
         menu.exec(self.preview_canvas.mapToGlobal(position))
-
-    def _axes_at_canvas_position(self, position: QPoint) -> Axes | None:
-        canvas_point = (position.x(), self.preview_canvas.height() - position.y())
-        for axes in (self.spectrum_axes, self.residual_axes):
-            if axes is not None and axes.bbox.contains(*canvas_point):
-                return axes
-        return None
 
     def _draw_candidate(self, candidate: CandidateFitResult | None) -> None:
         figure = self.preview_canvas.figure
@@ -300,6 +299,11 @@ class AutoFitCandidateDialog(QDialog):
         if self.y_scale == "log":
             spectrum_axes.set_yscale("log", nonpositive="mask")
             measured_points &= self.outcome.measured_intensity > 0.0
+        elif self.y_scale == "symlog":
+            spectrum_axes.set_yscale(
+                "symlog",
+                linthresh=symlog_linthresh(self.outcome.measured_intensity),
+            )
         spectrum_axes.errorbar(
             self.outcome.measured_energy[measured_points],
             self.outcome.measured_intensity[measured_points],

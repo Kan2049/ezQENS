@@ -15,6 +15,15 @@ def log_display_values(values: np.ndarray) -> np.ndarray:
     return np.ma.masked_where(~np.isfinite(values) | (values <= 0.0), values)
 
 
+def symlog_linthresh(values: np.ndarray) -> float:
+    """Choose the shared display-only central linear band for signed plot data."""
+
+    finite = np.abs(values[np.isfinite(values)])
+    if not finite.size:
+        return 1.0
+    return max(float(np.max(finite)) * 0.01, np.finfo(np.float64).tiny)
+
+
 def zoom_limits(
     limits: tuple[float, float],
     cursor: float,

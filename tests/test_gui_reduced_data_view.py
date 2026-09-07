@@ -16,12 +16,13 @@ import numpy as np
 import pytest
 from matplotlib.backend_bases import MouseButton, MouseEvent
 from matplotlib.colors import LogNorm, to_hex
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QPoint, QSize, Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QApplication,
     QFileDialog,
+    QHeaderView,
     QMenu,
     QToolButton,
 )
@@ -101,7 +102,10 @@ def test_import_uses_core_and_adds_project_data_hierarchy_without_opening(
     assert data_item.isFirstColumnSpanned()
     assert project_item.isExpanded()
     assert data_item.isExpanded()
-    assert window.workspace.tree.columnWidth(0) == 128
+    header = window.workspace.tree.header()
+    assert not header.stretchLastSection()
+    assert header.sectionResizeMode(0) is QHeaderView.ResizeMode.Stretch
+    assert header.sectionResizeMode(1) is QHeaderView.ResizeMode.ResizeToContents
     assert (
         window.workspace.tree.horizontalScrollBarPolicy()
         is Qt.ScrollBarPolicy.ScrollBarAlwaysOff
@@ -417,6 +421,89 @@ def test_spectrum_view_scale_and_lock_controls_preserve_source_arrays(
     view.set_current_group(0)
     view.set_current_group(1)
     assert view.spectrum_axes.get_ylim() != pytest.approx(default_locked_limits)
+    window.close()
+
+
+def test_plot_context_menus_use_their_qt_canvas_as_the_full_hit_region(
+    application: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dataset = ReducedDataset(
+        role=SpectrumRole.SAMPLE,
+        spectra=(
+            Spectrum(
+                role=SpectrumRole.SAMPLE,
+                group_index=0,
+                group_label="Group 1",
+                energy=np.linspace(-1.0, 1.0, 5),
+                intensity=np.array([-2.0, -1.0, 0.0, 1.0, 2.0]),
+                uncertainty=np.full(5, 0.1),
+                energy_unit="meV",
+                intensity_unit="arb. unit",
+                uncertainty_unit="arb. unit",
+            ),
+        ),
+        q_bins=QBins.from_q_values((0.5,)),
+    )
+    window = MainWindow()
+    project = window.workspace.new_project()
+    state = window.workspace.add_dataset(project, dataset)
+    assert window.open_dataset(project, state)
+    window.show()
+    application.processEvents()
+    view = window.dataset_view
+    assert view.spectrum_axes is not None
+    assert view.overview_axes is not None
+
+    opened: list[tuple[str, QPoint]] = []
+
+    class RecordingMenu:
+        def __init__(self, role: str) -> None:
+            self.role = role
+
+        def exec(self, position: QPoint) -> None:
+            opened.append((self.role, position))
+
+    monkeypatch.setattr(
+        view,
+        "_build_spectrum_context_menu",
+        lambda: RecordingMenu("spectrum"),
+    )
+    monkeypatch.setattr(
+        view,
+        "_build_overview_context_menu",
+        lambda: RecordingMenu("overview"),
+    )
+
+    negative_display = view.spectrum_axes.transData.transform((0.0, -1.0))
+    negative_position = QPoint(
+        round(float(negative_display[0])),
+        round(view.canvas.height() - float(negative_display[1])),
+    )
+    assert view.canvas.rect().contains(negative_position)
+    view._show_spectrum_context_menu(negative_position)
+    view._show_spectrum_context_menu(
+        QPoint(view.canvas.width() // 2, view.canvas.height() - 1),
+    )
+    view._show_overview_context_menu(
+        QPoint(view.overview_canvas.width() // 2, view.overview_canvas.height() - 1),
+    )
+    view.set_overview_visible(False)
+    assert view.navigator_axes is not None
+    view._show_overview_context_menu(
+        QPoint(view.overview_canvas.width() // 2, view.overview_canvas.height() - 1),
+    )
+
+    assert [role for role, _position in opened] == [
+        "spectrum",
+        "spectrum",
+        "overview",
+        "overview",
+    ]
+    assert (
+        view.controls_container.contextMenuPolicy()
+        is not Qt.ContextMenuPolicy.CustomContextMenu
+    )
     window.close()
 
 
