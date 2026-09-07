@@ -744,7 +744,7 @@ class AlternativeStartResult:
 
 @dataclass(frozen=True, slots=True)
 class ResidualDiagnostics:
-    """Threshold-free structure metrics for standardized residuals."""
+    """Threshold-free standardized-residual metrics with physical run location."""
 
     mean: float
     rms: float
@@ -752,6 +752,9 @@ class ResidualDiagnostics:
     linear_trend: float
     lag1_correlation: float | None
     longest_same_sign_run: int
+    longest_same_sign_run_start_energy: float
+    longest_same_sign_run_end_energy: float
+    longest_same_sign_run_energy_span: float
 
 
 @dataclass(frozen=True, slots=True)

@@ -48,6 +48,28 @@ from ezqens.resolution import (
 FloatArray = npt.NDArray[np.float64]
 
 
+def test_residual_run_location_uses_retained_physical_energy_coordinates() -> None:
+    residuals = np.asarray([-0.2, 0.3, 0.4, 0.5, -0.1, -0.2])
+    first_energy = np.asarray([-1.0, -0.5, 0.0, 0.5, 1.0, 1.5])
+    second_energy = np.asarray([-3.0, -2.8, -2.0, 0.25, 2.0, 4.0])
+
+    first = fitting_core._residual_diagnostics(residuals, first_energy)
+    second = fitting_core._residual_diagnostics(residuals, second_energy)
+
+    assert first.mean == second.mean
+    assert first.rms == second.rms
+    assert first.maximum_absolute == second.maximum_absolute
+    assert first.linear_trend == second.linear_trend
+    assert first.lag1_correlation == second.lag1_correlation
+    assert first.longest_same_sign_run == second.longest_same_sign_run == 3
+    assert first.longest_same_sign_run_start_energy == -0.5
+    assert first.longest_same_sign_run_end_energy == 0.5
+    assert first.longest_same_sign_run_energy_span == 1.0
+    assert second.longest_same_sign_run_start_energy == -2.8
+    assert second.longest_same_sign_run_end_energy == 0.25
+    assert second.longest_same_sign_run_energy_span == 3.05
+
+
 def gaussian(energy: npt.ArrayLike, *, sigma: float, center: float = 0.0) -> FloatArray:
     coordinates = np.asarray(energy, dtype=np.float64)
     return np.asarray(
@@ -153,6 +175,7 @@ def synthetic_problem(
     *,
     sample_energy: FloatArray | None = None,
     resolution_energy: FloatArray | None = None,
+    resolution_peak_energy: float = 0.0,
     sigma: float = 0.003,
     noise_seed: int | None = None,
 ) -> tuple[PreparedResolution, FittingSelection]:
@@ -166,7 +189,11 @@ def synthetic_problem(
         if resolution_energy is None
         else np.asarray(resolution_energy, dtype=np.float64)
     )
-    resolution_values = gaussian(resolution_coordinates, sigma=0.035)
+    resolution_values = gaussian(
+        resolution_coordinates,
+        sigma=0.035,
+        center=resolution_peak_energy,
+    )
     placeholder, resolution = make_dataset_pair(
         sample_coordinates,
         np.ones(sample_coordinates.size),
@@ -1447,6 +1474,8 @@ def test_standard_candidate_results_expose_evidence_without_a_winner_rule() -> N
     prepared, selection = synthetic_problem(truth, noise_seed=88)
 
     results = evaluate_standard_candidates(prepared, selection, 0)
+    inputs = fitting_core._fit_inputs(prepared, selection, 0, 2)
+    expected_e0_bounds = fitting_core._auto_e0_bounds(inputs)
 
     assert len(results) == 9
     assert all(item.fit is not None for item in results)
@@ -1457,6 +1486,11 @@ def test_standard_candidate_results_expose_evidence_without_a_winner_rule() -> N
         assert not hasattr(item, "recommended")
         assert item.fit.model.elastic_area is not None
         assert item.fit.model.energy_shift is not None
+        assert item.fit.configuration.energy_shift is not None
+        assert (
+            item.fit.configuration.energy_shift.lower_bound,
+            item.fit.configuration.energy_shift.upper_bound,
+        ) == expected_e0_bounds
         assert item.fit.model.center_groups == ()
         assert item.fit.model.elastic_center_group is None
         assert all(component.center is None for component in item.fit.model.lorentzians)
@@ -1480,6 +1514,128 @@ def test_standard_candidate_keeps_elastic_identity_when_area_approaches_zero() -
     assert result.configuration.elastic_area is not None
     assert result.parameter("elastic_area").lower_bound == 0.0
     assert result.parameter("elastic_area").value < 1.0e-4
+
+
+@pytest.mark.parametrize("true_e0", [0.08, 0.44, -0.44])
+def test_standard_elastic_fit_uses_full_legal_e0_interval(true_e0: float) -> None:
+    truth = SpectralModelDefinition(
+        energy_shift=parameter(true_e0, free=False),
+        elastic_area=parameter(0.8, 0.0, free=False),
+    )
+    prepared, selection = synthetic_problem(truth)
+    selection = selection.with_group_manual_auto_reinclusion(
+        0,
+        selection.padding.spectra[0].auto_mask,
+    )
+
+    result = fit_standard_candidate(
+        prepared,
+        selection,
+        0,
+        StandardModelCandidate(0, BackgroundModel.NONE),
+    )
+
+    fitted_e0 = result.parameter("energy_shift")
+    assert fitted_e0.value == pytest.approx(true_e0, abs=2.0e-5)
+    assert fitted_e0.lower_bound < -0.3
+    assert fitted_e0.upper_bound > 0.3
+    if abs(true_e0) > 0.3:
+        assert abs(fitted_e0.value) > 0.3
+
+
+def test_standard_e0_alignment_handles_asymmetric_irregular_shifted_resolution() -> (
+    None
+):
+    sample_energy = np.linspace(-0.82, 0.91, 187)
+    sample_energy[1:-1] += 0.0015 * np.sin(np.arange(1, sample_energy.size - 1))
+    resolution_energy = np.linspace(-0.24, 0.34, 117)
+    true_e0 = -0.41
+    resolution_peak = 0.075
+    truth = SpectralModelDefinition(
+        energy_shift=parameter(true_e0, free=False),
+        elastic_area=parameter(0.8, 0.0, free=False),
+    )
+    prepared, selection = synthetic_problem(
+        truth,
+        sample_energy=sample_energy,
+        resolution_energy=resolution_energy,
+        resolution_peak_energy=resolution_peak,
+    )
+    selection = selection.with_group_manual_auto_reinclusion(
+        0,
+        selection.padding.spectra[0].auto_mask,
+    )
+    selection = selection.with_group_range(
+        0,
+        lower_energy=-0.63,
+        upper_energy=0.47,
+    )
+
+    result = fit_standard_candidate(
+        prepared,
+        selection,
+        0,
+        StandardModelCandidate(0, BackgroundModel.NONE),
+    )
+
+    assert result.parameter("energy_shift").value == pytest.approx(true_e0, abs=3.0e-5)
+    retained = selection.retained_mask(0)
+    np.testing.assert_array_equal(
+        result.evaluation.energy,
+        sample_energy[retained],
+    )
+
+
+def test_standard_e0_bounds_intersect_physical_range_and_convolution_coverage() -> None:
+    truth = SpectralModelDefinition(
+        energy_shift=parameter(0.05, free=False),
+        elastic_area=parameter(0.8, 0.0, free=False),
+    )
+    prepared, selection = synthetic_problem(
+        truth,
+        sample_energy=np.linspace(-0.8, 0.9, 171),
+        resolution_energy=np.linspace(-0.22, 0.34, 113),
+        resolution_peak_energy=0.075,
+    )
+    selection = selection.with_group_manual_auto_reinclusion(
+        0,
+        selection.padding.spectra[0].auto_mask,
+    )
+    inputs = fitting_core._fit_inputs(prepared, selection, 0, 2)
+    peak = inputs.resolution_peak_energy
+    physical = (float(inputs.energy[0] - peak), float(inputs.energy[-1] - peak))
+    coverage = fitting_core._fixed_convolution_center_coverage(
+        inputs.energy,
+        inputs.plan,
+    )
+
+    bounds = fitting_core._auto_e0_bounds(inputs)
+
+    assert bounds == (max(physical[0], coverage[0]), min(physical[1], coverage[1]))
+    assert bounds != physical
+    assert bounds[0] >= coverage[0]
+    assert bounds[1] <= coverage[1]
+
+
+def test_standard_e0_range_fails_when_physical_and_coverage_do_not_overlap() -> None:
+    sample_energy = np.linspace(1.0, 2.0, 101)
+    truth = SpectralModelDefinition(
+        energy_shift=parameter(0.0, free=False),
+        elastic_area=parameter(0.8, 0.0, free=False),
+    )
+    prepared, selection = synthetic_problem(truth, sample_energy=sample_energy)
+    selection = selection.with_group_manual_auto_reinclusion(
+        0,
+        selection.padding.spectra[0].auto_mask,
+    )
+
+    with pytest.raises(FittingError, match="no usable finite E0 interval"):
+        fit_standard_candidate(
+            prepared,
+            selection,
+            0,
+            StandardModelCandidate(0, BackgroundModel.NONE),
+        )
 
 
 def test_standard_initialization_above_two_lorentzians_is_explicitly_unvalidated() -> (

@@ -286,6 +286,9 @@ def _candidate_result(
                 linear_trend=residual_trend,
                 lag1_correlation=residual_lag,
                 longest_same_sign_run=residual_run,
+                longest_same_sign_run_start_energy=-0.2,
+                longest_same_sign_run_end_energy=0.2,
+                longest_same_sign_run_energy_span=0.4,
             ),
             alternative_starts=starts,
             selected_start_index=0,
@@ -419,6 +422,7 @@ def _recommendation_semantics(
 ) -> tuple[object, ...]:
     additional = recommendation.additional_complexity
     return (
+        _reference_name(recommendation.best_supported_candidate),
         recommendation.recommended_candidate.name
         if recommendation.recommended_candidate is not None
         else None,
@@ -491,6 +495,117 @@ def test_marginal_discrimination_keeps_primary_and_strong_alternative() -> None:
         False
     )
     assert first.resolution_reliability.provenance_gap is not None
+
+
+def test_independent_noise_residuals_remain_adequate_and_supported() -> None:
+    scores = _scores(((20.0, 10.0, 0.0), (30.0, 20.0, 10.0), (40.0, 30.0, 20.0)))
+
+    recommendation = recommend_standard_candidates(_results(scores))
+
+    assert recommendation.primary_residual_adequacy is ResidualAdequacy.ADEQUATE
+    assert recommendation.best_supported_candidate is (recommendation.most_recommended)
+    assert recommendation.best_supported_candidate is not None
+    assert recommendation.best_supported_candidate.candidate == StandardModelCandidate(
+        0,
+        BackgroundModel.LINEAR,
+    )
+
+
+def test_correlated_low_rms_serial_evidence_is_one_questionable_family() -> None:
+    scores = _scores(((20.0, 10.0, 0.0), (30.0, 20.0, 10.0), (40.0, 30.0, 20.0)))
+    evidence = _results(
+        scores,
+        overrides={
+            (0, BackgroundModel.LINEAR): {
+                "residual_rms": 1.0,
+                "residual_lag": 0.6,
+                "residual_run": 24,
+                "residual_trend": 1.2,
+                "residual_maximum": 3.0,
+            }
+        },
+    )
+
+    recommendation = recommend_standard_candidates(evidence)
+
+    assert recommendation.primary_residual_adequacy is (ResidualAdequacy.QUESTIONABLE)
+    assert recommendation.primary_family_support is (
+        PrimaryFamilySupport.SUPPORTED_WITH_CAUTION
+    )
+    assert recommendation.best_supported_candidate is not None
+    assert recommendation.best_supported_candidate.candidate == StandardModelCandidate(
+        0,
+        BackgroundModel.LINEAR,
+    )
+    assert recommendation.most_recommended is (recommendation.best_supported_candidate)
+
+
+def test_gross_residual_scale_mismatch_retains_best_supported_candidate() -> None:
+    scores = _scores(((10.0, 0.0, 20.0), (30.0, 20.0, 40.0), (50.0, 40.0, 60.0)))
+    evidence = _results(
+        scores,
+        overrides={key: {"residual_rms": 1.7} for key in scores},
+    )
+
+    recommendation = recommend_standard_candidates(evidence)
+
+    assert recommendation.primary_residual_adequacy is ResidualAdequacy.INADEQUATE
+    assert recommendation.most_recommended is None
+    assert recommendation.primary_family_support is (
+        PrimaryFamilySupport.NO_ADEQUATE_MODEL
+    )
+    assert recommendation.best_supported_candidate is not None
+    assert recommendation.best_supported_candidate.candidate == StandardModelCandidate(
+        0,
+        BackgroundModel.CONSTANT,
+    )
+
+
+def test_best_supported_candidate_is_independent_of_residual_classification() -> None:
+    scores = _scores(
+        (
+            (100.0, 90.0, 80.0),
+            (93.0, 83.0, 73.0),
+            (120.0, 110.0, 100.0),
+        )
+    )
+    adequate_evidence = _results(scores)
+    inadequate_zero_l_evidence = _results(
+        scores,
+        overrides={key: {"residual_rms": 1.7} for key in scores if key[0] == 0},
+    )
+
+    adequate = recommend_standard_candidates(adequate_evidence)
+    inadequate_zero_l = recommend_standard_candidates(inadequate_zero_l_evidence)
+
+    assert adequate.transition_assessments[0].information_criteria == (
+        inadequate_zero_l.transition_assessments[0].information_criteria
+    )
+    assert adequate.transition_assessments[0].matched_backgrounds == (
+        inadequate_zero_l.transition_assessments[0].matched_backgrounds
+    )
+    assert adequate.transition_assessments[0].background_robustness is (
+        inadequate_zero_l.transition_assessments[0].background_robustness
+    )
+    assert adequate.best_supported_candidate is not None
+    assert inadequate_zero_l.best_supported_candidate is not None
+    assert adequate.best_supported_candidate.candidate == StandardModelCandidate(
+        1,
+        BackgroundModel.LINEAR,
+    )
+    assert inadequate_zero_l.best_supported_candidate.candidate == (
+        adequate.best_supported_candidate.candidate
+    )
+    assert adequate.most_recommended is not None
+    assert inadequate_zero_l.most_recommended is not None
+    assert adequate.most_recommended.candidate == StandardModelCandidate(
+        0,
+        BackgroundModel.LINEAR,
+    )
+    assert inadequate_zero_l.most_recommended.candidate == StandardModelCandidate(
+        1,
+        BackgroundModel.LINEAR,
+    )
 
 
 def test_clear_identifiable_and_background_robust_complexity_upgrades() -> None:
@@ -670,6 +785,9 @@ def test_ic_supported_inadequate_higher_family_does_not_replace_adequate_primary
         auto_module.ComplexityEvidence.CLEAR,
         auto_module.ComplexityEvidence.STRONG,
     }
+    assert recommendation.best_supported_candidate is (
+        recommendation.additional_complexity.proposed_candidate
+    )
     assert (
         recommendation.comparator
         is recommendation.additional_complexity.proposed_candidate
@@ -825,6 +943,85 @@ def test_inadequate_two_l_exhausts_auto_scope_without_promoting_a_model() -> Non
     )
     with pytest.raises(ValueError, match="final evaluated 2L candidate"):
         replace(recommendation, comparator=other_two_l)
+
+
+def test_all_inadequate_traversal_reports_final_severe_limitation_once() -> None:
+    scores = _scores(
+        (
+            (140.0, 135.0, 130.0),
+            (115.0, 110.0, 105.0),
+            (90.0, 85.0, 80.0),
+        )
+    )
+    overrides: dict[tuple[int, BackgroundModel], dict[str, Any]] = {
+        key: {"residual_rms": 1.7} for key in scores
+    }
+    overrides[(2, BackgroundModel.LINEAR)]["covariance_available"] = False
+
+    recommendation = recommend_standard_candidates(
+        _results(scores, overrides=overrides)
+    )
+
+    assert recommendation.most_recommended is None
+    assert recommendation.primary_family_support is (
+        PrimaryFamilySupport.NO_ADEQUATE_MODEL
+    )
+    assert recommendation.additional_complexity.status is (
+        AdditionalComplexityStatus.SEARCH_LIMIT_REACHED
+    )
+    final_transition = recommendation.transition_assessments[-1]
+    assert final_transition.status is (
+        AdditionalComplexityStatus.SUPPORTED_BUT_RESIDUALLY_INADEQUATE
+    )
+    assert tuple(item.code for item in final_transition.interpretation_limitations) == (
+        InterpretationLimitationCode.COVARIANCE_UNAVAILABLE,
+    )
+    assert recommendation.interpretation_limitations == (
+        final_transition.interpretation_limitations
+    )
+
+
+def test_all_inadequate_traversal_deduplicates_multiple_final_limitations() -> None:
+    scores = _scores(
+        (
+            (140.0, 135.0, 130.0),
+            (115.0, 110.0, 105.0),
+            (90.0, 85.0, 80.0),
+        )
+    )
+    overrides: dict[tuple[int, BackgroundModel], dict[str, Any]] = {
+        key: {"residual_rms": 1.7} for key in scores
+    }
+    overrides[(2, BackgroundModel.LINEAR)].update(
+        covariance_available=False,
+        jacobian_rank_deficit=1,
+        active_bounds=("lorentzian_1_area",),
+    )
+
+    recommendation = recommend_standard_candidates(
+        _results(scores, overrides=overrides)
+    )
+
+    limitations = recommendation.interpretation_limitations
+    limitation_keys = tuple(
+        (item.code, item.message, item.candidate.candidate) for item in limitations
+    )
+    assert len(limitation_keys) == len(set(limitation_keys))
+    assert {item.code for item in limitations} == {
+        InterpretationLimitationCode.COVARIANCE_UNAVAILABLE,
+        InterpretationLimitationCode.JACOBIAN_RANK_DEFICIENT,
+        InterpretationLimitationCode.MATERIAL_ACTIVE_BOUND,
+    }
+    assert recommendation.transition_assessments[-1].interpretation_limitations == (
+        limitations
+    )
+    assert recommendation.most_recommended is None
+    assert recommendation.primary_family_support is (
+        PrimaryFamilySupport.NO_ADEQUATE_MODEL
+    )
+    assert recommendation.additional_complexity.status is (
+        AdditionalComplexityStatus.SEARCH_LIMIT_REACHED
+    )
 
 
 def test_advisory_condition_width_and_nuisance_correlation_are_not_hard_gates() -> None:

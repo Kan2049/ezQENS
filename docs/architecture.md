@@ -308,9 +308,13 @@ adequacy judgement, or AutoFit policy.
 Fit results expose component-resolved model values, raw/standardized residuals,
 chi-square, reduced chi-square, unscaled absolute-sigma covariance/error
 status, Jacobian singular values/rank/condition, bound activity, residual
-structure, multistart outcomes, and threshold-free identifiability metrics.
+structure including physical-energy location/span for the longest same-sign
+run, multistart outcomes, and threshold-free identifiability metrics.
 AIC/AICc/BIC use one declared convention. Candidate generation and evaluation
-are separate from the unresolved Auto recommendation/adequacy policy.
+remain separate from recommendation. AutoFit exposes a best-supported candidate
+under adjacent family-envelope AICc/BIC and matched-background evidence,
+independent of residual-dependent transition disposition, separately from the
+stricter residual-adequacy-endorsed Most Recommended result.
 
 `batch` orders spectra and invokes the single-spectrum service repeatedly.
 Each invocation returns an independent `FitResult`. Previous-successful-fit

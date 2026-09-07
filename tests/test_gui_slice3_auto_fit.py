@@ -20,6 +20,7 @@ from PySide6.QtWidgets import QApplication, QMenu, QPushButton, QToolButton
 import ezqens.gui.main_window as main_window_module
 from ezqens.domain import QBins, ReducedDataset, Spectrum, SpectrumRole
 from ezqens.fitting import (
+    BACKGROUND_COMPONENT,
     ELASTIC_COMPONENT,
     BackgroundModel,
     CandidateFitResult,
@@ -150,6 +151,7 @@ def test_autofit_dialog_preview_and_explicit_adoption_are_group_local(
         candidate
         for candidate in successful
         if candidate.candidate.lorentzian_count == 2
+        and candidate.candidate.background is BackgroundModel.CONSTANT
     )
     assert chosen.fit is not None
 
@@ -415,6 +417,13 @@ def test_autofit_dialog_preview_and_explicit_adoption_are_group_local(
     assert set(window.manual_fit_editor.parameter_controls) == set(
         adopted_model.parameter_references()
     )
+    slope_reference = ParameterReference(
+        BACKGROUND_COMPONENT,
+        ParameterFamily.SLOPE,
+    )
+    assert slope_reference in window.manual_fit_editor.parameter_controls
+    assert adopted_model.b1 == ManualParameterIntent(0.0, free=False)
+    assert window.manual_fit_editor.model_label.text().endswith("B0")
     assert adopted_model.energy_shift is None
     assert len(adopted_model.center_groups) == 1
     center_references = tuple(

@@ -107,6 +107,7 @@ class _FitInputs:
     energy: FloatArray
     intensity: FloatArray
     sigma: FloatArray
+    resolution_peak_energy: float
     group_label: str
     q_value: float
 
@@ -528,11 +529,16 @@ def _fit_inputs(
             str(error),
             group_index=group_index,
         ) from error
+    resolution = prepared_resolution.spectra[group_index]
+    resolution_peak_energy = float(
+        resolution.energy[int(np.argmax(resolution.normalized_intensity))]
+    )
     return _FitInputs(
         plan=plan,
         energy=energy,
         intensity=intensity,
         sigma=sigma,
+        resolution_peak_energy=resolution_peak_energy,
         group_label=spectrum.group_label,
         q_value=q_value,
     )
@@ -696,7 +702,14 @@ def _profile_fwhm(energy: FloatArray, values: FloatArray) -> float:
     return width
 
 
-def _residual_diagnostics(residuals: FloatArray) -> ResidualDiagnostics:
+def _residual_diagnostics(
+    residuals: FloatArray,
+    energy: FloatArray,
+) -> ResidualDiagnostics:
+    if residuals.size != energy.size or residuals.size == 0:
+        raise FittingError(
+            "residual diagnostics require matching nonempty residual and energy arrays"
+        )
     centered_coordinate = np.linspace(-0.5, 0.5, residuals.size)
     linear_trend = float(np.polyfit(centered_coordinate, residuals, 1)[0])
     lag1: float | None = None
@@ -710,10 +723,21 @@ def _residual_diagnostics(residuals: FloatArray) -> ResidualDiagnostics:
             lag1 = correlation
     signs = residuals >= 0.0
     longest = 1
+    longest_start = 0
     current = 1
+    current_start = 0
     for index in range(1, signs.size):
-        current = current + 1 if signs[index] == signs[index - 1] else 1
-        longest = max(longest, current)
+        if signs[index] == signs[index - 1]:
+            current += 1
+        else:
+            current = 1
+            current_start = index
+        if current > longest:
+            longest = current
+            longest_start = current_start
+    longest_end = longest_start + longest - 1
+    start_energy = float(energy[longest_start])
+    end_energy = float(energy[longest_end])
     return ResidualDiagnostics(
         mean=float(np.mean(residuals)),
         rms=float(np.sqrt(np.mean(np.square(residuals)))),
@@ -721,6 +745,9 @@ def _residual_diagnostics(residuals: FloatArray) -> ResidualDiagnostics:
         linear_trend=linear_trend,
         lag1_correlation=lag1,
         longest_same_sign_run=longest,
+        longest_same_sign_run_start_energy=start_energy,
+        longest_same_sign_run_end_energy=end_energy,
+        longest_same_sign_run_energy_span=abs(end_energy - start_energy),
     )
 
 
@@ -803,8 +830,10 @@ def _validate_center_coverage(
     group_index: int | None = None,
     reference: ParameterReference | None = None,
 ) -> None:
-    allowed_lower = float(inputs.energy[-1] - plan.convolution_energy[-1])
-    allowed_upper = float(inputs.energy[0] - plan.convolution_energy[0])
+    allowed_lower, allowed_upper = _fixed_convolution_center_coverage(
+        inputs.energy,
+        plan,
+    )
     if configuration.free and (
         not np.isfinite(configuration.lower_bound)
         or not np.isfinite(configuration.upper_bound)
@@ -825,6 +854,39 @@ def _validate_center_coverage(
             group_index=group_index,
             parameter=reference,
         )
+
+
+def _fixed_convolution_center_coverage(
+    target_energy: FloatArray,
+    plan: ConvolutionPlan,
+) -> tuple[float, float]:
+    """Return shifts whose translated targets remain on the fixed profile."""
+
+    return (
+        float(target_energy[-1] - plan.convolution_energy[-1]),
+        float(target_energy[0] - plan.convolution_energy[0]),
+    )
+
+
+def _auto_e0_bounds(inputs: _FitInputs) -> tuple[float, float]:
+    """Intersect the physical elastic-alignment range with fixed-grid coverage."""
+
+    plan = inputs.plan
+    resolution_peak_energy = inputs.resolution_peak_energy
+    physical_lower = float(inputs.energy[0] - resolution_peak_energy)
+    physical_upper = float(inputs.energy[-1] - resolution_peak_energy)
+    coverage_lower, coverage_upper = _fixed_convolution_center_coverage(
+        inputs.energy,
+        plan,
+    )
+    lower = max(physical_lower, coverage_lower)
+    upper = min(physical_upper, coverage_upper)
+    if not np.isfinite(lower) or not np.isfinite(upper) or lower >= upper:
+        raise FittingError(
+            "standard AutoFit has no usable finite E0 interval after intersecting "
+            "the retained-window alignment range with fixed convolution coverage"
+        )
+    return lower, upper
 
 
 def _validate_parameter_tie_integrity(model: SpectralModelDefinition) -> None:
@@ -1332,7 +1394,7 @@ def _fit_with_starts(
         resolution_fwhm_to_sample_spacing=(
             None if resolution_fwhm is None else resolution_fwhm / median_sample_spacing
         ),
-        residual=_residual_diagnostics(standardized),
+        residual=_residual_diagnostics(standardized, inputs.energy),
         alternative_starts=tuple(alternative_starts),
         selected_start_index=best.start_index,
         total_elapsed_seconds=sum(item.elapsed_seconds for item in solutions),
@@ -1409,16 +1471,30 @@ def _provisional_elastic(
     energy: FloatArray,
     data: FloatArray,
     sigma: FloatArray,
+    *,
+    e0_bounds: tuple[float, float],
+    resolution_peak_energy: float,
 ) -> tuple[float, float]:
-    window = float(energy[-1] - energy[0])
-    resolution_width = _profile_fwhm(plan.resolution_energy, plan.resolution_values)
-    span = min(0.15 * window, max(3.0 * resolution_width, 5.0 * plan.spacing))
+    lower, upper = e0_bounds
+    peak_alignment_shifts = energy - resolution_peak_energy
+    shifts = np.unique(
+        np.clip(
+            np.concatenate(
+                (
+                    np.asarray([lower, upper, np.clip(0.0, lower, upper)]),
+                    peak_alignment_shifts,
+                )
+            ),
+            lower,
+            upper,
+        )
+    )
     weights = 1.0 / np.square(sigma)
     edge_count = max(3, energy.size // 12)
     baseline = float(np.median(np.r_[data[:edge_count], data[-edge_count:]]))
     centered = data - baseline
     best = (math.inf, 0.0, 0.0)
-    for shift in np.linspace(-span, span, 41):
+    for shift in shifts:
         shape = np.interp(
             energy - shift,
             plan.resolution_energy,
@@ -1447,7 +1523,15 @@ def _standard_initializations(
     energy = inputs.energy
     data = inputs.intensity
     sigma = inputs.sigma
-    e0, elastic_area = _provisional_elastic(plan, energy, data, sigma)
+    e0_bounds = _auto_e0_bounds(inputs)
+    e0, elastic_area = _provisional_elastic(
+        plan,
+        energy,
+        data,
+        sigma,
+        e0_bounds=e0_bounds,
+        resolution_peak_energy=inputs.resolution_peak_energy,
+    )
     elastic_shape = np.interp(
         energy - e0,
         plan.resolution_energy,
@@ -1475,7 +1559,6 @@ def _standard_initializations(
         4.0 * resolution_width,
     )
     window = float(energy[-1] - energy[0])
-    e0_span = min(0.2 * window, 0.3)
     gamma_floor = max(plan.spacing * 1.0e-5, np.finfo(float).eps * window)
 
     def parameter(
@@ -1493,7 +1576,7 @@ def _standard_initializations(
 
     def build(components: Sequence[tuple[float, float]]) -> SpectralModelDefinition:
         return SpectralModelDefinition(
-            energy_shift=parameter(e0, -e0_span, e0_span),
+            energy_shift=parameter(e0, *e0_bounds),
             elastic_area=parameter(max(elastic_area, 1.0e-10), 0.0),
             lorentzians=tuple(
                 LorentzianComponent(

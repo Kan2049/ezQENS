@@ -350,6 +350,7 @@ class AutoFitRecommendation:
     """Production AutoFit recommendation with inspectable candidate references."""
 
     most_recommended: CandidateFitResult | None
+    best_supported_candidate: CandidateFitResult | None
     recommended_lorentzian_count: int | None
     primary_family_support: PrimaryFamilySupport
     primary_residual_adequacy: ResidualAdequacy
@@ -371,6 +372,12 @@ class AutoFitRecommendation:
         warnings = tuple(self.scientific_warnings)
         _validate_complete_candidate_results(candidates)
         successful = _successful_results(candidates)
+        expected_best_supported = _best_supported_from_evidence(successful)
+        if self.best_supported_candidate is not expected_best_supported:
+            raise ValueError(
+                "best_supported_candidate must match the IC/background-supported "
+                "family evidence"
+            )
 
         def is_marginal_eligibility_traversal(
             assessment: AdditionalComplexityAssessment,
@@ -709,7 +716,6 @@ _RUN_STRONG = 18
 _TREND_STRONG = 0.8
 _MAXIMUM_STRONG = 5.0
 _RMS_EXTREME_INADEQUATE = 1.6
-_LAG_EXTREME_INADEQUATE = 0.45
 _IC_STRONG_AICC = 10.0
 _IC_STRONG_BIC = 6.0
 _IC_CLEAR_AICC = 6.0
@@ -885,29 +891,31 @@ def _residual_adequacy(result: CandidateFitResult) -> ResidualAdequacy:
     lag = (
         abs(residual.lag1_correlation) if residual.lag1_correlation is not None else 0.0
     )
+    serial_moderate = (
+        lag > _LAG_MODERATE
+        or residual.longest_same_sign_run >= _RUN_MODERATE
+        or abs(residual.linear_trend) > _TREND_MODERATE
+    )
+    serial_strong = (
+        lag > _LAG_STRONG
+        or residual.longest_same_sign_run >= _RUN_STRONG
+        or abs(residual.linear_trend) > _TREND_STRONG
+    )
     moderate = sum(
         (
             residual.rms > _RMS_MODERATE,
-            lag > _LAG_MODERATE,
-            residual.longest_same_sign_run >= _RUN_MODERATE,
-            abs(residual.linear_trend) > _TREND_MODERATE,
+            serial_moderate,
             residual.maximum_absolute > _MAXIMUM_MODERATE,
         )
     )
     strong = sum(
         (
             residual.rms > _RMS_STRONG,
-            lag > _LAG_STRONG,
-            residual.longest_same_sign_run >= _RUN_STRONG,
-            abs(residual.linear_trend) > _TREND_STRONG,
+            serial_strong,
             residual.maximum_absolute > _MAXIMUM_STRONG,
         )
     )
-    if (
-        strong >= 2
-        or residual.rms > _RMS_EXTREME_INADEQUATE
-        or lag > _LAG_EXTREME_INADEQUATE
-    ):
+    if strong >= 2 or residual.rms > _RMS_EXTREME_INADEQUATE:
         return ResidualAdequacy.INADEQUATE
     if strong >= 1 or moderate >= 2:
         return ResidualAdequacy.QUESTIONABLE
@@ -938,6 +946,38 @@ def _best_recommendation_candidate(
             _BACKGROUND_RANK[result.candidate.background],
         ),
     )
+
+
+def _best_supported_from_evidence(
+    successful: tuple[CandidateFitResult, ...],
+) -> CandidateFitResult | None:
+    """Return the IC-envelope candidate supported by IC/background evidence."""
+
+    if _best_family(successful, 0) is None:
+        return None
+    supported_count = 0
+    supported_evidence = {
+        ComplexityEvidence.CLEAR,
+        ComplexityEvidence.STRONG,
+    }
+    supported_backgrounds = {
+        BackgroundRobustness.ROBUST_ACROSS_B0_B1,
+        BackgroundRobustness.SUPPORTED_IN_ONE_ALLOWED_BACKGROUND,
+    }
+    for target_count in (1, 2):
+        target, information, _, robustness = _transition(
+            successful,
+            supported_count,
+            target_count,
+        )
+        if (
+            target is None
+            or information.evidence not in supported_evidence
+            or robustness not in supported_backgrounds
+        ):
+            break
+        supported_count = target_count
+    return _best_family(successful, supported_count)
 
 
 def _classify_information_criteria(
@@ -1435,6 +1475,7 @@ def recommend_standard_candidates(
         )
         return AutoFitRecommendation(
             most_recommended=None,
+            best_supported_candidate=None,
             recommended_lorentzian_count=None,
             primary_family_support=(
                 PrimaryFamilySupport.NUMERICAL_RECOMMENDATION_UNAVAILABLE
@@ -1720,7 +1761,9 @@ def recommend_standard_candidates(
 
     final_adequacy = _residual_adequacy(current)
     final_identifiability, final_limitations = _identifiability(current)
-    limitations.extend(final_limitations)
+    limitations.extend(
+        limitation for limitation in final_limitations if limitation not in limitations
+    )
     if final_adequacy is ResidualAdequacy.INADEQUATE:
         comparator = current
         strong_alternative = None
@@ -1765,8 +1808,11 @@ def recommend_standard_candidates(
             )
         warnings.extend(_candidate_warnings(most_recommended))
 
+    best_supported_candidate = _best_supported_from_evidence(successful)
+
     return AutoFitRecommendation(
         most_recommended=most_recommended,
+        best_supported_candidate=best_supported_candidate,
         recommended_lorentzian_count=(
             current.candidate.lorentzian_count if most_recommended is not None else None
         ),

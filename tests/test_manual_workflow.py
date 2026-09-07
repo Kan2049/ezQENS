@@ -308,9 +308,15 @@ def test_single_q_autofit_adopts_typed_fitted_candidate_without_label_parsing() 
         for item in adopted.lorentzians
     )
     assert adopted.b0 is not None
+    assert fitted.b0 is not None
+    assert adopted.b0.current_value == fitted.b0.initial_value
+    assert adopted.b0.free is fitted.b0.free
     assert adopted.b0.user_lower_limit is None
     assert adopted.b0.user_upper_limit is None
     assert adopted.b1 is not None
+    assert fitted.b1 is not None
+    assert adopted.b1.current_value == fitted.b1.initial_value
+    assert adopted.b1.free is fitted.b1.free
     assert adopted.b1.user_lower_limit is None
     assert adopted.b1.user_upper_limit is None
     adopted_result = adoption.fit_result
@@ -476,6 +482,104 @@ def test_single_q_autofit_adopts_typed_fitted_candidate_without_label_parsing() 
         WorkflowDiagnosticCode.AUTO_FIT_CONTEXT_CHANGED
     )
     assert working_draft.setup(0).model is prior_model
+
+
+def test_autofit_none_and_b0_adoption_use_editable_manual_backgrounds() -> None:
+    project, sample, _ = configured_project(q_values=(0.5,))
+    draft = open_manual_fit_draft(project, sample)
+    outcome = run_single_q_auto_fit(project, draft, 0)
+
+    none_candidate = next(
+        candidate
+        for candidate in outcome.recommendation.candidate_results
+        if candidate.success
+        and candidate.candidate.lorentzian_count == 0
+        and candidate.candidate.background is BackgroundModel.NONE
+    )
+    none_adoption = adopt_single_q_auto_fit_candidate(
+        project,
+        draft,
+        outcome,
+        none_candidate,
+    )
+    assert none_adoption.success
+    assert none_adoption.adopted_draft is not None
+    none_model = none_adoption.adopted_draft.setup(0).model
+    assert none_model is not None
+    assert none_model.background is BackgroundModel.NONE
+    assert none_model.b0 is None
+    assert none_model.b1 is None
+    assert all(
+        reference.family not in (ParameterFamily.OFFSET, ParameterFamily.SLOPE)
+        for reference in none_model.parameter_references()
+    )
+
+    b0_candidate = next(
+        candidate
+        for candidate in outcome.recommendation.candidate_results
+        if candidate.success
+        and candidate.candidate.lorentzian_count == 0
+        and candidate.candidate.background is BackgroundModel.CONSTANT
+    )
+    assert b0_candidate.fit is not None
+    fitted_b0 = b0_candidate.fit.fitted_model
+    assert fitted_b0 is not None
+    assert fitted_b0.background is BackgroundModel.CONSTANT
+    assert fitted_b0.b0 is not None
+    assert fitted_b0.b1 is None
+
+    b0_adoption = adopt_single_q_auto_fit_candidate(
+        project,
+        draft,
+        outcome,
+        b0_candidate,
+    )
+    assert b0_adoption.success
+    assert b0_adoption.adopted_draft is not None
+    adopted_draft = b0_adoption.adopted_draft
+    adopted_b0 = adopted_draft.setup(0).model
+    assert adopted_b0 is not None
+    assert adopted_b0.background is BackgroundModel.LINEAR
+    assert adopted_b0.b0 is not None
+    assert adopted_b0.b0.current_value == fitted_b0.b0.initial_value
+    assert adopted_b0.b0.user_lower_limit is None
+    assert adopted_b0.b0.user_upper_limit is None
+    assert adopted_b0.b0.free is fitted_b0.b0.free
+    assert adopted_b0.b1 == ManualParameterIntent(0.0, free=False)
+    assert {
+        reference.family
+        for reference in adopted_b0.parameter_references()
+        if reference.component == BACKGROUND_COMPONENT
+    } == {ParameterFamily.OFFSET, ParameterFamily.SLOPE}
+
+    materialized = materialize_manual_setup(project, adopted_draft, 0)
+    assert materialized.fit_model.background is BackgroundModel.LINEAR
+    assert materialized.fit_model.b0 is not None
+    assert materialized.fit_model.b1 is not None
+    assert materialized.fit_model.b1.initial_value == 0.0
+    assert not materialized.fit_model.b1.free
+    readiness = manual_workflow_readiness(project, adopted_draft, 0)
+    assert readiness.runnable
+    preview = preview_manual_fit(project, adopted_draft, 0)
+    np.testing.assert_allclose(
+        preview.retained_evaluation.total,
+        b0_candidate.fit.evaluation.total,
+        rtol=1.0e-13,
+        atol=1.0e-13,
+    )
+
+    manual_result = run_manual_fit(project, adopted_draft, 0)
+    assert manual_result.diagnostics.optimizer_success
+    assert manual_result.fitted_model is not None
+    assert manual_result.fitted_model.background is BackgroundModel.LINEAR
+    assert manual_result.fitted_model.b1 is not None
+    assert manual_result.fitted_model.b1.initial_value == 0.0
+    assert not manual_result.fitted_model.b1.free
+    assert manual_result.parameter("b1").value == 0.0
+    assert not manual_result.parameter("b1").free
+    assert manual_result.statistics.free_parameters == (
+        b0_candidate.fit.statistics.free_parameters
+    )
 
 
 def lorentzian_identity(name: str) -> ComponentIdentity:

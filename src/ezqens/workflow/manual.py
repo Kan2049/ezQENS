@@ -1570,6 +1570,12 @@ def _manual_state_from_fitted_model(
     """Translate typed fitted topology without labels or scientific inference."""
 
     intent = _manual_intent_from_configuration
+    background = model.background
+    b0 = intent(model.b0) if model.b0 else None
+    b1 = intent(model.b1) if model.b1 else None
+    if background is BackgroundModel.CONSTANT:
+        background = BackgroundModel.LINEAR
+        b1 = ManualParameterIntent(current_value=0.0, free=False)
     adopted_center_groups = [
         ManualCenterGroupState(group.group_id, intent(group.parameter))
         for group in model.center_groups
@@ -1601,9 +1607,9 @@ def _manual_state_from_fitted_model(
             )
             for component in model.lorentzians
         ),
-        background=model.background,
-        b0=intent(model.b0) if model.b0 else None,
-        b1=intent(model.b1) if model.b1 else None,
+        background=background,
+        b0=b0,
+        b1=b1,
         center_groups=tuple(adopted_center_groups),
         elastic_center_group=(
             model.elastic_center_group

@@ -641,7 +641,23 @@ class ManualFitEditor(QFrame):
             self._model.parameter_references(),
             start=1,
         ):
-            estimate = result.parameter_by_reference(reference)
+            try:
+                estimate = result.parameter_by_reference(reference)
+            except KeyError:
+                slope = self._model.b1
+                adopted_b0_slope = (
+                    reference.component == BACKGROUND_COMPONENT
+                    and reference.family is ParameterFamily.SLOPE
+                    and self._model.background is BackgroundModel.LINEAR
+                    and slope is not None
+                    and not slope.free
+                    and slope.current_value == 0.0
+                    and result.fitted_model is not None
+                    and result.fitted_model.background is BackgroundModel.CONSTANT
+                )
+                if adopted_b0_slope:
+                    continue
+                raise
             name_text = self._result_reference_label(reference)
             metadata = self._metadata.get(reference, _fallback_metadata(reference))
             name = QLabel(name_text)

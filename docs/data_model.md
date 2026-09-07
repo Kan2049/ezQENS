@@ -344,7 +344,9 @@ to retained original sample coordinates, component-resolved values, raw and
 standardized residuals, absolute-sigma
 covariance/correlation, chi-square, reduced chi-square, AIC/AICc/BIC,
 point/free-parameter counts, convergence, bound activity, Jacobian diagnostics,
-and provenance. `ManualFitReadiness` reports a runnable boolean plus structured
+and provenance. Residual diagnostics preserve the physical start/end energy and
+span of the longest same-sign run in addition to its length, lag-1 correlation,
+trend, RMS, and maximum magnitude. `ManualFitReadiness` reports a runnable boolean plus structured
 severity/code diagnostics from the same validation used by `fit_single_q()`, with
 group/component/parameter references where applicable. This preflight includes
 finite initial model, raw-residual, and standardized-residual evaluation at the
@@ -360,8 +362,9 @@ search structure; it does not contain a recommendation.
 
 AutoFitRecommendation is a GUI-independent policy result over existing
 CandidateFitResult references for the fixed 0L/1L/2L × NONE/B0/B1 scope. It
-does not duplicate FitResult arrays. It records the Most Recommended concrete
-candidate and Lorentzian count, primary-family support, selected-family
+does not duplicate FitResult arrays. It records both the best-supported concrete
+candidate under traversed family-envelope AICc/BIC evidence and the stricter
+Most Recommended adequacy-endorsed candidate and Lorentzian count, primary-family support, selected-family
 residual adequacy and identifiability, Strong Alternative, Comparator, severe
 interpretation limitations, advisory scientific warnings, resolution-
 reliability provenance availability, the searched scope, and the complete
@@ -374,7 +377,11 @@ evaluated INADEQUATE classification.
 
 Family IC-envelope representatives are distinct from concrete recommendation
 candidates. A family envelope retains the unfiltered minimum-AICc/minimum-BIC
-evidence across numerically usable backgrounds. The concrete family candidate
+evidence across numerically usable backgrounds. `best_supported_candidate`
+retains the minimum-AICc envelope candidate from the last adjacent family
+reached using clear/strong IC evidence with matched-background support. Its
+family traversal is derived directly from that typed model-selection evidence,
+not from residual-dependent transition status or adequacy. The concrete family candidate
 is chosen deterministically by AICc only among ADEQUATE or QUESTIONABLE
 residual fits. INADEQUATE candidates remain inspectable evidence but cannot be
 Most Recommended.

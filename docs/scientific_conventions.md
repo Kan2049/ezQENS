@@ -270,7 +270,11 @@ physical process, or establish that complexity above the searched scope is
 absent. Manual arbitrary-N fitting remains separate.
 
 The fixed automatic search scope is 0L/1L/2L × NONE/B0/B1. Candidate fitting
-and recommendation are separate operations. The deterministic policy applies,
+and recommendation are separate operations. The result distinguishes the best
+candidate supported by the traversed diagonal-sigma AICc/BIC evidence from the
+stricter Most Recommended candidate whose residual adequacy is endorsed. The
+best-supported reference is retained even when residual adequacy prevents a
+Most Recommended result. The deterministic policy applies,
 in order:
 
     numerical validity
@@ -279,6 +283,16 @@ in order:
       -> matched-background robustness
       -> component identifiability
       -> recommendation and interpretation information
+
+Every standard candidate uses one common shared-`E0` search interval. Let
+`E_R,peak` be the peak coordinate on the accepted measured-resolution grid and
+`[E_min, E_max]` the retained fitting window. The physical
+alignment interval is `[E_min - E_R,peak, E_max - E_R,peak]`; AutoFit intersects
+it with the existing legal fixed-convolution center coverage. An empty or
+nonfinite intersection fails explicitly. The provisional elastic seed aligns
+the measured-resolution template over this complete legal interval. No absolute
+meV cap, zero-centering assumption, profile extrapolation, or convolution-plan
+recentering is introduced.
 
 Family-level AICc/BIC envelopes and concrete recommendation eligibility are
 distinct. Envelope evidence continues to use the minimum relevant information
@@ -292,7 +306,11 @@ primary.
 
 The result separately reports (a) support for the selected primary family and
 (b) the evidence for moving from that family to the next searched Lorentzian
-family. Consequently, a supported primary can coexist with marginal additional
+family. The best-supported candidate is the minimum-AICc family-envelope
+candidate in the last adjacent family reached using only clear/strong AICc/BIC
+evidence with existing matched-background support. This traversal does not use
+residual-dependent transition dispositions or residual adequacy; it retains the
+existing deterministic background tie-break. Consequently, a supported primary can coexist with marginal additional
 complexity, a background-confounded rejected transition, or statistically
 supported but uninterpretable additional structure. A strong alternative and a
 comparator are references to existing candidate results rather than duplicated
@@ -328,14 +346,25 @@ appears supported without background but that evidence disappears with allowed
 B0/B1 backgrounds, only that transition is rejected as background-confounded;
 an otherwise supported simpler primary is not demoted.
 
-Standardized-residual calibration uses moderate flags at RMS > 1.12, absolute
-lag-1 correlation > 0.12, same-sign run >= 12, absolute linear trend > 0.35,
-and maximum absolute residual > 3.8. Strong flags use, respectively, > 1.35,
-> 0.25, >= 18, > 0.8, and > 5.0. A fit is inadequate with at least two strong
-flags, RMS > 1.6, or absolute lag-1 correlation > 0.45; it is questionable
-with at least one strong or two moderate flags. These values and the
-information-criterion boundaries are reviewed M5 policy calibration choices,
-not universal physical constants.
+Standardized-residual calibration uses moderate thresholds at RMS > 1.12,
+absolute lag-1 correlation > 0.12, same-sign run >= 12, absolute linear trend
+> 0.35, and maximum absolute residual > 3.8. Strong thresholds use,
+respectively, > 1.35, > 0.25, >= 18, > 0.8, and > 5.0. Lag-1 correlation,
+same-sign run, and trend are related views of one serial-structure evidence
+family rather than three independent confirmations. Adequacy counting therefore
+uses three evidence families: RMS scale, serial structure, and maximum absolute
+residual. A fit is inadequate with at least two strong evidence families or RMS
+> 1.6; it is questionable with at least one strong family or two moderate
+families. With pointwise sigma but no residual covariance/whitening model,
+serial structure alone can make a result questionable but cannot impose an
+absolute recommendation veto. These values and the information-criterion
+boundaries are reviewed M5 policy calibration choices, not universal physical
+constants.
+
+Residual diagnostics retain lag-1 correlation, longest same-sign run, and
+linear trend individually. The longest run also records its start energy, end
+energy, and physical-energy span on the retained measured coordinates. No
+central, QENS, or outer-window interpretation is inferred from that location.
 
 Severe component-interpretation limitations are covariance/rank failure,
 unavailable free-parameter uncertainty, a materially relevant active bound,
