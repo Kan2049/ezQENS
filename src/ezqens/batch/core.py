@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Collection, Sequence
+from dataclasses import dataclass, replace
 from enum import StrEnum
 
 import numpy as np
@@ -34,6 +34,7 @@ class MultiQFitStatus(StrEnum):
     SUCCESS = "success"
     FAILED = "failed"
     BLOCKED = "blocked"
+    EXCLUDED = "excluded"
     NOT_RUN = "not_run"
 
 
@@ -55,6 +56,7 @@ class MultiQFitOutcome:
     diagnostics: tuple[ManualFitReadinessDiagnostic, ...] = ()
     error_type: str | None = None
     error_message: str | None = None
+    derived_result_excluded: bool = False
 
     def __post_init__(self) -> None:
         diagnostics = tuple(self.diagnostics)
@@ -64,6 +66,8 @@ class MultiQFitOutcome:
             raise ValueError("group_index must be nonnegative")
         if not isinstance(self.status, MultiQFitStatus):
             raise ValueError("status must be a MultiQFitStatus")
+        if not isinstance(self.derived_result_excluded, bool):
+            raise ValueError("derived_result_excluded must be boolean")
         if self.status is MultiQFitStatus.SUCCESS:
             if (
                 self.fit_result is None
@@ -78,6 +82,20 @@ class MultiQFitOutcome:
                 for diagnostic in diagnostics
             ):
                 raise ValueError("BLOCKED requires an error diagnostic")
+        elif self.status is MultiQFitStatus.EXCLUDED:
+            if (
+                any(
+                    value is not None
+                    for value in (
+                        self.fit_result,
+                        self.seed_group_index,
+                        self.error_type,
+                        self.error_message,
+                    )
+                )
+                or diagnostics
+            ):
+                raise ValueError("EXCLUDED must not contain execution evidence")
         elif self.status is MultiQFitStatus.NOT_RUN:
             if (
                 any(
@@ -139,27 +157,13 @@ def _blocked_diagnostic(
     )
 
 
-def _center_mode(component: LorentzianComponent) -> tuple[str, str | None]:
-    if component.center_group is not None:
-        return ("group", component.center_group)
-    if component.center is not None:
-        return ("independent", None)
-    return ("legacy", None)
+def _branch_composition(model: SpectralModelDefinition) -> tuple[object, ...]:
+    """Return only the Method composition that is mandatory across a branch."""
 
-
-def _topology(model: SpectralModelDefinition) -> tuple[object, ...]:
     return (
         model.elastic_area is not None,
-        model.elastic_center_group,
-        model.energy_shift is not None,
         model.background,
-        tuple(
-            (component.identity, _center_mode(component))
-            for component in model.lorentzians
-        ),
-        tuple(group.group_id for group in model.center_groups),
-        tuple((group.group_id, group.members) for group in model.parameter_ties),
-        model.parameter_references(),
+        frozenset(component.identity for component in model.lorentzians),
     )
 
 
@@ -204,14 +208,77 @@ def _seeded_parameter(
     )
 
 
+def _center_slot_references(
+    model: SpectralModelDefinition,
+    reference: ParameterReference,
+) -> tuple[ParameterReference, ...]:
+    if reference.component == ELASTIC_COMPONENT:
+        group_id = model.elastic_center_group
+        independent = False
+    else:
+        component = next(
+            item for item in model.lorentzians if item.identity == reference.component
+        )
+        group_id = component.center_group
+        independent = component.center is not None
+    if group_id is not None:
+        members: list[ParameterReference] = []
+        if model.elastic_area is not None and model.elastic_center_group == group_id:
+            members.append(
+                ParameterReference(ELASTIC_COMPONENT, ParameterFamily.CENTER)
+            )
+        members.extend(
+            ParameterReference(item.identity, ParameterFamily.CENTER)
+            for item in model.lorentzians
+            if item.center_group == group_id
+        )
+        return tuple(members)
+    if independent:
+        return (reference,)
+    members = []
+    if model.elastic_area is not None and model.elastic_center_group is None:
+        members.append(ParameterReference(ELASTIC_COMPONENT, ParameterFamily.CENTER))
+    members.extend(
+        ParameterReference(item.identity, ParameterFamily.CENTER)
+        for item in model.lorentzians
+        if item.center is None and item.center_group is None
+    )
+    return tuple(members)
+
+
+def _target_slot_references(
+    model: SpectralModelDefinition,
+    reference: ParameterReference,
+) -> tuple[ParameterReference, ...]:
+    tie = model.tie_for(reference)
+    if tie is not None:
+        return tie.members
+    if reference.family is ParameterFamily.CENTER:
+        return _center_slot_references(model, reference)
+    return (reference,)
+
+
 def _seed_model_from_result(
     target: SpectralModelDefinition,
     predecessor: FitResult,
 ) -> SpectralModelDefinition:
     def seeded(reference: ParameterReference) -> ParameterConfiguration:
         configuration = target.parameter_configuration(reference)
-        estimate = predecessor.parameter_by_reference(reference)
-        return _seeded_parameter(configuration, estimate.value)
+        if not configuration.free:
+            return configuration
+        source_values = tuple(
+            predecessor.parameter_by_reference(member).value
+            for member in _target_slot_references(target, reference)
+        )
+        if not source_values:
+            raise ValueError("target optimizer parameter has no identity mapping")
+        first = source_values[0]
+        if any(value != first for value in source_values[1:]):
+            raise ValueError(
+                "predecessor values cannot be mapped unambiguously into a target "
+                "shared parameter"
+            )
+        return _seeded_parameter(configuration, first)
 
     energy_shift = None
     if target.energy_shift is not None:
@@ -279,7 +346,7 @@ def _usable_result(
     prepared_resolution: PreparedResolution,
     selection: FittingSelection,
     group_index: int,
-    branch_topology: tuple[object, ...],
+    branch_composition: tuple[object, ...],
 ) -> bool:
     expected_references = tuple(result.configuration.parameter_references())
     result_references = tuple(
@@ -295,7 +362,7 @@ def _usable_result(
         and binding.group_index == group_index
         and result.diagnostics.optimizer_success
         and result.provenance.group_index == group_index
-        and _topology(result.configuration) == branch_topology
+        and _branch_composition(result.configuration) == branch_composition
         and all(np.isfinite(parameter.value) for parameter in result.parameters)
         and len(result_references) == len(set(result_references))
         and set(result_references) == set(expected_references)
@@ -344,6 +411,20 @@ def _physical_side_indices(
     return lower, higher
 
 
+def _validated_group_indices(
+    values: Collection[int],
+    *,
+    group_count: int,
+    name: str,
+) -> frozenset[int]:
+    indices = tuple(values)
+    if any(isinstance(value, bool) or not isinstance(value, int) for value in indices):
+        raise ValueError(f"{name} must contain integer group indices")
+    if any(not 0 <= value < group_count for value in indices):
+        raise ValueError(f"{name} contains a group outside the dataset")
+    return frozenset(indices)
+
+
 def execute_multi_q_branch(
     prepared_resolution: PreparedResolution,
     selection: FittingSelection,
@@ -351,6 +432,8 @@ def execute_multi_q_branch(
     *,
     anchor_group_index: int,
     anchor_fit: FitResult,
+    fit_excluded_groups: Collection[int] = (),
+    derived_result_excluded_groups: Collection[int] = (),
     cancel_requested: Callable[[], bool] | None = None,
     max_nfev: int = 2500,
 ) -> MultiQBranchResult:
@@ -378,26 +461,46 @@ def execute_multi_q_branch(
         raise ValueError("configuration count must match prepared Q-group count")
     if not isinstance(anchor_fit, FitResult):
         raise ValueError("anchor_fit must be a FitResult")
-    branch_topology = _topology(anchor_fit.configuration)
+    branch_composition = _branch_composition(anchor_fit.configuration)
     if not _usable_result(
         anchor_fit,
         prepared_resolution=prepared_resolution,
         selection=selection,
         group_index=anchor_group_index,
-        branch_topology=branch_topology,
+        branch_composition=branch_composition,
     ):
         raise ValueError(
             "anchor_fit must be a usable fit from the active anchor scientific context"
         )
     if isinstance(max_nfev, bool) or not isinstance(max_nfev, int) or max_nfev < 1:
         raise ValueError("max_nfev must be a positive integer")
+    fit_excluded = _validated_group_indices(
+        fit_excluded_groups,
+        group_count=group_count,
+        name="fit_excluded_groups",
+    )
+    derived_excluded = _validated_group_indices(
+        derived_result_excluded_groups,
+        group_count=group_count,
+        name="derived_result_excluded_groups",
+    )
+    if anchor_group_index in fit_excluded:
+        raise ValueError("the anchor group cannot be excluded from spectral fitting")
     lower_indices, higher_indices = _physical_side_indices(
         prepared_resolution,
         anchor_group_index,
     )
 
     outcomes = [
-        MultiQFitOutcome(index, MultiQFitStatus.NOT_RUN) for index in range(group_count)
+        MultiQFitOutcome(
+            index,
+            (
+                MultiQFitStatus.EXCLUDED
+                if index in fit_excluded
+                else MultiQFitStatus.NOT_RUN
+            ),
+        )
+        for index in range(group_count)
     ]
     outcomes[anchor_group_index] = MultiQFitOutcome(
         anchor_group_index,
@@ -411,6 +514,8 @@ def execute_multi_q_branch(
         predecessor = anchor_fit
         predecessor_index = anchor_group_index
         for group_index in indices:
+            if group_index in fit_excluded:
+                continue
             if cancel_requested is not None and cancel_requested():
                 cancelled = True
                 return
@@ -426,10 +531,10 @@ def execute_multi_q_branch(
                     diagnostics=(diagnostic,),
                 )
                 continue
-            if _topology(target) != branch_topology:
+            if _branch_composition(target) != branch_composition:
                 diagnostic = _blocked_diagnostic(
                     group_index,
-                    "target Q model topology does not match the anchor branch",
+                    "target Q model composition does not match the anchor branch",
                 )
                 outcomes[group_index] = MultiQFitOutcome(
                     group_index,
@@ -483,7 +588,7 @@ def execute_multi_q_branch(
                 prepared_resolution=prepared_resolution,
                 selection=selection,
                 group_index=group_index,
-                branch_topology=branch_topology,
+                branch_composition=branch_composition,
             ):
                 outcomes[group_index] = MultiQFitOutcome(
                     group_index,
@@ -513,5 +618,11 @@ def execute_multi_q_branch(
             if cancelled
             else MultiQExecutionStatus.COMPLETED
         ),
-        outcomes=tuple(outcomes),
+        outcomes=tuple(
+            replace(
+                outcome,
+                derived_result_excluded=index in derived_excluded,
+            )
+            for index, outcome in enumerate(outcomes)
+        ),
     )
