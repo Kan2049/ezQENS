@@ -70,7 +70,8 @@ before concrete implementations need them.
 
 ## 3. Current and near-term package boundaries
 
-The names below are target boundaries, not files created by this task.
+The names below include current boundaries and explicitly marked near-term
+targets; a listed boundary does not imply that every later-M6 module exists.
 
 ```text
 ezqens/
@@ -316,10 +317,26 @@ under adjacent family-envelope AICc/BIC and matched-background evidence,
 independent of residual-dependent transition disposition, separately from the
 stricter residual-adequacy-endorsed Most Recommended result.
 
-`batch` orders spectra and invokes the single-spectrum service repeatedly.
-Each invocation returns an independent `FitResult`. Previous-successful-fit
-seeding is an explicit option and does not create parameter coupling. A
-cancellation token is checked between fits and at safe optimizer boundaries.
+`batch` invokes the validated single-spectrum service repeatedly. One branch
+has one anchor-defined topology and independent per-Q `FitResult` values.
+Traversal proceeds outward from the anchor through separate lower-Q and
+higher-Q directions. A successful predecessor supplies execution-time starting
+values to the next target in its direction without creating parameter coupling;
+failed or blocked targets do not seed later fits. Cancellation preserves
+already completed results. The M6-S1 core accepts one usable anchor `FitResult`
+plus already-resolved per-Q model configurations, retains the anchor without
+refitting it, and delegates each target to `manual_fit_readiness()` and
+`fit_single_q()`. It preserves target bounds and Free/Fixed state and adjusts a
+propagated free-parameter value only as needed to form a legal target-local
+starting value; target fixed values are not continuation seeds.
+Cancellation is a caller-owned callback checked between Q fits; it does not
+alter the single-Q optimizer.
+
+AutoFit candidate discovery is outside the batch executor: fresh AutoFit All-Q
+runs the fixed candidate search at the anchor only. One or more selected usable
+anchor candidates may each define a separate branch; all branches reuse the
+same batch executor and share neither results nor seeds. The executor does not
+perform component rematching or convert independent fits into global fitting.
 
 ### 3.6 Derived quantities
 
@@ -370,7 +387,16 @@ projection never mutates stored intent. Cloning copies intent and topology, then
 recomputes center coverage from each target group's own prepared resolution and
 selection; incompatible target constraints block the atomic proposal.
 
-The later PySide6 GUI contains presentation and interaction only. Proposed
+The workflow distinguishes reusable Methods from execution Results. A Method
+contains mandatory model topology and selectively reusable settings; ordinary
+free-parameter Current/initial values belong to execution state, while a fixed
+value remains part of its fixed constraint. A Result belongs to concrete data
+and fitting scope and is not rewritten when its Method changes. AutoFit and
+Manual Fit are alternative creation/refinement paths into this common
+Method/Result lifecycle. Re-running an edited Current Fit replaces the Current
+Result unless the user explicitly saves an additional Result.
+
+The PySide6 GUI contains presentation and interaction only. Its principal
 screens are Import, Spectrum Fit, Batch Results, and Export/Analysis Summary.
 Controllers submit long operations to worker
 infrastructure, receive progress/result messages, and support cancellation.
@@ -396,6 +422,7 @@ comparison; and requires confirmation before applying detected/generated data.
 GUI -> workflow -> core services -> domain
 reporting/export -> result/domain models
 batch -> single-spectrum fitting -> spectral + convolution + diagnostics
+AutoFit discovery -> anchor candidate(s) -> batch branches
 ```
 
 Disallowed dependencies include:
@@ -433,8 +460,11 @@ preview_measured_resolution(sample, resolution, acceptance_decisions,
 prepare_measured_resolution(sample, resolution, acceptance_decisions,
                             support_overrides, auto_padding_overrides)
   -> PreparedResolution
-fit_spectrum(spectrum, resolution, configuration) -> FitResult
-fit_batch(spectra, resolution_map, configuration, cancellation) -> BatchFitResult
+fit_single_q(prepared_resolution, fitting_selection, group_index,
+             configuration) -> FitResult
+execute_multi_q_branch(prepared_resolution, fitting_selection,
+                       configurations_by_group, anchor_group_index,
+                       anchor_fit, cancellation) -> MultiQBranchResult
 derive_qens(batch_result, configuration) -> DerivedQENSResult
 export_analysis(results, reproducibility_summary, destination) -> ExportRecord
 ```

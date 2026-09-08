@@ -32,6 +32,7 @@ from .models import (
     ComponentCurve,
     ComponentFamily,
     ComponentIdentity,
+    FitContextBinding,
     FitDiagnostics,
     FitProvenance,
     FitResult,
@@ -1442,6 +1443,11 @@ def _fit_with_starts(
             ),
         ),
         fitted_model=fitted_model,
+        context_binding=FitContextBinding(
+            prepared_resolution=prepared_resolution,
+            selection=selection,
+            group_index=group_index,
+        ),
     )
 
 

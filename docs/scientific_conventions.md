@@ -400,21 +400,70 @@ recommendation input, warning input, nor threshold.
 
 ## 7. Batch fitting
 
-Batch fitting is sequential application of a shared model configuration to
-multiple Q spectra. Every Q retains independent parameters and an independent
-result. It is not a global or simultaneous fit.
+Milestone-6 Multi-Q fitting applies one fixed branch topology through ordinary,
+independent Single-Q fits. It is not global or simultaneous fitting and creates
+no parameter coupling between Q groups.
 
-Required traversal is low Q to high Q, with optional high-to-low traversal.
-Using the previous successful fit as the next initial guess is optional and
-recorded. Failure at one Q does not erase other results. A failed Q can be
-manually refitted. Exclusion from spectral fitting and exclusion from later
-derived-quantity use are distinct states with recorded reasons.
+The current Q is the anchor. Each branch traverses outward independently:
 
-Future Multi-Q Lorentzian component identity must consider both FWHM continuity
-and integrated-area continuity across neighboring Q. When similar linewidths make
-width-based identity ambiguous, area continuity receives greater relative weight.
-This future scientific/core policy is not implemented here, and GUI/application
-code must not invent an independent component-matching heuristic.
+```text
+anchor -> lower neighbor -> next lower Q -> ...
+anchor -> higher neighbor -> next higher Q -> ...
+```
+
+Lower and higher are determined from the dataset's physical representative
+`q_values`, not from group-index direction. Explicit Q input order remains
+unchanged: the executor derives only a temporary visit order, while group
+identity and stored/result ordering remain the original dataset order. A branch
+requires unique representative Q values because duplicate values cannot define
+an unambiguous lower or higher continuation side.
+
+At an edge anchor, only the available direction runs. A target uses fitted
+values from the nearest successful predecessor in its direction solely as
+execution-time optimizer starts. Failure at one Q does not stop the direction,
+does not seed the next Q, and does not erase completed neighboring results.
+
+Continuation is Result-to-Result: ordinary fitted/current free-parameter values
+come from a concrete successful Result, while a Method remains a reusable
+configuration system. Every production Result is bound to the exact dataset,
+Q assignment, retained fitting selection, prepared measured Resolution, and
+group context that produced it. The S1 executor rejects a foreign or stale
+anchor before traversal, even when group index, representative Q, and model
+topology happen to match. Switching datasets therefore cannot reinterpret the
+previous dataset's Current Result as the new dataset's Current Fit.
+
+`Fit All Q from Current Fit` accepts a Current Fit originating from either a
+Manual Run Fit or an applied AutoFit candidate; after that point both origins
+use the same Multi-Q semantics. `AutoFit All Q` instead performs fresh
+candidate discovery only at the anchor. It uses the frozen nine-candidate
+search there, never reruns that search independently at every Q, and does not
+silently replace an absent Most Recommended result with Best Supported. A user
+may explicitly select any anchor candidate with a usable fit for a separate
+comparison branch while retaining its warnings and limitations. Branches share
+neither results nor seeds.
+
+The direct AutoFit B0 topology remains CONSTANT. An applied B0 Current Fit
+retains the frozen editable Manual representation: LINEAR with the fitted
+Offset and an exact fixed-zero Slope. No Multi-Q-specific B0 topology is added.
+
+Model topology is mandatory for a branch. User-selected Method categories may
+also be transferred where applicable, including user bounds, Free/Fixed state
+and fixed values, parameter relationships, Resolution, Q-bin configuration,
+and fitting selection/context. When user-bound transfer is off, a target retains
+its own user-bound state; when on, the source Method's user bounds overwrite the
+target state. Group-local scientific/core constraints are always recomputed and
+remain authoritative.
+
+Component identities and Lorentzian numbering follow the anchor model through
+the branch. The workflow does not automatically relabel components by FWHM,
+area, or another matching heuristic. Ambiguous decomposition retains identity
+and exposes existing fit/identifiability limitations.
+
+Per-Q execution states are `SUCCESS`, `FAILED`, `BLOCKED`, `EXCLUDED`, and
+`NOT_RUN`; branch states include `COMPLETED` and `CANCELLED`. Completed results
+remain available after cancellation. `EXCLUDED` is an explicit user decision,
+not a synonym for failed or blocked execution. Exclusion from spectral fitting
+and exclusion from later derived-result use remain distinct and recorded.
 
 ## 8. Analysis-level masks and warnings
 

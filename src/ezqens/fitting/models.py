@@ -10,7 +10,8 @@ import numpy as np
 import numpy.typing as npt
 
 from ezqens.domain import DiagnosticSeverity
-from ezqens.resolution import ResolutionAcceptanceProvenance
+from ezqens.preprocessing import FittingSelection
+from ezqens.resolution import PreparedResolution, ResolutionAcceptanceProvenance
 
 FloatArray = npt.NDArray[np.float64]
 
@@ -898,6 +899,27 @@ class FitProvenance:
     resolution_acceptance: ResolutionAcceptanceProvenance
 
 
+@dataclass(frozen=True, slots=True, eq=False)
+class FitContextBinding:
+    """Exact immutable scientific context in which one fit was executed."""
+
+    prepared_resolution: PreparedResolution = field(repr=False)
+    selection: FittingSelection = field(repr=False)
+    group_index: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.prepared_resolution, PreparedResolution):
+            raise ValueError("prepared_resolution must be a PreparedResolution")
+        if not isinstance(self.selection, FittingSelection):
+            raise ValueError("selection must be a FittingSelection")
+        if self.selection.dataset is not self.prepared_resolution.sample_dataset:
+            raise ValueError("selection must reference the prepared sample dataset")
+        if isinstance(self.group_index, bool) or not isinstance(self.group_index, int):
+            raise ValueError("group_index must be an integer")
+        if not 0 <= self.group_index < len(self.prepared_resolution.spectra):
+            raise ValueError("group_index is outside the prepared resolution")
+
+
 @dataclass(frozen=True, slots=True)
 class FitResult:
     """One fit with its submitted model configuration and separate estimates."""
@@ -913,6 +935,7 @@ class FitResult:
     diagnostics: FitDiagnostics
     provenance: FitProvenance
     fitted_model: SpectralModelDefinition | None = None
+    context_binding: FitContextBinding | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         parameter_count = len(self.parameters)
@@ -942,6 +965,11 @@ class FitResult:
         object.__setattr__(self, "standardized_residuals", standardized)
         if self.fitted_model is None:
             object.__setattr__(self, "fitted_model", self.configuration)
+        if self.context_binding is not None and not isinstance(
+            self.context_binding,
+            FitContextBinding,
+        ):
+            raise ValueError("context_binding must be a FitContextBinding or None")
 
     def parameter(self, name: str) -> ParameterEstimate:
         """Return one estimate by its canonical result name."""

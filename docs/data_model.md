@@ -428,8 +428,43 @@ free text or derive a threshold from support geometry or signed_area_ratio.
 
 ### 4.5 Batch and derived values — milestone 6
 
-`BatchFitResult` is an ordered set of independent per-Q results with traversal,
-seeding, failure, exclusion, manual-refit, and selected-result state.
+M6-S1 implements `MultiQBranchResult` as one ordered set of independent per-Q
+`MultiQFitOutcome` values for a fixed anchor topology. Each outcome records its
+group index, `SUCCESS`, `FAILED`, `BLOCKED`, or `NOT_RUN` state, an ordinary
+`FitResult` when one exists, the same-side predecessor used for seeding, and
+structured blocker or failure evidence. The branch records its anchor index and
+`COMPLETED` or `CANCELLED` state. A nonconverged result may be retained as failed
+evidence but never becomes a continuation seed. The retained anchor is a
+`SUCCESS` outcome and is not refitted.
+
+Each production `FitResult` carries a small runtime `FitContextBinding` to the
+exact immutable `PreparedResolution`, `FittingSelection`, and group index used
+for that execution. This is an object association, not a persistent UUID,
+content hash, or Method identity. M6-S1 requires the anchor binding to match the
+active scientific context before traversal; consequently an otherwise
+topology-compatible Result from another dataset, Q assignment, retained
+selection, or prepared Resolution cannot become the Current Result or a seed.
+AutoFit candidates and Manual Current Fits acquire the same binding through the
+shared Single-Q fitting path.
+
+The executor derives lower-Q and higher-Q visit order from the assigned
+representative `QBins.q_values`; group index is not a physical-Q ordering
+contract. Representative Q values must be unique for an unambiguous branch.
+This derived visit order neither sorts nor mutates `QBins`, and outcomes remain
+stored in original dataset/group order.
+
+Configurations supplied to M6-S1 are already resolved for their target Q.
+Only fitted values for target-free parameters are propagated as execution-time
+starts; target fixed values, bounds, Free/Fixed state, fitting selection,
+prepared resolution, convolution plan, and legality validation stay
+target-local. Component and parameter references are matched by stable identity,
+never reordered or rematched by fitted values.
+`seed_group_index` is populated only after a predecessor Result has actually
+been materialized into the target's seeded model. A blocker detected before
+that operation records no seed group. An optimizer-unsuccessful Result remains
+failed evidence and never replaces the nearest successful same-side seed.
+`EXCLUDED`, manual-refit and selected-result state belong to later M6 slices.
+
 `DerivedQENSResult` retains Q, per-component FWHM, valid relaxation times,
 elastic and individual quasielastic integrated areas, EISF, validity, and
 warnings. Missing covariance never means zero uncertainty.
@@ -533,7 +568,7 @@ SpectrumPaddingResult -> one Spectrum by group order/identity
 
 future milestone sequence:
 ReducedDataset + QBins -> FittingSelection + PreparedResolution
-  -> FitConfiguration -> FitResult -> BatchFitResult
+  -> FitConfiguration -> FitResult -> MultiQBranchResult
   -> DerivedQENSResult -> reports/exports + lightweight reproducibility
 
 later, if explicitly approved:

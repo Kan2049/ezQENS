@@ -315,7 +315,7 @@ and machine-readable expected summaries for:
 - processed-resolution ranges, normalization, and grid identity;
 - convolved values at selected indices plus whole-array hashes where stable;
 - fit parameters and diagnostics with justified tolerances;
-- batch traversal/result selection;
+- anchor-outward batch traversal, seeding, and result selection;
 - derived values;
 - lightweight reproducibility/export records; and
 - report/export schemas.
@@ -455,14 +455,53 @@ optimizer failure, cancellation, and scientifically implausible parameters.
 
 ## 7. Batch and manual-review validation
 
-Test low-to-high and high-to-low traversal, with and without previous-fit
-seeding. Demonstrate that modifying one Q result does not mutate another.
-Failures must not discard successful neighbors. Manual refits create new linked
-results and selection history.
+Test interior and edge anchors. Lower-Q and higher-Q directions must proceed
+outward independently, and each target must use the nearest successful
+predecessor in its own direction as an execution-time seed. A failed target must
+not seed the next fit, stop the direction, discard successful neighbors, or
+couple otherwise independent per-Q parameters/results.
 
-Test inclusion in spectral fitting, exclusion from spectral fitting, separate
-inclusion in scientifically validated derived quantities, manual refitting, and
-restoration after exclusion.
+Include explicit representative Q values whose preserved group order is not
+monotonic. Verify traversal follows nearest outward physical Q on each side,
+while source Q/group order and ordered result identity remain unchanged.
+Duplicate representative Q values must fail clearly rather than silently
+falling back to group-index direction.
+
+Test both entry paths. `Fit All Q from Current Fit` must behave identically for
+a Current Fit created by Manual Run Fit or AutoFit-candidate Apply. Fresh
+`AutoFit All Q` must ignore an existing Current Fit for discovery, run exactly
+the frozen nine-candidate search at the anchor only, use Most Recommended on the
+normal path, and refuse silent Best Supported fallback. Explicitly selected
+usable anchor candidates must create independent branches with no shared fit
+results or seeds.
+
+Verify concrete Result/context binding at the executor boundary. A valid Manual
+Current Result and a valid AutoFit candidate from the active context must enter
+S1. Reject Results from a different dataset even when Q/group/topology match,
+and reject stale Results after Q reassignment, retained-selection replacement,
+or prepared-Resolution replacement. A dataset switch must not expose the prior
+dataset's Current Result as an anchor. Pre-seed blockers must record no seed
+group. An available optimizer-unsuccessful Result must remain `FAILED`, must not
+become a seed, and must not prevent later same-side execution from resuming at
+the nearest prior `SUCCESS`.
+
+Verify that component identities and numbering remain those of the anchor
+topology across each branch, including ambiguous decompositions; no automatic
+FWHM/area rematching or relabeling may occur.
+
+Test selective Method application. Model topology is mandatory. With user-bound
+transfer off, each target retains its own user-bound state; with transfer on,
+the source Method state overwrites it. In both cases, target-local scientific
+constraints are recomputed and remain authoritative.
+
+Exercise every per-Q state (`SUCCESS`, `FAILED`, `BLOCKED`, `EXCLUDED`,
+`NOT_RUN`) and both branch states (`COMPLETED`, `CANCELLED`). Cancellation must
+preserve completed results. Explicit fit exclusion, execution failure/readiness
+blocking, and derived-result exclusion must remain distinct.
+
+Verify Current Result replacement after rerunning an edited Current Fit and
+retention of an additional immutable Result only through explicit `Save as New
+Fit`. Test analogous Method Save versus Save as New Method behavior.
 
 ## 8. Later dynamics-model validation — provisional
 
@@ -603,12 +642,24 @@ diagnostics, warning behavior, and independent benchmark/script comparison.
 Direct elastic-resolution evaluation and convolved integrated-area preservation
 must pass. Dense narrow/sub-bin observable tests must cover multiple energy-
 shift phases and coarse/irregular sample grids. Candidate evidence must remain
-separate from the unresolved Auto recommendation rule.
+separate from the frozen Auto recommendation rule, including the distinction
+between Best Supported and Most Recommended.
 
 ### Gate D: batch and derived quantities
 
-Independent sequential results, manual-refit history, FWHM/tau/EISF convention
-tests, and exclusion-scope tests.
+Independent anchor-outward results; nearest-success branch seeding; failure and
+cancellation lifecycle; anchor-only AutoFit discovery; independent candidate
+branches; component-identity continuity; selective Method transfer; Current
+Result replacement versus explicit Save as New; FWHM/tau/EISF convention tests;
+and distinct fit/derived exclusion scopes.
+
+The M6-S1 executor gate specifically covers middle and edge anchors, independent
+lower/higher continuation chains, retained anchors, nearest-success recovery
+after failed or blocked targets, no cross-side seeding, target-local bounds and
+readiness, identity-based component propagation without rematching, independent
+ordinary per-Q `FitResult` objects, and cancellation leaving untouched targets
+as `NOT_RUN`. AutoFit/Manual origin is deliberately absent once a usable,
+active-context-bound anchor `FitResult` enters the executor.
 
 ### Gate E: ezQENS v1.0 public release
 
