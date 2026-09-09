@@ -14,6 +14,7 @@ FIXTURES = Path(__file__).parent / "fixtures" / "reduced_data"
     ("filename", "expected_format", "expected_count"),
     [
         ("dave_multiple_groups.dat", ReducedDataFormat.DAVE_GROUP_BLOCKS, 2),
+        ("mantid_xye_blocks.txt", ReducedDataFormat.MANTID_XYE_BLOCKS, 3),
         ("wide_multiple_pairs.txt", ReducedDataFormat.WIDE_QENS_TABLE, 2),
         ("single_valid.csv", ReducedDataFormat.SINGLE_SPECTRUM_TABLE, 1),
     ],
@@ -36,6 +37,54 @@ def test_dave_detection_records_extra_columns() -> None:
 
     assert result.detected_extra_columns == ("ModelFit", "Func1", "Func2")
     assert result.detected_required_columns == ("x", "y", "yerr")
+
+
+def test_mantid_xye_detection_reports_block_structure() -> None:
+    result = detect_reduced_data_format(FIXTURES / "mantid_xye_blocks.txt")
+
+    assert result.proposed_format is ReducedDataFormat.MANTID_XYE_BLOCKS
+    assert result.detected_required_columns == ("X", "Y", "E")
+    assert result.detected_extra_columns == ()
+    assert result.detected_count == 3
+    assert not result.has_errors
+
+
+def test_headerless_blank_separated_xye_blocks_are_detected(tmp_path: Path) -> None:
+    source = tmp_path / "headerless-blocks.dat"
+    source.write_text(
+        "-1.0 2.0 0.1\n0.0 3.0 0.2\n\n-0.5 4.0 0.3\n0.5 4.5 0.4\n",
+        encoding="utf-8",
+    )
+
+    result = detect_reduced_data_format(source)
+
+    assert result.proposed_format is ReducedDataFormat.MANTID_XYE_BLOCKS
+    assert result.detected_count == 2
+    assert not result.has_errors
+
+
+@pytest.mark.parametrize(
+    ("header", "expected_format"),
+    [
+        ("# x y yerr", ReducedDataFormat.SINGLE_SPECTRUM_TABLE),
+        ("# x y1 yerr1", ReducedDataFormat.WIDE_QENS_TABLE),
+    ],
+)
+def test_recognized_table_headers_precede_headerless_mantid_heuristic(
+    tmp_path: Path,
+    header: str,
+    expected_format: ReducedDataFormat,
+) -> None:
+    source = tmp_path / "recognized-with-blank-lines.txt"
+    source.write_text(
+        f"{header}\n-1.0 2.0 0.1\n\n0.0 3.0 0.2\n",
+        encoding="utf-8",
+    )
+
+    result = detect_reduced_data_format(source)
+
+    assert result.proposed_format is expected_format
+    assert not result.has_errors
 
 
 def test_single_and_one_pair_wide_tables_are_distinct() -> None:

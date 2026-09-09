@@ -1,0 +1,13 @@
+# X , Y , E Distribution=true
+# public synthetic fine-Q reduced spectra
+-1.0 2.0 0.1
+0.0  0.0 0.0
+
+# second spectrum has its own grid and length
+-0.8 4.0 0.2
+0.1  5.0 0.3
+0.9  4.5 0.25
+
+# X , Y , E Distribution=true
+-0.5 1.5 0.15
+0.5  1.2 0.12

@@ -90,6 +90,42 @@ No shared energy-axis copy or shared-grid boolean is stored. An optimized
 matrix representation may be introduced only after profiling and must remain
 hidden behind the per-spectrum interface without interpolation or data loss.
 
+#### 2.2.1 Fractional coverage and Q-rebin state
+
+`ReducedDataset.fractional_coverage` is optional immutable per-spectrum state
+whose arrays align exactly with the ordered energy, intensity, and uncertainty
+points. Coverage values are finite and nonnegative. The
+`confirmed_unrebinned_source` origin requires every value to equal one; a
+`propagated_q_rebin` result preserves calculated values, including values above
+one. Missing coverage remains missing and blocks Q rebinning.
+
+One Q-rebin operation is represented by a `QRebinSpecification` containing
+finite, strictly increasing target edges and explicit absolute-Q exclusion
+intervals. The operation requires explicit current source edges, compatible
+energy coordinates among source spectra contributing to each target, targets
+inside current source coverage, and no target refinement relative to any
+contributing current source bin. Exclusions affect only geometric Q overlap;
+they are distinct from fitting exclusions and overlapping intervals are unioned.
+
+The derived dataset contains target midpoint `QBins`, rebinned `Y` and Mantid
+uncertainty `E`, and propagated `F`, using:
+
+```text
+g_ij    = unexcluded_length(source_i intersection target_j) / width(source_i)
+S_jk    = sum_i Y_ik F_ik g_ij
+V_jk    = sum_i (E_ik F_ik)^2 g_ij
+Fnew_jk = sum_i F_ik g_ij
+Ynew_jk = S_jk / Fnew_jk
+Enew_jk = sqrt(V_jk) / Fnew_jk
+```
+
+A positively weighted invalid source uncertainty makes the corresponding
+output uncertainty invalid without removing that contributor from `Y` or `F`.
+Repeated operations consume current propagated coverage and append only the
+ordered rebin specifications needed for later resolution replay. No source
+array is mutated, and no interpolation, extrapolation, nearest-Q repair, or
+coverage reset occurs.
+
 ### 2.3 Source and text-column metadata
 
 `ReducedDataset.source_metadata` may contain a small typed `SourceMetadata`
@@ -597,7 +633,9 @@ molecular/structure input -> automatic candidate inference
   independently per Q.
 - Exact ordered sample/resolution Q identity is required; nearest-Q association
   and Q interpolation are absent.
-- No Q rebinning, interpolation, baseline shift, or silent repair occurs.
+- Fractional Q rebinning follows the explicit-edge, propagated-coverage,
+  no-refinement contract in section 2.2.1; it performs no interpolation,
+  extrapolation, nearest-Q repair, baseline shift, or silent repair.
 - Future sources can produce `ReducedDataset` without a predeclared framework.
 
 ## 8. Explicit non-goals and unresolved decisions

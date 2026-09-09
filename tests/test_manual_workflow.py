@@ -14,6 +14,8 @@ import ezqens.fitting as fitting_module
 import ezqens.workflow.manual as manual_workflow_module
 from ezqens.domain import (
     DiagnosticSeverity,
+    FractionalCoverage,
+    FractionalCoverageOrigin,
     QBins,
     ReducedDataset,
     Spectrum,
@@ -779,6 +781,88 @@ def test_dataset_replacement_preserves_association_identity_and_rebinds_selectio
     assert resolved.context is not None
     assert resolved.context.sample is replacement
     assert resolved.context.selection.dataset is replacement_data
+
+
+def test_project_replacement_preserves_coverage_for_unchanged_xye() -> None:
+    dataset = make_dataset(SpectrumRole.SAMPLE, (0.5, 0.75)).confirm_unrebinned_source()
+    project = create_project("coverage", project_id="project-coverage-rebind")
+    project, sample = add_project_dataset(project, dataset, dataset_id="sample")
+    replacement_without_coverage = ReducedDataset(
+        role=dataset.role,
+        spectra=dataset.spectra,
+        source_reference="metadata-only.dat",
+        q_bins=QBins.from_q_values((0.55, 0.8)),
+    )
+
+    project, replacement = replace_project_dataset(
+        project,
+        sample,
+        replacement_without_coverage,
+    )
+
+    assert replacement.dataset.fractional_coverage is dataset.fractional_coverage
+
+
+def test_same_length_scientific_replacement_invalidates_inherited_coverage() -> None:
+    dataset = make_dataset(SpectrumRole.SAMPLE, (0.5,)).confirm_unrebinned_source()
+    project = create_project("coverage", project_id="project-coverage-change")
+    project, sample = add_project_dataset(project, dataset, dataset_id="sample")
+    changed_spectrum = replace(
+        dataset.spectra[0],
+        intensity=dataset.spectra[0].intensity + 0.01,
+    )
+    changed = replace(
+        dataset,
+        spectra=(changed_spectrum,),
+        fractional_coverage=None,
+    )
+
+    _, replacement = replace_project_dataset(project, sample, changed)
+
+    assert replacement.dataset.fractional_coverage is None
+
+
+def test_spectrum_reordering_invalidates_inherited_coverage() -> None:
+    dataset = make_dataset(SpectrumRole.SAMPLE, (0.5, 0.75)).confirm_unrebinned_source()
+    project = create_project("coverage", project_id="project-coverage-order")
+    project, sample = add_project_dataset(project, dataset, dataset_id="sample")
+    reordered_spectra = (
+        replace(dataset.spectra[1], group_index=0),
+        replace(dataset.spectra[0], group_index=1),
+    )
+    reordered = replace(
+        dataset,
+        spectra=reordered_spectra,
+        fractional_coverage=None,
+    )
+
+    _, replacement = replace_project_dataset(project, sample, reordered)
+
+    assert replacement.dataset.fractional_coverage is None
+
+
+def test_changed_xye_accepts_explicitly_replaced_aligned_coverage() -> None:
+    dataset = make_dataset(SpectrumRole.SAMPLE, (0.5,)).confirm_unrebinned_source()
+    project = create_project("coverage", project_id="project-coverage-explicit")
+    project, sample = add_project_dataset(project, dataset, dataset_id="sample")
+    changed_spectrum = replace(
+        dataset.spectra[0],
+        energy=dataset.spectra[0].energy + 0.001,
+    )
+    explicit_replacement = FractionalCoverage.aligned_with(
+        (changed_spectrum,),
+        values=(np.full(changed_spectrum.energy.size, 0.8),),
+        origin=FractionalCoverageOrigin.EXPLICIT_SOURCE,
+    )
+    changed = replace(
+        dataset,
+        spectra=(changed_spectrum,),
+        fractional_coverage=explicit_replacement,
+    )
+
+    _, replacement = replace_project_dataset(project, sample, changed)
+
+    assert replacement.dataset.fractional_coverage is explicit_replacement
 
 
 def test_adding_q_assignment_preserves_committed_selection() -> None:

@@ -1,11 +1,21 @@
 """Tests for the reduced scientific domain boundary."""
 
+from dataclasses import replace
 from typing import cast
 
 import numpy as np
 import pytest
 
-from ezqens.domain import ReducedDataset, SourceMetadata, Spectrum, SpectrumRole
+from ezqens.domain import (
+    FractionalCoverage,
+    FractionalCoverageAvailability,
+    FractionalCoverageOrigin,
+    QBins,
+    ReducedDataset,
+    SourceMetadata,
+    Spectrum,
+    SpectrumRole,
+)
 
 
 def make_spectrum(
@@ -145,3 +155,98 @@ def test_source_metadata_rejects_invalid_promoted_physical_values() -> None:
         SourceMetadata(source_filename="synthetic.dat", temperature_kelvin=-1.0)
     with pytest.raises(ValueError, match="positive"):
         SourceMetadata(source_filename="synthetic.dat", wavelength_angstrom=0.0)
+
+
+def test_fractional_coverage_is_validated_against_spectrum_alignment() -> None:
+    spectra = (make_spectrum(group_index=0), make_spectrum(group_index=1))
+    mismatched = FractionalCoverage.aligned_with(
+        spectra,
+        values=(np.ones(3), np.ones(2)),
+        origin=FractionalCoverageOrigin.PROPAGATED_Q_REBIN,
+    )
+
+    with pytest.raises(ValueError, match="align with every spectrum point"):
+        ReducedDataset(
+            role=SpectrumRole.SAMPLE,
+            spectra=spectra,
+            fractional_coverage=mismatched,
+        )
+
+
+def test_propagated_fractional_coverage_remains_nonunit_and_available() -> None:
+    spectra = (make_spectrum(group_index=0), make_spectrum(group_index=1))
+    values = (np.array([1.0, 0.75, 0.25]), np.array([0.5, 0.5, 0.0]))
+    coverage = FractionalCoverage.aligned_with(
+        spectra,
+        values=values,
+        origin=FractionalCoverageOrigin.PROPAGATED_Q_REBIN,
+    )
+
+    dataset = ReducedDataset(
+        role=SpectrumRole.SAMPLE,
+        spectra=spectra,
+        fractional_coverage=coverage,
+    )
+
+    assert (
+        dataset.fractional_coverage_availability
+        is FractionalCoverageAvailability.AVAILABLE
+    )
+    assert dataset.fractional_coverage is not None
+    np.testing.assert_array_equal(dataset.fractional_coverage.values[0], values[0])
+    assert not dataset.fractional_coverage.values[0].flags.writeable
+
+
+def test_propagated_fractional_coverage_may_exceed_one_but_not_be_negative() -> None:
+    spectrum = make_spectrum()
+    coverage = FractionalCoverage.aligned_with(
+        (spectrum,),
+        values=(np.array([2.0, 1.25, 0.0]),),
+        origin=FractionalCoverageOrigin.PROPAGATED_Q_REBIN,
+    )
+
+    np.testing.assert_array_equal(coverage.values[0], [2.0, 1.25, 0.0])
+    with pytest.raises(ValueError, match="nonnegative"):
+        FractionalCoverage.aligned_with(
+            (spectrum,),
+            values=(np.array([1.0, -0.01, 1.0]),),
+            origin=FractionalCoverageOrigin.EXPLICIT_SOURCE,
+        )
+
+
+def test_confirmed_unrebinned_origin_requires_exactly_unit_coverage() -> None:
+    with pytest.raises(ValueError, match="must all equal one"):
+        FractionalCoverage.aligned_with(
+            (make_spectrum(),),
+            values=(np.array([1.0, 0.75, 1.0]),),
+            origin=FractionalCoverageOrigin.CONFIRMED_UNREBINNED_SOURCE,
+        )
+
+
+def test_coverage_rejects_same_length_changed_point_correspondence() -> None:
+    dataset = ReducedDataset(
+        role=SpectrumRole.SAMPLE,
+        spectra=(make_spectrum(),),
+    ).confirm_unrebinned_source()
+    changed = replace(
+        dataset.spectra[0],
+        intensity=dataset.spectra[0].intensity + 0.01,
+    )
+
+    with pytest.raises(ValueError, match="different ordered X/Y/E points"):
+        replace(dataset, spectra=(changed,))
+
+
+def test_q_assignment_preserves_fractional_coverage_availability() -> None:
+    dataset = ReducedDataset(
+        role=SpectrumRole.SAMPLE,
+        spectra=(make_spectrum(),),
+    ).confirm_unrebinned_source()
+
+    assigned = dataset.assign_q_bins(QBins.from_q_values([0.75]))
+
+    assert assigned.fractional_coverage is dataset.fractional_coverage
+    assert (
+        assigned.fractional_coverage_availability
+        is FractionalCoverageAvailability.AVAILABLE
+    )

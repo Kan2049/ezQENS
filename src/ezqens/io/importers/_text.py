@@ -26,6 +26,10 @@ _FORMAL_DAVE_HEADER_PATTERN = re.compile(
 )
 _WIDE_INTENSITY_PATTERN = re.compile(r"^y(\d+)$", re.IGNORECASE)
 _WIDE_UNCERTAINTY_PATTERN = re.compile(r"^yerr(\d+)$", re.IGNORECASE)
+_MANTID_XYE_HEADER_PATTERN = re.compile(
+    r"^\s*#\s*x\s*,?\s*y\s*,?\s*e(?:\s+distribution\s*=\s*(?:true|false))?\s*$",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +77,42 @@ class WideColumnAnalysis:
             if len(self.intensity_positions.get(suffix, ())) == 1
             and len(self.uncertainty_positions.get(suffix, ())) == 1
         )
+
+
+@dataclass(frozen=True, slots=True)
+class TextDataRow:
+    """One non-comment row retained for structured block parsing."""
+
+    line_number: int
+    tokens: tuple[str, ...]
+
+
+def has_mantid_xye_header(lines: tuple[str, ...]) -> bool:
+    """Return whether a Mantid-style X,Y,E comment header is present."""
+
+    return any(_MANTID_XYE_HEADER_PATTERN.match(line) is not None for line in lines)
+
+
+def mantid_xye_blocks(
+    lines: tuple[str, ...],
+) -> tuple[tuple[TextDataRow, ...], ...]:
+    """Partition non-comment rows into blank-line-separated source blocks."""
+
+    blocks: list[tuple[TextDataRow, ...]] = []
+    current: list[TextDataRow] = []
+    for line_number, line in enumerate(lines, start=1):
+        stripped = line.strip()
+        if not stripped:
+            if current:
+                blocks.append(tuple(current))
+                current = []
+            continue
+        if stripped.startswith("#"):
+            continue
+        current.append(TextDataRow(line_number, split_columns(line)))
+    if current:
+        blocks.append(tuple(current))
+    return tuple(blocks)
 
 
 def read_text_lines(path: Path) -> tuple[str, ...]:

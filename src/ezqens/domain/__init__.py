@@ -7,7 +7,12 @@ from ezqens.domain.diagnostics import (
 )
 from ezqens.domain.models import (
     FormatDetectionResult,
+    FractionalCoverage,
+    FractionalCoverageAvailability,
+    FractionalCoverageOrigin,
     QBins,
+    QExclusionInterval,
+    QRebinSpecification,
     ReducedDataFormat,
     ReducedDataset,
     SourceMetadata,
@@ -18,10 +23,15 @@ from ezqens.domain.models import (
 
 __all__ = [
     "DiagnosticSeverity",
+    "FractionalCoverage",
+    "FractionalCoverageAvailability",
+    "FractionalCoverageOrigin",
     "FormatDetectionResult",
     "ImportDiagnostic",
     "ImportValidationError",
+    "QExclusionInterval",
     "QBins",
+    "QRebinSpecification",
     "ReducedDataset",
     "ReducedDataFormat",
     "Spectrum",

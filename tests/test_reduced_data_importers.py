@@ -6,7 +6,10 @@ import numpy as np
 import pytest
 
 from ezqens.domain import (
+    FractionalCoverageAvailability,
+    FractionalCoverageOrigin,
     ImportValidationError,
+    QBins,
     ReducedDataFormat,
     SpectrumRole,
 )
@@ -41,6 +44,123 @@ def test_dave_one_group_preserves_values_and_order() -> None:
     np.testing.assert_array_equal(spectrum.intensity, [2.0, 3.0, 2.5])
     np.testing.assert_array_equal(spectrum.uncertainty, [0.1, 0.15, 0.2])
     assert dataset.shared_energy_grid
+
+
+def test_mantid_xye_blocks_preserve_order_grids_values_and_missing_metadata() -> None:
+    dataset = import_reduced_data(
+        FIXTURES / "mantid_xye_blocks.txt",
+        role=SpectrumRole.SAMPLE,
+    )
+
+    assert dataset.source_layout is ReducedDataFormat.MANTID_XYE_BLOCKS
+    assert tuple(spectrum.group_label for spectrum in dataset.spectra) == (
+        "1",
+        "2",
+        "3",
+    )
+    assert tuple(spectrum.energy.size for spectrum in dataset.spectra) == (2, 3, 2)
+    assert not dataset.shared_energy_grid
+    np.testing.assert_array_equal(dataset.spectra[0].energy, [-1.0, 0.0])
+    np.testing.assert_array_equal(dataset.spectra[0].intensity, [2.0, 0.0])
+    np.testing.assert_array_equal(dataset.spectra[0].uncertainty, [0.1, 0.0])
+    np.testing.assert_array_equal(dataset.spectra[1].energy, [-0.8, 0.1, 0.9])
+    np.testing.assert_array_equal(dataset.spectra[2].energy, [-0.5, 0.5])
+    assert dataset.source_columns[0].source_row_numbers == (3, 4)
+    assert dataset.source_columns[1].source_row_numbers == (7, 8, 9)
+    assert dataset.source_columns[2].source_row_numbers == (12, 13)
+    assert all(spectrum.energy_unit == "unknown" for spectrum in dataset.spectra)
+    assert all(spectrum.intensity_unit == "unknown" for spectrum in dataset.spectra)
+    assert all(spectrum.uncertainty_unit == "unknown" for spectrum in dataset.spectra)
+    assert dataset.q_bins is None
+    assert dataset.fractional_coverage is None
+    assert (
+        dataset.fractional_coverage_availability
+        is FractionalCoverageAvailability.MISSING
+    )
+    assert dataset.spectra[0].intensity[1] == 0.0
+    assert dataset.spectra[0].uncertainty[1] == 0.0
+    assert dataset.spectra[0].invalid_uncertainty_mask[1]
+    codes = {diagnostic.code for diagnostic in dataset.diagnostics}
+    assert "mantid_energy_unit_missing" in codes
+    assert "mantid_q_assignment_missing" in codes
+
+
+def test_mantid_xye_import_accepts_manual_q_assignment() -> None:
+    imported = import_reduced_data(
+        FIXTURES / "mantid_xye_blocks.txt",
+        role="resolution",
+        energy_unit="meV",
+    )
+    q_bins = QBins.from_q_values([0.45, 0.65, 0.85])
+
+    assigned = imported.assign_q_bins(q_bins)
+
+    assert imported.q_bins is None
+    assert assigned.q_bins is q_bins
+    assert "mantid_energy_unit_missing" not in {
+        diagnostic.code for diagnostic in assigned.diagnostics
+    }
+
+
+def test_headerless_single_xye_block_imports_with_explicit_format(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "one-block.dat"
+    source.write_text("-1.0 2.0 0.1\n0.0 3.0 0.2\n", encoding="utf-8")
+
+    dataset = import_reduced_data(
+        source,
+        role="sample",
+        explicit_format=ReducedDataFormat.MANTID_XYE_BLOCKS,
+    )
+
+    assert len(dataset.spectra) == 1
+    np.testing.assert_array_equal(dataset.spectra[0].energy, [-1.0, 0.0])
+
+
+def test_unrebinned_confirmation_initializes_aligned_read_only_coverage() -> None:
+    imported = import_reduced_data(
+        FIXTURES / "mantid_xye_blocks.txt",
+        role="sample",
+    )
+    original_arrays = tuple(
+        (spectrum.energy, spectrum.intensity, spectrum.uncertainty)
+        for spectrum in imported.spectra
+    )
+
+    confirmed = imported.confirm_unrebinned_source()
+
+    assert imported.fractional_coverage is None
+    assert confirmed.fractional_coverage is not None
+    assert (
+        confirmed.fractional_coverage.origin
+        is FractionalCoverageOrigin.CONFIRMED_UNREBINNED_SOURCE
+    )
+    assert (
+        confirmed.fractional_coverage_availability
+        is FractionalCoverageAvailability.AVAILABLE
+    )
+    for coverage, spectrum in zip(
+        confirmed.fractional_coverage.values,
+        confirmed.spectra,
+        strict=True,
+    ):
+        np.testing.assert_array_equal(coverage, np.ones(spectrum.energy.size))
+        assert not coverage.flags.writeable
+    for spectrum, arrays in zip(imported.spectra, original_arrays, strict=True):
+        assert spectrum.energy is arrays[0]
+        assert spectrum.intensity is arrays[1]
+        assert spectrum.uncertainty is arrays[2]
+
+
+def test_unrebinned_confirmation_does_not_reset_existing_coverage() -> None:
+    imported = import_reduced_data(
+        FIXTURES / "mantid_xye_blocks.txt",
+        role="sample",
+    ).confirm_unrebinned_source()
+
+    with pytest.raises(ValueError, match="must not be reset"):
+        imported.confirm_unrebinned_source()
 
 
 def test_dave_multiple_groups_keep_unequal_grids_and_extra_columns() -> None:

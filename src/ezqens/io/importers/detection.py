@@ -15,6 +15,8 @@ from ezqens.io.importers._text import (
     analyze_wide_columns,
     find_group_markers,
     find_table_header,
+    has_mantid_xye_header,
+    mantid_xye_blocks,
     normalized_columns,
     normalized_dave_columns,
     read_text_lines,
@@ -22,6 +24,7 @@ from ezqens.io.importers._text import (
 
 _IMPORTABLE_FORMATS = (
     ReducedDataFormat.DAVE_GROUP_BLOCKS,
+    ReducedDataFormat.MANTID_XYE_BLOCKS,
     ReducedDataFormat.WIDE_QENS_TABLE,
     ReducedDataFormat.SINGLE_SPECTRUM_TABLE,
 )
@@ -103,6 +106,52 @@ def _dave_detection(lines: tuple[str, ...]) -> FormatDetectionResult:
         detected_required_columns=_REQUIRED_COLUMNS,
         detected_extra_columns=tuple(extra_columns),
         detected_count=len(markers),
+        diagnostics=tuple(diagnostics),
+    )
+
+
+def _mantid_detection(lines: tuple[str, ...]) -> FormatDetectionResult:
+    blocks = mantid_xye_blocks(lines)
+    diagnostics: list[ImportDiagnostic] = []
+    if not blocks:
+        diagnostics.append(
+            ImportDiagnostic(
+                code="mantid_blocks_missing",
+                severity=DiagnosticSeverity.ERROR,
+                message="Mantid X,Y,E format requires at least one numerical block",
+            )
+        )
+    for block_index, block in enumerate(blocks, start=1):
+        for row in block:
+            if len(row.tokens) != 3:
+                diagnostics.append(
+                    ImportDiagnostic(
+                        code="mantid_row_width",
+                        severity=DiagnosticSeverity.ERROR,
+                        message="Mantid X,Y,E rows must contain exactly three columns",
+                        group=str(block_index),
+                        row=row.line_number,
+                    )
+                )
+                continue
+            try:
+                tuple(float(token) for token in row.tokens)
+            except ValueError:
+                diagnostics.append(
+                    ImportDiagnostic(
+                        code="mantid_malformed_numeric_row",
+                        severity=DiagnosticSeverity.ERROR,
+                        message="Mantid X,Y,E row contains a non-numeric value",
+                        group=str(block_index),
+                        row=row.line_number,
+                    )
+                )
+    return FormatDetectionResult(
+        proposed_format=ReducedDataFormat.MANTID_XYE_BLOCKS,
+        evidence=(f"Found {len(blocks)} blank-line-separated X,Y,E block(s)",),
+        detected_required_columns=("X", "Y", "E"),
+        detected_extra_columns=(),
+        detected_count=len(blocks),
         diagnostics=tuple(diagnostics),
     )
 
@@ -265,6 +314,9 @@ def _wide_detection(header: TextHeader | None) -> FormatDetectionResult:
 
 
 def _auto_detect(lines: tuple[str, ...]) -> FormatDetectionResult:
+    if has_mantid_xye_header(lines):
+        return _mantid_detection(lines)
+
     if find_group_markers(lines):
         return _dave_detection(lines)
 
@@ -318,6 +370,10 @@ def _auto_detect(lines: tuple[str, ...]) -> FormatDetectionResult:
     if has_single:
         return _single_detection(header)
 
+    mantid = _mantid_detection(lines)
+    if mantid.detected_count > 1 and not mantid.has_errors:
+        return mantid
+
     detected_partial = tuple(
         column for column in _REQUIRED_COLUMNS if column in normalized
     )
@@ -354,12 +410,15 @@ def _explicit_detection(
     if selected is ReducedDataFormat.DAVE_GROUP_BLOCKS:
         return _dave_detection(lines)
 
-    header = find_table_header(lines)
-    result = (
-        _wide_detection(header)
-        if selected is ReducedDataFormat.WIDE_QENS_TABLE
-        else _single_detection(header)
-    )
+    if selected is ReducedDataFormat.MANTID_XYE_BLOCKS:
+        result = _mantid_detection(lines)
+    else:
+        header = find_table_header(lines)
+        result = (
+            _wide_detection(header)
+            if selected is ReducedDataFormat.WIDE_QENS_TABLE
+            else _single_detection(header)
+        )
     if find_group_markers(lines):
         mismatch = ImportDiagnostic(
             code="explicit_format_inconsistent",

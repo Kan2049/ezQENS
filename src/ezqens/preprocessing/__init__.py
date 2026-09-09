@@ -9,6 +9,12 @@ from ezqens.preprocessing.edge_padding import (
     detect_edge_padding,
 )
 from ezqens.preprocessing.fitting_selection import FittingRange, FittingSelection
+from ezqens.preprocessing.q_rebin import (
+    QRebinDiagnostic,
+    QRebinDiagnosticCode,
+    QRebinError,
+    rebin_fractional_q,
+)
 
 __all__ = [
     "BoundaryPaddingResult",
@@ -17,6 +23,10 @@ __all__ = [
     "FittingRange",
     "FittingSelection",
     "PaddingStatus",
+    "QRebinDiagnostic",
+    "QRebinDiagnosticCode",
+    "QRebinError",
     "SpectrumPaddingResult",
     "detect_edge_padding",
+    "rebin_fractional_q",
 ]

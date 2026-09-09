@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from numbers import Real
@@ -26,6 +27,7 @@ class ReducedDataFormat(StrEnum):
     """Reduced text layouts recognized by the current importer."""
 
     DAVE_GROUP_BLOCKS = "dave_group_blocks"
+    MANTID_XYE_BLOCKS = "mantid_xye_blocks"
     WIDE_QENS_TABLE = "wide_qens_table"
     SINGLE_SPECTRUM_TABLE = "single_spectrum_table"
     UNKNOWN = "unknown"
@@ -54,12 +56,161 @@ class FormatDetectionResult:
         )
 
 
+class FractionalCoverageOrigin(StrEnum):
+    """Origin of fractional Q-E coverage aligned with reduced spectra."""
+
+    EXPLICIT_SOURCE = "explicit_source"
+    CONFIRMED_UNREBINNED_SOURCE = "confirmed_unrebinned_source"
+    PROPAGATED_Q_REBIN = "propagated_q_rebin"
+
+
+class FractionalCoverageAvailability(StrEnum):
+    """Whether fractional Q-E coverage is available for later operations."""
+
+    AVAILABLE = "available"
+    MISSING = "missing"
+
+
 def _readonly_float_array(value: npt.ArrayLike, *, name: str) -> FloatArray:
     array = np.array(value, dtype=np.float64, copy=True)
     if array.ndim != 1:
         raise ValueError(f"{name} must be a one-dimensional array")
     array.setflags(write=False)
     return array
+
+
+@dataclass(frozen=True, slots=True)
+class QExclusionInterval:
+    """One absolute-Q interval removed from Q-bin overlap geometry."""
+
+    lower_q: float
+    upper_q: float
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.lower_q, bool)
+            or isinstance(self.upper_q, bool)
+            or not isinstance(self.lower_q, Real)
+            or not isinstance(self.upper_q, Real)
+        ):
+            raise ValueError("Q-exclusion bounds must be finite numbers")
+        lower = float(self.lower_q)
+        upper = float(self.upper_q)
+        if not np.isfinite(lower) or not np.isfinite(upper):
+            raise ValueError("Q-exclusion bounds must be finite")
+        if lower >= upper:
+            raise ValueError("Q-exclusion lower bound must be less than upper bound")
+        object.__setattr__(self, "lower_q", lower)
+        object.__setattr__(self, "upper_q", upper)
+
+
+@dataclass(frozen=True, slots=True)
+class QRebinSpecification:
+    """Canonical target Q edges and absolute-Q exclusions for one rebin step."""
+
+    target_edges: tuple[float, ...]
+    exclusions: tuple[QExclusionInterval, ...] = ()
+
+    def __post_init__(self) -> None:
+        try:
+            edges = tuple(float(value) for value in self.target_edges)
+        except (TypeError, ValueError) as error:
+            raise ValueError("target Q-bin edges must be finite numbers") from error
+        if len(edges) < 2:
+            raise ValueError("target Q-bin edges must contain at least two values")
+        edge_array = np.asarray(edges, dtype=np.float64)
+        if not np.all(np.isfinite(edge_array)):
+            raise ValueError("target Q-bin edges must be finite")
+        if not np.all(np.diff(edge_array) > 0.0):
+            raise ValueError("target Q-bin edges must be strictly increasing")
+        exclusions = tuple(self.exclusions)
+        if any(not isinstance(item, QExclusionInterval) for item in exclusions):
+            raise ValueError("Q exclusions must be QExclusionInterval values")
+        object.__setattr__(self, "target_edges", edges)
+        object.__setattr__(self, "exclusions", exclusions)
+
+
+def _point_correspondence_digest(spectrum: Spectrum) -> str:
+    """Return a compact exact-value binding for one ordered X/Y/E spectrum."""
+
+    digest = hashlib.sha256()
+    digest.update(str(spectrum.group_index).encode())
+    digest.update(b"\0")
+    digest.update(spectrum.group_label.encode())
+    for values in (spectrum.energy, spectrum.intensity, spectrum.uncertainty):
+        normalized = np.array(values, dtype=np.float64, copy=True)
+        normalized[normalized == 0.0] = 0.0
+        normalized[np.isnan(normalized)] = np.nan
+        digest.update(normalized.size.to_bytes(8, byteorder="little", signed=False))
+        digest.update(normalized.astype("<f8", copy=False).tobytes())
+    return digest.hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class FractionalCoverage:
+    """Read-only fractional coverage arrays aligned with ordered spectra."""
+
+    values: tuple[FloatArray, ...] = field(repr=False)
+    origin: FractionalCoverageOrigin
+    point_correspondence: tuple[str, ...] = field(repr=False)
+    q_rebin_history: tuple[QRebinSpecification, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.origin, FractionalCoverageOrigin):
+            raise ValueError("fractional-coverage origin must be typed")
+        arrays = tuple(
+            _readonly_float_array(value, name="fractional coverage")
+            for value in self.values
+        )
+        if not arrays:
+            raise ValueError("fractional coverage requires at least one spectrum")
+        correspondence = tuple(self.point_correspondence)
+        if len(correspondence) != len(arrays) or any(
+            not item for item in correspondence
+        ):
+            raise ValueError(
+                "fractional coverage requires one point-correspondence binding "
+                "per spectrum"
+            )
+        if any(not np.all(np.isfinite(array)) for array in arrays):
+            raise ValueError("fractional coverage values must be finite")
+        if any(np.any(array < 0.0) for array in arrays):
+            raise ValueError("fractional coverage values must be nonnegative")
+        if self.origin is FractionalCoverageOrigin.CONFIRMED_UNREBINNED_SOURCE and any(
+            not np.all(array == 1.0) for array in arrays
+        ):
+            raise ValueError(
+                "confirmed-unrebinned fractional coverage values must all equal one"
+            )
+        object.__setattr__(self, "values", arrays)
+        object.__setattr__(self, "point_correspondence", correspondence)
+        history = tuple(self.q_rebin_history)
+        if any(not isinstance(item, QRebinSpecification) for item in history):
+            raise ValueError("Q-rebin history must contain QRebinSpecification values")
+        object.__setattr__(self, "q_rebin_history", history)
+
+    @classmethod
+    def aligned_with(
+        cls,
+        spectra: tuple[Spectrum, ...],
+        *,
+        values: tuple[npt.ArrayLike, ...],
+        origin: FractionalCoverageOrigin,
+        q_rebin_history: tuple[QRebinSpecification, ...] = (),
+    ) -> FractionalCoverage:
+        """Create coverage explicitly bound to ordered scientific point identity."""
+
+        return cls(
+            values=tuple(
+                _readonly_float_array(value, name="fractional coverage")
+                for value in values
+            ),
+            origin=origin,
+            point_correspondence=tuple(
+                _point_correspondence_digest(spectrum) for spectrum in spectra
+            ),
+            q_rebin_history=q_rebin_history,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -365,6 +516,7 @@ class ReducedDataset:
     source_columns: tuple[SourceColumnMetadata, ...] = field(default=(), repr=False)
     source_metadata: SourceMetadata | None = None
     q_bins: QBins | None = None
+    fractional_coverage: FractionalCoverage | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.role, SpectrumRole):
@@ -397,11 +549,63 @@ class ReducedDataset:
                 raise ValueError("source column metadata must match spectrum order")
         if self.q_bins is not None and self.q_bins.group_count != len(self.spectra):
             raise ValueError("Q-bin count must match spectrum count")
+        if self.fractional_coverage is not None:
+            if not isinstance(self.fractional_coverage, FractionalCoverage):
+                raise ValueError(
+                    "fractional_coverage must be FractionalCoverage or None"
+                )
+            if len(self.fractional_coverage.values) != len(self.spectra):
+                raise ValueError(
+                    "fractional-coverage spectrum count must match spectrum count"
+                )
+            if any(
+                coverage.size != spectrum.energy.size
+                for coverage, spectrum in zip(
+                    self.fractional_coverage.values,
+                    self.spectra,
+                    strict=True,
+                )
+            ):
+                raise ValueError(
+                    "fractional coverage must align with every spectrum point"
+                )
+            expected_correspondence = tuple(
+                _point_correspondence_digest(spectrum) for spectrum in self.spectra
+            )
+            if self.fractional_coverage.point_correspondence != expected_correspondence:
+                raise ValueError(
+                    "fractional coverage is bound to different ordered X/Y/E points"
+                )
 
     def assign_q_bins(self, q_bins: QBins) -> ReducedDataset:
         """Return this dataset with validated dataset-level Q-bin identity."""
 
         return replace(self, q_bins=q_bins)
+
+    def confirm_unrebinned_source(self) -> ReducedDataset:
+        """Return a dataset with all-one coverage after explicit user assertion."""
+
+        if self.fractional_coverage is not None:
+            raise ValueError(
+                "fractional coverage already exists and must not be reset to one"
+            )
+        coverage = FractionalCoverage.aligned_with(
+            self.spectra,
+            values=tuple(
+                np.ones(spectrum.energy.size, dtype=np.float64)
+                for spectrum in self.spectra
+            ),
+            origin=FractionalCoverageOrigin.CONFIRMED_UNREBINNED_SOURCE,
+        )
+        return replace(self, fractional_coverage=coverage)
+
+    @property
+    def fractional_coverage_availability(self) -> FractionalCoverageAvailability:
+        """Report whether per-point fractional coverage is available."""
+
+        if self.fractional_coverage is None:
+            return FractionalCoverageAvailability.MISSING
+        return FractionalCoverageAvailability.AVAILABLE
 
     @property
     def shared_energy_grid(self) -> bool:

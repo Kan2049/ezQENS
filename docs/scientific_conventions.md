@@ -76,8 +76,37 @@ reported group count is retained and compared with the reconstructed count;
 disagreement produces a warning and does not replace the step-derived bins.
 
 Q-bin/value count must equal spectrum count. No mismatch is repaired by sorting,
-deduplication, truncation, padding, extrapolation, interpolation, discarding, or
-combining values or spectra. Q rebinning is not defined for already-reduced data.
+deduplication, truncation, padding, extrapolation, interpolation, or nearest-Q
+matching.
+
+Fractional Q rebinning of reduced data requires explicit source Q-bin edges and
+per-point fractional coverage `F(Q,E)`. A user-confirmed source that has not
+previously been Q-rebinned starts with `F(Q,E) = 1`; imported data do not acquire
+that assertion implicitly. Rebin output propagates existing coverage, so `F` is
+finite and nonnegative but may exceed one after source bins are combined.
+
+For source Q bin `i`, target Q bin `j`, and aligned energy point `k`, let `g_ij`
+be the unexcluded geometric overlap length divided by the full source-bin width.
+Mantid-style reduced intensity `Y`, uncertainty `E`, and coverage `F` propagate
+as:
+
+```text
+S_jk    = sum_i Y_ik F_ik g_ij
+V_jk    = sum_i (E_ik F_ik)^2 g_ij
+Fnew_jk = sum_i F_ik g_ij
+Ynew_jk = S_jk / Fnew_jk
+Enew_jk = sqrt(V_jk) / Fnew_jk
+```
+
+If any positively weighted contributor has invalid uncertainty, the output
+uncertainty at that point remains invalid; its intensity and coverage still
+contribute normally. Q exclusions are explicit absolute-Q intervals applied to
+overlap geometry, including partial source-bin overlap, and overlapping
+intervals are unioned. Target bins must lie inside current source coverage and
+must not refine any contributing current source bin. Repeated rebinning uses the
+current propagated `F`; it never resets coverage to one. Q rebinning performs no
+energy interpolation, Q extrapolation, nearest-Q repair, or source-array
+mutation.
 
 ## 3. Lorentzian linewidth and relaxation time
 

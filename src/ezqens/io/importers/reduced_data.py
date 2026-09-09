@@ -25,6 +25,7 @@ from ezqens.io.importers._text import (
     analyze_wide_columns,
     find_group_markers,
     find_table_header,
+    mantid_xye_blocks,
     normalized_columns,
     normalized_dave_columns,
     read_text_lines,
@@ -717,6 +718,82 @@ def _import_dave_groups(
     )
 
 
+def _import_mantid_xye_blocks(
+    *,
+    lines: tuple[str, ...],
+    role: SpectrumRole,
+    detection: FormatDetectionResult,
+    source: Path,
+    energy_unit: str,
+    intensity_unit: str,
+    uncertainty_unit: str,
+) -> ReducedDataset:
+    """Import blank-line-separated Mantid-style X,Y,E spectrum blocks."""
+
+    _raise_on_errors(detection.diagnostics)
+    blocks = mantid_xye_blocks(lines)
+    spectra: list[Spectrum] = []
+    source_columns: list[SourceColumnMetadata] = []
+    diagnostics = list(detection.diagnostics)
+    for group_index, block in enumerate(blocks):
+        matrix = np.asarray(
+            [tuple(float(token) for token in row.tokens) for row in block],
+            dtype=np.float64,
+        )
+        group_label = str(group_index + 1)
+        columns = SourceColumnMetadata(
+            group_identity=group_label,
+            energy="X",
+            intensity="Y",
+            uncertainty="E",
+            source_row_numbers=tuple(row.line_number for row in block),
+        )
+        spectrum = _make_spectrum(
+            role=role,
+            group_index=group_index,
+            group_label=group_label,
+            energy=matrix[:, 0],
+            intensity=matrix[:, 1],
+            uncertainty=matrix[:, 2],
+            energy_unit=energy_unit,
+            intensity_unit=intensity_unit,
+            uncertainty_unit=uncertainty_unit,
+        )
+        spectra.append(spectrum)
+        source_columns.append(columns)
+        diagnostics.extend(_invalid_value_diagnostics(spectrum, columns))
+
+    if not energy_unit.strip() or energy_unit.strip().casefold() == "unknown":
+        diagnostics.append(
+            ImportDiagnostic(
+                code="mantid_energy_unit_missing",
+                severity=DiagnosticSeverity.WARNING,
+                message=(
+                    "Mantid X,Y,E source does not declare an energy unit; "
+                    "manual unit assignment remains required before physical analysis"
+                ),
+            )
+        )
+    diagnostics.append(
+        ImportDiagnostic(
+            code="mantid_q_assignment_missing",
+            severity=DiagnosticSeverity.INFO,
+            message=(
+                "Mantid X,Y,E block order does not define physical Q values; "
+                "manual Q assignment remains available"
+            ),
+        )
+    )
+    return ReducedDataset(
+        role=role,
+        spectra=tuple(spectra),
+        source_reference=source.name,
+        source_layout=ReducedDataFormat.MANTID_XYE_BLOCKS,
+        diagnostics=tuple(diagnostics),
+        source_columns=tuple(source_columns),
+    )
+
+
 def _import_wide_table(
     *,
     lines: tuple[str, ...],
@@ -868,6 +945,7 @@ def import_reduced_data(
 
     importers = {
         ReducedDataFormat.DAVE_GROUP_BLOCKS: _import_dave_groups,
+        ReducedDataFormat.MANTID_XYE_BLOCKS: _import_mantid_xye_blocks,
         ReducedDataFormat.WIDE_QENS_TABLE: _import_wide_table,
         ReducedDataFormat.SINGLE_SPECTRUM_TABLE: _import_single_table,
     }

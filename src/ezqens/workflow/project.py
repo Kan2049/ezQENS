@@ -9,8 +9,18 @@ from uuid import uuid4
 
 import numpy as np
 
-from ezqens.domain import DiagnosticSeverity, ReducedDataset, SpectrumRole
-from ezqens.preprocessing import FittingSelection
+from ezqens.domain import (
+    DiagnosticSeverity,
+    QRebinSpecification,
+    ReducedDataset,
+    SpectrumRole,
+)
+from ezqens.preprocessing import (
+    FittingSelection,
+    QRebinDiagnostic,
+    QRebinError,
+    rebin_fractional_q,
+)
 from ezqens.resolution import (
     PreparedResolution,
     ResolutionDiagnostic,
@@ -49,6 +59,8 @@ class WorkflowDiagnosticCode(StrEnum):
     INTERACTION_CONTEXT_UNAVAILABLE = "interaction_context_unavailable"
     INVALID_MANUAL_OPERATION = "invalid_manual_operation"
     TARGET_SETUP_INVALID = "target_setup_invalid"
+    Q_REBIN_FAILED = "q_rebin_failed"
+    RESOLUTION_Q_REBIN_REPLAY_FAILED = "resolution_q_rebin_replay_failed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +72,7 @@ class WorkflowDiagnostic:
     message: str
     group_index: int | None = None
     resolution_diagnostics: tuple[ResolutionDiagnostic, ...] = ()
+    q_rebin_diagnostics: tuple[QRebinDiagnostic, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.code, WorkflowDiagnosticCode):
@@ -74,6 +87,10 @@ class WorkflowDiagnostic:
                 "resolution_diagnostics must contain ResolutionDiagnostic values"
             )
         object.__setattr__(self, "resolution_diagnostics", details)
+        q_rebin_details = tuple(self.q_rebin_diagnostics)
+        if any(not isinstance(item, QRebinDiagnostic) for item in q_rebin_details):
+            raise ValueError("q_rebin_diagnostics must contain QRebinDiagnostic values")
+        object.__setattr__(self, "q_rebin_diagnostics", q_rebin_details)
 
 
 class WorkflowError(ValueError):
@@ -249,6 +266,7 @@ def _error(
     *,
     group_index: int | None = None,
     resolution_diagnostics: tuple[ResolutionDiagnostic, ...] = (),
+    q_rebin_diagnostics: tuple[QRebinDiagnostic, ...] = (),
 ) -> WorkflowError:
     return WorkflowError(
         (
@@ -258,6 +276,7 @@ def _error(
                 message=message,
                 group_index=group_index,
                 resolution_diagnostics=resolution_diagnostics,
+                q_rebin_diagnostics=q_rebin_diagnostics,
             ),
         )
     )
@@ -376,6 +395,34 @@ def measured_point_correspondence_exactly_unchanged(
     return True
 
 
+def _rebind_fractional_coverage(
+    original: ReducedDataset,
+    replacement: ReducedDataset,
+) -> ReducedDataset:
+    """Preserve or invalidate coverage according to exact X/Y/E correspondence."""
+
+    correspondence_unchanged = measured_point_correspondence_exactly_unchanged(
+        original,
+        replacement,
+    )
+    if correspondence_unchanged:
+        if (
+            replacement.fractional_coverage is None
+            and original.fractional_coverage is not None
+        ):
+            return replace(
+                replacement,
+                fractional_coverage=original.fractional_coverage,
+            )
+        return replacement
+    if (
+        original.fractional_coverage is not None
+        and replacement.fractional_coverage is original.fractional_coverage
+    ):
+        return replace(replacement, fractional_coverage=None)
+    return replacement
+
+
 def replace_project_dataset(
     project: WorkflowProject,
     reference: ProjectDataset,
@@ -384,6 +431,7 @@ def replace_project_dataset(
     """Replace immutable dataset content while preserving its project identity."""
 
     current = _current_dataset(project, reference)
+    replacement = _rebind_fractional_coverage(current.dataset, replacement)
     updated = ProjectDataset(project.project_id, current.dataset_id, replacement)
     datasets = tuple(
         updated if item.dataset_id == current.dataset_id else item
@@ -567,6 +615,138 @@ def _association_error(error: ResolutionPreparationError) -> WorkflowError:
     )
 
 
+def _q_rebin_error(
+    error: QRebinError,
+    *,
+    replay: bool = False,
+) -> WorkflowError:
+    first = error.diagnostics[0]
+    return _error(
+        (
+            WorkflowDiagnosticCode.RESOLUTION_Q_REBIN_REPLAY_FAILED
+            if replay
+            else WorkflowDiagnosticCode.Q_REBIN_FAILED
+        ),
+        first.message,
+        group_index=first.target_group_index,
+        q_rebin_diagnostics=error.diagnostics,
+    )
+
+
+def _replay_q_rebin_history(
+    resolution: ReducedDataset,
+    history: tuple[QRebinSpecification, ...],
+) -> ReducedDataset:
+    coverage = resolution.fractional_coverage
+    completed = () if coverage is None else coverage.q_rebin_history
+    if len(completed) > len(history) or completed != history[: len(completed)]:
+        raise _error(
+            WorkflowDiagnosticCode.RESOLUTION_Q_REBIN_REPLAY_FAILED,
+            "Resolution Q-rebin history is not compatible with the active Sample",
+        )
+    replayed = resolution
+    for specification in history[len(completed) :]:
+        try:
+            replayed = rebin_fractional_q(replayed, specification)
+        except QRebinError as error:
+            raise _q_rebin_error(error, replay=True) from error
+    return replayed
+
+
+def _resolution_is_shared_with_another_sample(
+    project: WorkflowProject,
+    resolution_id: str,
+    sample_id: str,
+) -> bool:
+    return any(
+        association.resolution_id == resolution_id
+        and association.sample_id != sample_id
+        for association in project.resolution_associations
+    )
+
+
+def _replace_or_branch_rebinned_resolution(
+    project: WorkflowProject,
+    sample_id: str,
+    resolution: ProjectDataset,
+    rebinned: ReducedDataset,
+) -> tuple[WorkflowProject, ProjectDataset]:
+    if not _resolution_is_shared_with_another_sample(
+        project,
+        resolution.dataset_id,
+        sample_id,
+    ):
+        return replace_project_dataset(project, resolution, rebinned)
+    updated_project, branched = add_project_dataset(project, rebinned)
+    association = ResolutionAssociation(sample_id, branched.dataset_id)
+    return (
+        replace(
+            updated_project,
+            resolution_associations=(
+                *(
+                    item
+                    for item in updated_project.resolution_associations
+                    if item.sample_id != sample_id
+                ),
+                association,
+            ),
+        ),
+        branched,
+    )
+
+
+def rebin_project_sample_q(
+    project: WorkflowProject,
+    sample: ProjectDataset,
+    specification: QRebinSpecification,
+) -> tuple[WorkflowProject, ProjectDataset, ProjectDataset | None]:
+    """Rebin a Sample and its applied Resolution as one immutable transaction."""
+
+    current_sample = _current_dataset(project, sample)
+    if current_sample.dataset.role is not SpectrumRole.SAMPLE:
+        raise _error(
+            WorkflowDiagnosticCode.SAMPLE_ROLE_REQUIRED,
+            "only a Sample dataset may start paired Q rebinning",
+        )
+    current_resolution = applied_resolution(project, current_sample)
+    try:
+        rebinned_sample_data = rebin_fractional_q(
+            current_sample.dataset,
+            specification,
+        )
+        rebinned_resolution_data = (
+            None
+            if current_resolution is None
+            else rebin_fractional_q(current_resolution.dataset, specification)
+        )
+    except QRebinError as error:
+        raise _q_rebin_error(error) from error
+
+    if rebinned_resolution_data is not None:
+        try:
+            validate_exact_q_association(
+                rebinned_sample_data,
+                rebinned_resolution_data,
+            )
+        except ResolutionPreparationError as error:
+            raise _association_error(error) from error
+
+    updated_project, updated_sample = replace_project_dataset(
+        project,
+        current_sample,
+        rebinned_sample_data,
+    )
+    updated_resolution: ProjectDataset | None = None
+    if current_resolution is not None and rebinned_resolution_data is not None:
+        updated_project, updated_resolution = _replace_or_branch_rebinned_resolution(
+            updated_project,
+            updated_sample.dataset_id,
+            current_resolution,
+            rebinned_resolution_data,
+        )
+    return updated_project, updated_sample, updated_resolution
+
+
 def apply_resolution(
     project: WorkflowProject,
     sample: ProjectDataset,
@@ -585,16 +765,28 @@ def apply_resolution(
             "an applied Resolution already exists; explicit replacement "
             "confirmation is required before validating a new Resolution",
         )
+    proposed_resolution = preflight.proposed_resolution
+    sample_coverage = preflight.sample.dataset.fractional_coverage
+    history = () if sample_coverage is None else sample_coverage.q_rebin_history
+    if history:
+        replayed = _replay_q_rebin_history(proposed_resolution.dataset, history)
+        if replayed is not proposed_resolution.dataset:
+            project, proposed_resolution = _replace_or_branch_rebinned_resolution(
+                project,
+                preflight.sample.dataset_id,
+                proposed_resolution,
+                replayed,
+            )
     try:
         validate_exact_q_association(
             preflight.sample.dataset,
-            preflight.proposed_resolution.dataset,
+            proposed_resolution.dataset,
         )
     except ResolutionPreparationError as error:
         raise _association_error(error) from error
     association = ResolutionAssociation(
         preflight.sample.dataset_id,
-        preflight.proposed_resolution.dataset_id,
+        proposed_resolution.dataset_id,
     )
     return replace(
         project,
