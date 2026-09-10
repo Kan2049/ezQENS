@@ -13,7 +13,8 @@ The roadmap follows **rolling refinement**:
 * near-term milestones describe scientific goals and validation boundaries;
 * distant capabilities remain intentionally concise and provisional.
 
-Detailed implementation decisions belong in the milestone-specific specification written immediately before implementation, not in the long-term roadmap.
+Detailed implementation decisions belong in the milestone-specific specification
+written immediately before implementation, not in the long-term roadmap.
 
 The guiding principles are:
 
@@ -27,8 +28,14 @@ The guiding principles are:
 8. Scientific visualization should evolve alongside the analysis core rather than being postponed until the final GUI.
 9. Desktop GUI development should begin only after a complete single-Q scientific fitting path has been validated.
 10. For equally correct solutions, prefer fewer concepts, less code, fewer dependencies, lower resource use, and easier maintenance.
+11. Keep reusable fitting **Methods** logically independent from the data on which they are executed.
+12. Keep historical **Results** distinct from editable Methods: changing a Method must not silently rewrite an already produced Result.
+13. Treat AutoFit and Manual Fit as different ways of creating or refining reusable Methods, not as permanently different classes of scientific result.
+14. Define scientific Models broadly enough to support both current free spectral fitting and later validated multi-Q/global motion models without moving scientific equations into the GUI.
 
-When a milestone is completed, it is scientifically validated and frozen before development proceeds. The roadmap is then reviewed and may be adjusted according to newly discovered research needs.
+When a milestone is completed, it is scientifically validated and frozen before
+development proceeds. The roadmap is then reviewed and may be adjusted according
+to newly discovered research needs.
 
 ### 1.1 High-level progression
 
@@ -45,13 +52,13 @@ level, work progresses through four overlapping phases:
    may be scheduled before or after the first public release by later owner
    decision; no large catalogue is implied.
 3. **Phase III — ezQENS application and v1.0 readiness:** progressively guided
-   and advanced GUI workflows, usability, export, lightweight reproducibility,
-   documentation, and macOS/Windows packaging. This culminates in the special
-   v1.0 public-release gate.
+   and advanced GUI workflows, reusable Methods, persistent Results, usability,
+   export, lightweight reproducibility, documentation, and macOS/Windows
+   packaging. This culminates in the special v1.0 public-release gate.
 4. **Phase IV — Expansion:** additional formats/instruments, richer output,
    additional dynamics, raw reduction, temperature workflows, molecular
-   structure input, and advanced automation. These do not burden earlier
-   architecture without a concrete requirement.
+   structure input, reusable/global fitting workflows, and advanced automation.
+   These do not burden earlier architecture without a concrete requirement.
 
 ---
 
@@ -66,7 +73,8 @@ Established the initial:
 * privacy rules;
 * Python package and development tooling.
 
-Scientific conventions that remain unresolved stay explicitly unresolved rather than being guessed or encoded.
+Scientific conventions that remain unresolved stay explicitly unresolved rather
+than being guessed or encoded.
 
 ---
 
@@ -181,7 +189,8 @@ workflow requires them.
 
 Generic Q rebinning is not implemented in the initial reduced-text workflow.
 
-For final reduced `S(Q,E)` spectra, scientifically correct rebinning may require information that is no longer available, such as:
+For final reduced `S(Q,E)` spectra, scientifically correct rebinning may require
+information that is no longer available, such as:
 
 * original detector contributions;
 * Q-bin boundaries;
@@ -189,7 +198,8 @@ For final reduced `S(Q,E)` spectra, scientifically correct rebinning may require
 * normalization weights;
 * geometry or event information.
 
-Future intermediate or raw-data workflows may retain enough information to construct new Q bins correctly.
+Future intermediate or raw-data workflows may retain enough information to
+construct new Q bins correctly.
 
 The architecture should therefore allow a future transformation conceptually like:
 
@@ -214,7 +224,8 @@ Initial visualization supports Q edges/intervals/representatives and individual
 spectra with uncertainties, fitting range, invalid points, `AUTO`/`REVIEW`
 padding, outside-range points, and retained points.
 
-Visualization must remain usable from Python/Jupyter and must not depend on a desktop GUI.
+Visualization must remain usable from Python/Jupyter and must not depend on a
+desktop GUI.
 
 ### Validation
 
@@ -278,7 +289,8 @@ Add resolution-specific inspection including:
 * exact sample-resolution Q association and retained-boundary comparison; and
 * unchanged `E = 0` alignment inspection.
 
-These plots form part of scientific validation and must remain accessible outside the GUI.
+These plots form part of scientific validation and must remain accessible
+outside the GUI.
 
 ---
 
@@ -286,7 +298,8 @@ These plots form part of scientific validation and must remain accessible outsid
 
 ### Goal
 
-Provide a validated GUI-independent numerical convolution core suitable for QENS fitting.
+Provide a validated GUI-independent numerical convolution core suitable for
+QENS fitting.
 
 The convolution path must support:
 
@@ -307,7 +320,8 @@ The convolution path must support:
 
 The original sample data are never interpolated merely for residual evaluation.
 
-The elastic component follows the approved measured-resolution convention rather than using an artificial grid-dependent numerical delta spike.
+The elastic component follows the approved measured-resolution convention
+rather than using an artificial grid-dependent numerical delta spike.
 
 Asymmetric support is supported and is not inherently a warning. Possible
 incomplete resolution-peak containment is retained as a future warning
@@ -324,7 +338,8 @@ Add numerical diagnostics capable of comparing:
 * convolved model;
 * model evaluated on the original sample grid.
 
-Visualization should help detect grid, normalization, centering, or convolution-boundary problems.
+Visualization should help detect grid, normalization, centering, or
+convolution-boundary problems.
 
 ---
 
@@ -332,7 +347,8 @@ Visualization should help detect grid, normalization, centering, or convolution-
 
 ### Goal
 
-Fit one selected QENS spectrum reliably using the validated measured-resolution and convolution path.
+Fit one selected QENS spectrum reliably using the validated measured-resolution
+and convolution path.
 
 Phase A provides the reusable production single-Q engine, manual arbitrary-N
 Lorentzian configuration, standard 0L/1L/2L multistart candidate evaluation,
@@ -340,22 +356,23 @@ absolute-sigma covariance and threshold-free diagnostics. The production
 AutoFit core now applies the reviewed deterministic M5 policy to that existing
 candidate evidence without changing candidate fitting.
 
-A corrective prerequisite now requires every measured-resolution Q group to pass
-structural/preparation QC before normalization and scientific use. An untouched normal
-group is internally authorized as default KEEP with `AUTOMATIC_QC` source. Explicit
-user confirmation remains required for user-reviewed KEEP, any AUTO-padding override,
-and boundary-only contiguous EXCLUDE; these paths retain `USER_REVIEW` source. KEEP
-may carry a neutral user-retained-structure warning. The gate records
-signed-area-ratio and normalization provenance per Q without automatic feature detection,
-classification, correction, or a ratio threshold. M4 convolution
-mathematics and Phase-A fitting mathematics remain unchanged.
+A corrective prerequisite now requires every measured-resolution Q group to
+pass structural/preparation QC before normalization and scientific use. An
+untouched normal group is internally authorized as default KEEP with
+`AUTOMATIC_QC` source. Explicit user confirmation remains required for
+user-reviewed KEEP, any AUTO-padding override, and boundary-only contiguous
+EXCLUDE; these paths retain `USER_REVIEW` source. KEEP may carry a neutral
+user-retained-structure warning. The gate records signed-area-ratio and
+normalization provenance per Q without automatic feature detection,
+classification, correction, or a ratio threshold. M4 convolution mathematics
+and Phase-A fitting mathematics remain unchanged.
 
 The first useful free-fit model should support:
 
 * elastic contribution;
 * zero or more quasielastic Lorentzian components;
 * simple background;
-* explicit parameter initial values;
+* explicit execution-time parameter starting values;
 * bounds;
 * fixed/free parameter state;
 * weighted fitting using valid uncertainties.
@@ -376,13 +393,13 @@ but uninterpretable transitions. Family IC envelopes remain separate from
 residual eligibility of the concrete recommendation candidate, so an
 INADEQUATE fit cannot replace an ADEQUATE or QUESTIONABLE primary even when it
 contributes strong descriptive IC evidence. SUPPORTED_TRANSITION describes
-model-family evidence, not proof of an added physical process. Severe multistart
-stability is assessed on FWHM-canonicalized Lorentzian areas and linewidths,
-excluding nuisance-only variation. The reviewed M5 residual, AICc/BIC, and severe
-identifiability calibration is fixed in the production policy and is not a
-universal physical constant or user-tunable threshold set. Minimum AICc/BIC
-alone never selects the recommendation, D_unique is absent, and a 2L result
-does not exclude higher unsearched complexity.
+model-family evidence, not proof of an added physical process. Severe
+multistart stability is assessed on FWHM-canonicalized Lorentzian areas and
+linewidths, excluding nuisance-only variation. The reviewed M5 residual,
+AICc/BIC, and severe identifiability calibration is fixed in the production
+policy and is not a universal physical constant or user-tunable threshold set.
+Minimum AICc/BIC alone never selects the recommendation, D_unique is absent,
+and a 2L result does not exclude higher unsearched complexity.
 
 Exhausting the fixed Auto scope is distinct from finding an adequate 2L model.
 When an evaluated 2L result remains inadequate, Auto returns no recommendation
@@ -393,9 +410,9 @@ after a supported 2L result likewise does not recommend escalation.
 Structured resolution-containment assessment and reference-Q policy remain
 unresolved. Existing provenance cannot distinguish scientific truncation of
 relevant resolution structure, so AutoFit records that capability gap and
-applies no geometric or signed-area threshold. Milestone 5 remains active
-until this production policy completes the required independent code and
-scientific reviews and is explicitly frozen.
+applies no geometric or signed-area threshold. Milestone 5 remains active until
+this production policy completes the required independent code and scientific
+reviews and is explicitly frozen.
 
 ### Scientific visualization
 
@@ -429,13 +446,15 @@ inspect result
 
 ---
 
-## 8. Desktop GUI prototype begins after Milestone 5
+## 8. Desktop GUI and reusable analysis workflow
 
-Once the single-Q fitting path passes scientific validation, development of the interactive desktop workflow may begin.
+Once the single-Q fitting path passes scientific validation, development of the
+interactive desktop workflow may begin.
 
 The GUI must remain a thin interface over the validated scientific core.
 
-The first prototype should focus on the existing complete workflow rather than implementing future features.
+The first GUI slices should focus on the existing complete scientific workflow
+rather than implementing future scientific models prematurely.
 
 Expected interaction areas include:
 
@@ -447,11 +466,227 @@ Expected interaction areas include:
 * single-Q model configuration;
 * parameter editing;
 * fit execution;
-* fitted-curve and residual visualization.
+* fitted-curve and residual visualization;
+* reusable fitting Methods;
+* data-associated Results; and
+* later reusable Q-bin configurations.
 
-Scientific formulas, numerical convolution, masking rules, fitting logic, and data transformations must remain outside GUI controllers.
+Scientific formulas, numerical convolution, masking rules, fitting logic, model
+relationships, and data transformations must remain outside GUI controllers.
 
 Core analysis must continue to function without the desktop GUI.
+
+### 8.1 Workspace information architecture
+
+The long-term desktop workspace should distinguish the following concepts:
+
+```text
+Project
+
+Data
+├─ Sample 1
+│  └─ Results
+├─ Sample 2
+│  └─ Results
+└─ Resolution data
+
+Q Bins
+├─ Q-bin configuration 1
+└─ Q-bin configuration 2
+
+Methods
+├─ Method 1
+├─ Method 2
+└─ Method 3
+```
+
+`Results` belong under the data to which the analysis was applied.
+
+`Methods` are independent reusable fitting recipes and are not children of a
+specific Sample or Group.
+
+`Q Bins` should be represented as a reusable workspace concept distinct from
+Methods and Data. A Method may nevertheless record or reference a Q-bin
+configuration when that forms part of the intended fitting recipe.
+
+The initial implementation may remain narrower than this final hierarchy, but
+new GUI state should not unnecessarily prevent this direction.
+
+### 8.2 Method and Result separation
+
+A **Method** describes how an analysis is intended to be performed.
+
+A **Result** records what happened when a Method was executed on concrete data.
+
+Conceptually:
+
+```text
+Method
+   +
+Data / fitting target
+   ↓
+Run
+   ↓
+Result
+```
+
+A Method is editable and reusable. It may be applied repeatedly to different
+Groups of the same data or to scientifically related datasets such as a
+temperature series.
+
+A Result is associated with the concrete data and fitting scope on which it was
+produced. Changing the reusable Method later must not silently change an
+existing historical Result. Re-running an edited or reused Method produces a
+new Result rather than rewriting the scientific meaning of an older Result.
+
+Method and Result persistence details are specified only when the corresponding
+GUI/workflow milestone becomes active.
+
+### 8.3 Method contents and application semantics
+
+A Method should be capable of storing a complete reusable fitting recipe,
+including as applicable:
+
+* Model definition;
+* bounds;
+* fixed/free states, including the fixed value when a parameter is fixed;
+* parameter relationships or ties;
+* Resolution choice/configuration;
+* Q-bin choice/configuration;
+* fitting selection/range/mask context; and
+* other model-specific configuration required by a concrete validated model.
+
+Ordinary free-parameter Current or initial values are execution state and are
+not persisted as part of a reusable Method. They may exist in a Working
+Analysis for a specific fit execution or be generated by the scientific
+workflow when required. A fixed parameter value is part of the Method because
+the fixed constraint is incomplete without that value.
+
+Saving information in a Method does **not** imply that all of that information
+must be copied whenever the Method is applied elsewhere.
+
+The **Model definition is the mandatory part of applying a Method**. Other
+stored configuration may be selectively reused.
+
+Typical optional application categories may include:
+
+* bounds;
+* fixed/free state and fixed parameter values;
+* parameter relationships;
+* Resolution;
+* Q-bin configuration; and
+* fitting selection.
+
+The exact grouping and UI are deferred until implementation.
+
+A Method may remember user-preferred application defaults. These preferences
+are usage metadata rather than part of the scientific Model definition.
+
+At minimum, application behavior should be able to distinguish two common
+contexts:
+
+1. applying a Method to another Group within the same dataset; and
+2. applying a Method to another scientifically related dataset.
+
+The useful defaults may differ between these contexts. User choices should be
+able to override defaults rather than being encoded as universal scientific
+rules.
+
+A later version may allow Methods to be created and edited without any data
+being loaded. This is a desired consequence of Method independence, but it does
+not require a speculative framework in the current GUI slice.
+
+### 8.4 AutoFit and Manual Fit as Method creation paths
+
+AutoFit and Manual Fit should not create permanently different kinds of saved
+Method or Result.
+
+Conceptually:
+
+```text
+                  Blank fitting target
+                         │
+             ┌───────────┴───────────┐
+             │                       │
+          AutoFit                Manual Fit
+             │                       │
+   discover/compare models       user builds model
+             │                       │
+       candidate Methods          working Method
+             │                       │
+             └───────────┬───────────┘
+                         ↓
+                      Method
+                         │
+                       Run
+                         ↓
+                      Result
+```
+
+For the first free-spectral AutoFit workflow, AutoFit starts without a
+user-specified spectral Model and uses the validated scientific core to
+evaluate candidate model families. The GUI may present multiple candidates and
+allow the user to save one or more of them.
+
+Each saved AutoFit candidate becomes an ordinary editable Method. Once saved,
+it has the same capabilities as a Method created manually: parameters, bounds,
+fixed/free state, relationships, fitting context, and other applicable
+configuration may be edited and the Method may be run again.
+
+AutoFit origin may be retained as provenance, but it must not limit later
+editing or result handling.
+
+A candidate that is fitted against the current data may therefore yield both:
+
+* a reusable Method; and
+* a Result associated with the current Data/Group.
+
+AutoFit is therefore best understood as a mechanism for **discovering and
+comparing Method candidates**, not as a permanently separate result type.
+
+### 8.5 Model abstraction and future fitting scope
+
+The current free spectral model:
+
+```text
+elastic + N Lorentzian components + optional background
+```
+
+is one Model family, not the permanent definition of a Model.
+
+The scientific Model concept must remain open to later concrete, validated
+models with different fitting scopes, for example:
+
+* single-Q free spectral fitting;
+* multi-Q/global motion models;
+* jump-diffusion models;
+* three-site jump or related discrete-motion models;
+* Chudley-Elliott-type models;
+* rotational or reorientational models;
+* confined/localized-motion models; and
+* later multi-dataset global models where scientifically justified.
+
+A future Model may therefore act on one Group, multiple Q Groups, or eventually
+multiple related datasets.
+
+The scientific core, not the GUI, must own:
+
+* model equations;
+* parameter meanings and identities;
+* model-specific parameter relationships;
+* required scientific inputs;
+* valid fitting scope;
+* evaluation;
+* diagnostics; and
+* fit/readiness rules.
+
+The GUI should consume public model metadata and workflow capabilities rather
+than contain model-specific scientific equations.
+
+The architecture should preserve an extension seam for additional concrete
+Model families. It should **not** prematurely introduce a generic plugin system,
+large model registry, or abstract framework before a second concrete model
+family requires that abstraction.
 
 ---
 
@@ -469,9 +704,18 @@ Expected outputs include:
 * experimental EISF from fitted integrated component areas;
 * transparent handling of failed, excluded, or manually refitted Q points.
 
-Batch fitting remains a sequence of independent free fits rather than an implicit global fit.
+Batch fitting in this milestone remains a sequence of **independent free fits**
+rather than an implicit global fit.
 
-Detailed fit seeding, refit state, exclusion state, fit-quality summaries, and derived-uncertainty policies will be specified when this milestone becomes active.
+This does not define the long-term Model architecture as independent-only.
+Later scientifically validated motion Models may perform genuine multi-Q/global
+fitting through their own core-owned model relationships. Such global fitting
+is a separate later capability and must not be simulated by GUI-side parameter
+ties or by silently changing the semantics of Milestone-6 batch fitting.
+
+Detailed fit seeding, Method application, refit state, exclusion state,
+fit-quality summaries, Result persistence, and derived-uncertainty policies
+will be specified when this milestone becomes active.
 
 ### Scientific visualization
 
@@ -485,7 +729,8 @@ Add analysis-level views such as:
 * residual overview;
 * included/excluded Q states.
 
-After Milestone 6, the desktop GUI may become the primary interactive workflow while Python/Jupyter usage remains fully supported.
+After Milestone 6, the desktop GUI may become the primary interactive workflow
+while Python/Jupyter usage remains fully supported.
 
 ---
 
@@ -502,18 +747,20 @@ Required release capabilities are:
   GUI-independent Python core;
 * useful scientific export;
 * lightweight reproducibility information identifying inputs, selections and
-  masks, model and fit settings, results, warnings, and software version;
+  masks, Methods/model and fit settings, Results, warnings, and software
+  version;
 * clear user and scientific documentation;
 * validated macOS and Windows packages; and
 * real-workflow validation centered on DAVE- and Mantid-preprocessed data,
   including representative PSI FOCUS and ILL IN5/IN16 workflows where
   available, without instrument-specific core assumptions.
 
-Detailed GUI, export, reproducibility, and packaging milestones are defined
-through rolling refinement when they become active. A complex project archive,
-raw-data reduction, automatic molecular interpretation, and a large mandatory
-dynamics-model catalogue do not gate v1.0. A selected dynamics model gates the
-release only if the owner explicitly promotes it into release scope.
+Detailed GUI, export, reproducibility, Method/Result persistence, and packaging
+milestones are defined through rolling refinement when they become active. A
+complex project archive, raw-data reduction, automatic molecular
+interpretation, and a large mandatory dynamics-model catalogue do not gate
+v1.0. A selected dynamics model gates the release only if the owner explicitly
+promotes it into release scope.
 
 ---
 
@@ -529,15 +776,37 @@ scientific need and explicit owner decisions.
 Potential scientifically approved temporal or spatial analyses include:
 
 * diffusion and jump-diffusion models;
+* discrete-site jump models where scientifically appropriate;
 * characteristic or residence times;
 * rotational or reorientational dynamics;
 * EISF geometry models;
 * confined or localized motion; and
 * other concrete QENS dynamics models justified by real workflows.
 
-Each model is added locally only after its equations, parameters, references,
-diagnostics, and validation cases are approved. Do not create a generic model
-registry or mandatory catalogue.
+Some of these Models may require genuine global fitting across multiple Q
+Groups rather than independent per-Q spectral fitting.
+
+Each model is added locally only after its:
+
+* equations;
+* parameters;
+* fitting scope;
+* required inputs;
+* references;
+* diagnostics; and
+* validation cases
+
+are scientifically approved.
+
+When a second concrete Model family makes a shared abstraction necessary, the
+core should provide the smallest common public Model interface required by the
+real implementations. The interface should allow a Model to describe its
+identity, fitting scope, parameter schema, requirements, evaluation, and
+diagnostics without placing scientific logic in GUI code.
+
+Do not create a speculative generic model registry, mandatory model catalogue,
+plugin framework, or global-fitting framework before concrete validated models
+require them.
 
 ### Automatic molecular or structure-driven analysis
 
@@ -565,7 +834,12 @@ Possible future additions may include:
 * additional EISF or dynamics models;
 * scientifically justified auxiliary QENS analysis.
 
-These capabilities are added only when concrete research use cases require them.
+Reusable Methods should support workflows across scientifically related data,
+such as temperature series, without assuming that every saved Method setting
+must automatically be transferred to every target dataset.
+
+These capabilities are added only when concrete research use cases require
+them.
 
 ---
 
@@ -598,11 +872,15 @@ existing QENS analysis core
 
 Raw HDF/HDF5 is not treated as one universal scientific format.
 
-Future support should be based on concrete documented schemas and instrument workflows rather than a speculative generic HDF importer.
+Future support should be based on concrete documented schemas and instrument
+workflows rather than a speculative generic HDF importer.
 
-No raw-data adapter framework, instrument registry, plugin system, universal reduction abstraction, or Mantid abstraction is implemented before a real supported source requires it.
+No raw-data adapter framework, instrument registry, plugin system, universal
+reduction abstraction, or Mantid abstraction is implemented before a real
+supported source requires it.
 
-The existing reduced-data workflow must remain usable independently of future raw-data capabilities.
+The existing reduced-data workflow must remain usable independently of future
+raw-data capabilities.
 
 ---
 
@@ -613,10 +891,14 @@ Possible later product work includes:
 * richer scientific plotting;
 * publication-oriented export;
 * richer project save/reload beyond v1.0 lightweight reproducibility;
+* independent Method creation/editing without loaded data;
+* reusable Method libraries;
+* richer Method-application workflows across Groups and related datasets;
 * expanded desktop workflows;
 * additional platform packaging.
 
-These capabilities consume the validated scientific core rather than redefine scientific behavior.
+These capabilities consume the validated scientific core rather than redefine
+scientific behavior.
 
 The final project-container format and extension remain unresolved. Container,
 migration, security, and long-term persistence architecture are designed only
@@ -636,6 +918,9 @@ At every active milestone:
 * keep invalid data distinct from analysis exclusions;
 * avoid silent repair or unsupported inference;
 * maintain explicit units and scientific conventions;
+* keep Method configuration distinct from execution Results;
+* ensure historical Results retain enough execution context for scientific interpretation;
+* keep scientific Model equations and relationships out of GUI code;
 * use synthetic tests for public validation;
 * keep private experimental data out of committed tests and logs;
 * run pytest, Ruff, and strict mypy;
@@ -644,9 +929,11 @@ At every active milestone:
 * provide an owner-facing validation procedure for real data;
 * avoid adding dependencies before corresponding functionality exists.
 
-When a milestone reveals that an earlier architectural assumption is unnecessary or over-engineered, simplify before building additional layers on top of it.
+When a milestone reveals that an earlier architectural assumption is unnecessary
+or over-engineered, simplify before building additional layers on top of it.
 
-Scientific visualization should be treated as part of validation and usability, not merely final presentation.
+Scientific visualization should be treated as part of validation and usability,
+not merely final presentation.
 
 ---
 
@@ -682,7 +969,8 @@ Before a milestone is frozen:
 4. the owner receives explicit instructions for manual/Jupyter validation;
 5. unexpected scientific differences must be understood rather than silently accepted.
 
-After freezing a milestone, review this roadmap with the scientific owner before beginning the next milestone.
+After freezing a milestone, review this roadmap with the scientific owner before
+beginning the next milestone.
 
 Newly discovered research needs may:
 
@@ -691,7 +979,9 @@ Newly discovered research needs may:
 * split or merge future milestones;
 * promote a provisional capability into the near-term roadmap.
 
-A frozen milestone should not be reopened merely to anticipate distant functionality unless a genuine architectural or scientific blocker is discovered.
+A frozen milestone should not be reopened merely to anticipate distant
+functionality unless a genuine architectural or scientific blocker is
+discovered.
 
 ---
 
@@ -713,4 +1003,5 @@ When a milestone becomes the next active milestone:
 10. freeze the milestone;
 11. review and update the roadmap.
 
-Distant milestone details are provisional and must not be treated as frozen API, dependency, file-format, or architecture contracts.
+Distant milestone details are provisional and must not be treated as frozen API,
+dependency, file-format, or architecture contracts.

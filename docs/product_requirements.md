@@ -93,12 +93,12 @@ transformations, exclusions, warnings, and results.
 
 Version 1.0 must support:
 
-- DAVE group-block ASCII output;
-- wide QENS tables with shared `x` and paired `yN`/`yerrN` columns;
-- single-spectrum `x`/`y`/`yerr` tables;
-- generic ASCII, TXT, DAT, and CSV files through explicit custom mapping;
-- measured resolution from vanadium or a low-temperature sample;
-- uniform outer-edge bins, explicit representative values, approved DAVE
+* DAVE group-block ASCII output;
+* wide QENS tables with shared `x` and paired `yN`/`yerrN` columns;
+* single-spectrum `x`/`y`/`yerr` tables;
+* generic ASCII, TXT, DAT, and CSV files through explicit custom mapping;
+* measured resolution from vanadium or a low-temperature sample;
+* uniform outer-edge bins, explicit representative values, approved DAVE
   Q-parameter files, and later validated explicit-list/imported-metadata Q
   mappings.
 
@@ -193,17 +193,23 @@ upper limit, merging the remainder, or creating a partial final bin. Retain the
 source upper limit even when it exceeds the final actual edge. A reported-count
 mismatch warns but does not replace the reconstructed bins.
 
-For every mode, Q count must equal spectrum count. Explicit-list syntax,
-imported-Q metadata, resolution association, and application/GUI confirmation
-remain future workflow concerns.
+For every mode, Q count must equal spectrum count. Supported imported-Q
+metadata may assign ordered representative Q values only when its scientific
+meaning, units, and values are explicit and complete; otherwise Q remains
+unassigned with diagnostics. Explicit-list syntax remains a separate workflow
+concern. Resolution association and application/GUI confirmation are handled
+outside the low-level Q parser.
 
 ### 4.5 Boundary-padding detection
 
 Sample and resolution imports preserve all original values. A separate
-preprocessing service inspects only boundary-connected repeated
+preprocessing service primarily inspects boundary-connected repeated
 `(intensity, uncertainty)` plateaus and may use matching signatures across
-groups as supporting evidence. It never identifies padding solely from zero or
-negative intensity and never hard-codes a sentinel value.
+groups as supporting evidence. The approved versioned singleton rule may also
+mark exactly one strictly negative outermost point as `AUTO` only when the point
+and its immediately inward neighbor are valid and the inward intensity rise is
+clear under the scientific convention. Intensity sign alone is not a general
+padding rule, and no sentinel value is hard-coded.
 
 Padding status is behavioral rather than statistical. `AUTO` produces a
 point-level reversible default-on mask, `REVIEW` produces a separate review
@@ -273,11 +279,35 @@ establish the preferred scientific model.
 
 ## 6. Batch analysis and masking
 
-Batch fitting applies one configuration sequentially to independent Q spectra;
-it is not simultaneous or global fitting. It must support low-to-high Q,
-optional high-to-low Q, optional propagation of the previous successful fit as
-the next initial guess, manual refitting after failure, per-Q results, and
-per-Q warnings.
+Batch fitting applies one fixed anchor-defined spectral topology through
+ordinary independent Single-Q fits; it is not simultaneous or global fitting.
+The current Q is the anchor. Execution proceeds outward independently through
+lower-Q neighbors and higher-Q neighbors. Each target uses fitted values from
+the nearest successful predecessor in its own direction only as execution-time
+starting values. A failed or blocked target does not seed the next fit, stop
+that direction, erase completed results, or couple parameters across Q.
+
+`Fit All Q from Current Fit` treats a Current Fit produced by Manual Run Fit and
+one produced by AutoFit-candidate Apply identically. `AutoFit All Q` instead
+performs fresh frozen nine-candidate discovery at the anchor only; the normal
+path uses Most Recommended and never silently falls back to Best Supported. A
+user may explicitly select any anchor candidate with a usable fit as a separate
+comparison branch. Branches share neither fit results nor seeds.
+
+Component identity and Lorentzian numbering follow the anchor topology through
+a branch; no automatic FWHM-, area-, or combined rematching/relabeling is
+performed. Model topology is mandatory across Q. Other reusable Method
+categories may be transferred selectively. Ordinary free-parameter Current,
+initial, or fitted values are execution state rather than reusable Method
+content; a fixed value remains part of its fixed constraint. Target-local
+scientific/core constraints are always recomputed and remain authoritative.
+
+Per-Q execution states distinguish `SUCCESS`, `FAILED`, `BLOCKED`, `EXCLUDED`,
+and `NOT_RUN`; branch execution distinguishes `COMPLETED` from `CANCELLED`.
+Cancellation preserves completed results. Explicit exclusion from spectral
+fitting remains distinct from failed/blocked execution and from exclusion of a
+fitted Q from later derived quantities. Manual refitting of problematic Q
+spectra remains supported.
 
 The system distinguishes invalid values, fitting-energy ranges, manually
 masked energy points, Q spectra excluded from spectral fitting, and fitted Q
@@ -408,6 +438,22 @@ warnings, and software version. This does not require a complex archive or
 database, UUIDs everywhere, hash-addressed arrays, migration frameworks,
 append-only histories, or attachment infrastructure.
 
+Reusable Methods are logically independent from the concrete data on which they
+execute. Model definition/topology is mandatory when a Method is applied; other
+validated categories, such as user bounds, Free/Fixed state and fixed values,
+parameter relationships, Resolution, Q-bin configuration, and fitting
+selection/context, may be reused selectively. Ordinary free-parameter Current
+or initial values are execution state and are not reusable Method content, while
+a fixed value belongs to the Method because it completes the fixed constraint.
+AutoFit and Manual Fit are creation/refinement paths into the same Method/Result
+lifecycle rather than permanently different result types.
+
+A Result belongs to concrete data and fitting scope. Editing a reusable Method
+must not silently rewrite an existing Result. Re-running an edited Current Fit
+replaces the application's Current Result; only explicit `Save as New Fit`
+retains an additional Result. Method Save and Save as New Method follow the
+analogous workflow.
+
 The former `.qensfit` project-container proposal is not a permanent contract.
 The final container format and extension remain unresolved until persistence
 work is actually designed. Heavy persistence, migration, security, and archive
@@ -468,22 +514,22 @@ baseline subtraction, recentering, tail reconstruction, or Q changes.
 
 Version 1.0 excludes:
 
-- raw detector-data reduction;
-- detector calibration or grouping;
-- detector-level bad-detector masking;
-- INS analysis and fixed-window scans;
-- Bayesian fitting and MCMC;
-- web deployment and multi-user collaboration;
-- automatic publication-quality figure editing;
-- multi-temperature Arrhenius fitting;
-- simultaneous global spectrum fitting;
-- arbitrary user-defined Python motion models;
-- automatic molecular-model interpretation;
-- XYZ-driven automatic motion-model selection;
-- C2/C4/isotropic candidate-motion comparison;
-- general crystal or symmetry analysis;
-- GPU acceleration; and
-- automatic derivation of unrestricted molecular dynamics from arbitrary
+* raw detector-data reduction;
+* detector calibration or grouping;
+* detector-level bad-detector masking;
+* INS analysis and fixed-window scans;
+* Bayesian fitting and MCMC;
+* web deployment and multi-user collaboration;
+* automatic publication-quality figure editing;
+* multi-temperature Arrhenius fitting;
+* simultaneous global spectrum fitting;
+* arbitrary user-defined Python motion models;
+* automatic molecular-model interpretation;
+* XYZ-driven automatic motion-model selection;
+* C2/C4/isotropic candidate-motion comparison;
+* general crystal or symmetry analysis;
+* GPU acceleration; and
+* automatic derivation of unrestricted molecular dynamics from arbitrary
   crystal structures.
 
 ## 11. Privacy and benchmark constraints
@@ -502,34 +548,34 @@ must use independently generated synthetic data.
 
 Version 1.0 is acceptable when:
 
-- the required workflow is usable end to end on reduced data;
-- all mandatory formats and Q-mapping modes have validated import paths;
-- original data and every user-visible transformation remain traceable;
-- spectral fits expose the required diagnostics and warnings;
-- linewidth/EISF conventions are explicit in UI, tables, plots,
+* the required workflow is usable end to end on reduced data;
+* all mandatory formats and Q-mapping modes have validated import paths;
+* original data and every user-visible transformation remain traceable;
+* spectral fits expose the required diagnostics and warnings;
+* linewidth/EISF conventions are explicit in UI, tables, plots,
   reproducibility records, and exports;
-- sequential batch fits remain independent per Q;
-- lightweight reproducibility information identifies inputs, selections,
+* sequential batch fits remain independent per Q;
+* lightweight reproducibility information identifies inputs, selections,
   settings, results, warnings, and software version;
-- private-data rules are enforced by design and test;
-- the scientific validation plan passes on macOS Apple Silicon and supported
+* private-data rules are enforced by design and test;
+* the scientific validation plan passes on macOS Apple Silicon and supported
   Windows targets; and
-- documentation makes limitations and unresolved scientific decisions visible;
+* documentation makes limitations and unresolved scientific decisions visible;
   and
-- an external real user, including a non-QENS expert, can complete a guided
+* an external real user, including a non-QENS expert, can complete a guided
   reduced-data analysis end to end on an ordinary macOS or Windows laptop,
   inspect results and warnings, and export the analysis.
 
 ## 13. Unresolved decisions
 
-- Detailed accepted syntax within DAVE and generic ASCII layout families.
-- Blank-line/comment policy for explicit Q-list files.
-- Auto model-selection weighting, adequacy, and recommendation policy for the
-  defined AIC/AICc/BIC evidence fields.
-- Bragg-contamination warning heuristic.
-- Final public packaging, licensing, and Windows installer technology.
-- Final project-container format and extension, if a container is later needed.
-- Post-v1.0 molecular/motion-model equations and parameterizations.
+* Detailed accepted syntax within DAVE and generic ASCII layout families.
+* Blank-line/comment policy for explicit Q-list files.
+* Bragg-contamination warning heuristic.
+* Exact supported uncertainty-propagation and fallback policy for derived QENS
+  quantities when covariance is unavailable or incomplete.
+* Final public packaging, licensing, and Windows installer technology.
+* Final project-container format and extension, if a container is later needed.
+* Post-v1.0 molecular/motion-model equations and parameterizations.
 
 ## 14. Risks and milestone dependencies
 
