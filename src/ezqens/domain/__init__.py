@@ -18,6 +18,7 @@ from ezqens.domain.models import (
     SourceMetadata,
     Spectrum,
     SpectrumRole,
+    fixed_width_q_bins,
     uniform_q_bins,
 )
 
@@ -37,5 +38,6 @@ __all__ = [
     "Spectrum",
     "SpectrumRole",
     "SourceMetadata",
+    "fixed_width_q_bins",
     "uniform_q_bins",
 ]

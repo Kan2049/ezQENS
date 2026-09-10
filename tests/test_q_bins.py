@@ -12,6 +12,7 @@ from ezqens.domain import (
     ReducedDataset,
     Spectrum,
     SpectrumRole,
+    fixed_width_q_bins,
     uniform_q_bins,
 )
 from ezqens.io import parse_dave_q_bins
@@ -94,6 +95,153 @@ def test_uniform_edges_use_outer_boundaries_and_authoritative_group_count() -> N
 def test_uniform_q_bin_definition_is_validated(kwargs: dict[str, object]) -> None:
     with pytest.raises(ValueError):
         uniform_q_bins(**kwargs)  # type: ignore[arg-type]
+
+
+def test_fixed_width_bins_leave_incomplete_upper_remainder_uncovered() -> None:
+    upper_limit = 1.0
+
+    q_bins = fixed_width_q_bins(
+        lower_q_edge=0.0,
+        upper_q_limit=upper_limit,
+        step=0.3,
+    )
+
+    assert q_bins.edges is not None
+    np.testing.assert_allclose(q_bins.edges, [0.0, 0.3, 0.6, 0.9])
+    assert q_bins.edges[-1] < upper_limit
+
+
+def test_fixed_width_bins_keep_floating_point_exact_final_bin() -> None:
+    q_bins = fixed_width_q_bins(
+        lower_q_edge=0.0,
+        upper_q_limit=1.0,
+        step=0.1,
+    )
+
+    assert q_bins.edges is not None
+    np.testing.assert_allclose(q_bins.edges, 0.1 * np.arange(11))
+    assert q_bins.edges[-1] == pytest.approx(1.0)
+
+
+def test_fixed_width_bins_keep_nonterminating_generated_exact_span() -> None:
+    lower = 0.1
+    step = 0.1
+    upper_limit = lower + 3 * step
+
+    q_bins = fixed_width_q_bins(
+        lower_q_edge=lower,
+        upper_q_limit=upper_limit,
+        step=step,
+    )
+
+    assert q_bins.edges is not None
+    np.testing.assert_allclose(q_bins.edges, lower + step * np.arange(4))
+    assert q_bins.group_count == 3
+
+
+def test_fixed_width_bins_support_nonzero_lower_edge() -> None:
+    q_bins = fixed_width_q_bins(
+        lower_q_edge=1.0,
+        upper_q_limit=4.6,
+        step=0.25,
+    )
+
+    assert q_bins.edges is not None
+    np.testing.assert_allclose(q_bins.edges, 1.0 + 0.25 * np.arange(15))
+    assert q_bins.edges[-1] == 4.5
+
+
+def test_fixed_width_bins_reject_materially_nonuniform_float_grid() -> None:
+    with pytest.raises(ValueError, match="uniform float64 Q-bin grid"):
+        fixed_width_q_bins(
+            lower_q_edge=1.0e16,
+            upper_q_limit=1.0e16 + 12.0,
+            step=3.0,
+        )
+
+
+def test_fixed_width_bins_accept_representable_large_coordinate_grid() -> None:
+    lower = 1.0e16
+
+    q_bins = fixed_width_q_bins(
+        lower_q_edge=lower,
+        upper_q_limit=lower + 16.0,
+        step=4.0,
+    )
+
+    assert q_bins.edges is not None
+    np.testing.assert_array_equal(q_bins.edges, lower + 4.0 * np.arange(5))
+    np.testing.assert_array_equal(np.diff(q_bins.edges), np.full(4, 4.0))
+
+
+def test_fixed_width_bins_reject_nonfinite_computed_span() -> None:
+    with pytest.raises(ValueError, match="span must be finite"):
+        fixed_width_q_bins(
+            lower_q_edge=-1.0e308,
+            upper_q_limit=1.0e308,
+            step=1.0,
+        )
+
+
+def test_fixed_width_bins_reject_nonfinite_computed_quotient() -> None:
+    smallest_positive = float(np.nextafter(0.0, 1.0))
+
+    with pytest.raises(ValueError, match="count must be finite"):
+        fixed_width_q_bins(
+            lower_q_edge=0.0,
+            upper_q_limit=1.0,
+            step=smallest_positive,
+        )
+
+
+def test_fixed_width_bins_reject_unrepresentable_finite_count() -> None:
+    with pytest.raises(ValueError, match="count is not representable"):
+        fixed_width_q_bins(
+            lower_q_edge=0.0,
+            upper_q_limit=1.0e16,
+            step=1.0,
+        )
+
+
+@pytest.mark.parametrize("step", [math.nan, math.inf, -math.inf, 0.0, -0.1, True])
+def test_fixed_width_step_must_be_finite_and_positive(step: float) -> None:
+    with pytest.raises(ValueError, match="step|finite numbers"):
+        fixed_width_q_bins(
+            lower_q_edge=0.0,
+            upper_q_limit=1.0,
+            step=step,
+        )
+
+
+@pytest.mark.parametrize(
+    ("lower", "upper"),
+    [
+        (math.nan, 1.0),
+        (0.0, math.inf),
+        (0.0, 0.0),
+        (1.0, 0.0),
+        (True, 1.0),
+    ],
+)
+def test_fixed_width_limits_must_be_finite_and_ordered(
+    lower: float,
+    upper: float,
+) -> None:
+    with pytest.raises(ValueError, match="finite|less than"):
+        fixed_width_q_bins(
+            lower_q_edge=lower,
+            upper_q_limit=upper,
+            step=0.1,
+        )
+
+
+def test_fixed_width_range_must_contain_a_complete_bin() -> None:
+    with pytest.raises(ValueError, match="one complete bin"):
+        fixed_width_q_bins(
+            lower_q_edge=0.0,
+            upper_q_limit=0.2,
+            step=0.3,
+        )
 
 
 def test_explicit_q_values_preserve_nonlinear_order_without_edges() -> None:
@@ -322,6 +470,21 @@ def test_coordinate_scale_cannot_make_tolerance_admit_an_incomplete_bin() -> Non
     assert result.q_bins.edges[-1] == 1_000_000_000_000_014.0
     assert result.q_bins.edges[-1] < result.upper_limit
     assert result.diagnostics == ()
+
+
+def test_dave_rejects_unrepresentable_fixed_width_grid(tmp_path: Path) -> None:
+    source = tmp_path / "dave_unrepresentable_q_bins.txt"
+    source.write_text(
+        "10000000000000000\n10000000000000012\n4\n3\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ImportValidationError) as caught:
+        parse_dave_q_bins(source)
+
+    diagnostic = caught.value.diagnostics[0]
+    assert diagnostic.code == "dave_q_bins_no_complete_bins"
+    assert "uniform float64 Q-bin grid" in diagnostic.message
 
 
 @pytest.mark.parametrize(

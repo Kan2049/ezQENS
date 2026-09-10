@@ -243,15 +243,21 @@ positive representable half-step, finite strictly increasing edges, and each
 representative strictly inside its numerically centered bin. It proposes those
 edges only for that explicit assignment mode. It does not establish a general midpoint
 meaning for representative Q. Count-driven `uniform_q_bins(...)` uses
-authoritative inclusive outer edges and group count and covers the range exactly. No Q state is
-copied onto `Spectrum`, and no mapping provenance or GUI confirmation state is
-stored in the scientific value.
+authoritative inclusive outer edges and group count and covers the range exactly.
+`fixed_width_q_bins(...)` instead keeps an authoritative lower edge and nominal
+step, includes only complete bins within a requested upper limit, and leaves any
+sub-step upper remainder uncovered. It rejects nonfinite spans or counts and
+float64 edge grids whose represented widths cannot faithfully preserve the
+nominal step under the locally capped tolerance. Both return explicit validated
+edges. No Q state is copied onto `Spectrum`, and no mapping provenance or GUI
+confirmation state is stored in the scientific value.
 
 `DAVEQBinsResult` keeps DAVE source metadata outside `QBins`: lower limit,
 upper limit, step, reported group count, and diagnostics. The parser rebuilds
-all complete fixed-width bins from the limits and step. The upper limit need not
-equal the final actual bin edge, and disagreement between the reported and
-reconstructed group counts is a warning rather than a parse failure.
+all complete fixed-width bins through the shared domain constructor. The upper
+limit need not equal the final actual bin edge, and disagreement between the
+reported and reconstructed group counts is a warning rather than a parse
+failure.
 
 ### 4.2 FittingRange and FittingSelection — milestone 2
 

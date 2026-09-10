@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NoReturn
 
 import numpy as np
 
@@ -12,6 +13,7 @@ from ezqens.domain import (
     ImportDiagnostic,
     ImportValidationError,
     QBins,
+    fixed_width_q_bins,
 )
 
 
@@ -27,7 +29,7 @@ class DAVEQBinsResult:
     diagnostics: tuple[ImportDiagnostic, ...] = ()
 
 
-def _fail(code: str, message: str, *, row: int | None = None) -> None:
+def _fail(code: str, message: str, *, row: int | None = None) -> NoReturn:
     raise ImportValidationError(
         (
             ImportDiagnostic(
@@ -72,37 +74,6 @@ def _read_four_values(path: Path) -> tuple[float, ...]:
     return tuple(values)
 
 
-def _complete_bin_count(lower_limit: float, upper_limit: float, step: float) -> int:
-    """Return the number of complete fixed-width bins within the DAVE limits."""
-
-    quotient = (upper_limit - lower_limit) / step
-    group_count = int(np.floor(quotient))
-
-    def edge_tolerance(candidate_count: int) -> float:
-        candidate_edge = lower_limit + candidate_count * step
-        roundoff = (
-            np.finfo(np.float64).eps
-            * max(1.0, abs(lower_limit), abs(upper_limit), abs(candidate_edge))
-            * 16.0
-        )
-        # Never let coordinate-scale roundoff become a material fraction of a
-        # Q bin. Normal binary noise is far below this local one-step cap.
-        one_step_cap = float(np.sqrt(np.finfo(np.float64).eps) * abs(step))
-        return min(roundoff, one_step_cap)
-
-    # Confirm the complete-edge condition directly. At most the bin adjacent
-    # to floor(span / step) can be affected by ordinary floating-point noise.
-    if (
-        group_count > 0
-        and lower_limit + group_count * step > upper_limit + edge_tolerance(group_count)
-    ):
-        group_count -= 1
-    next_count = group_count + 1
-    if lower_limit + next_count * step <= upper_limit + edge_tolerance(next_count):
-        group_count += 1
-    return group_count
-
-
 def parse_dave_q_bins(path: str | Path) -> DAVEQBinsResult:
     """Parse the supported four-line DAVE Q-bin parameter file.
 
@@ -130,14 +101,18 @@ def parse_dave_q_bins(path: str | Path) -> DAVEQBinsResult:
         )
 
     reported_group_count = int(raw_group_count)
-    actual_group_count = _complete_bin_count(lower_limit, upper_limit, step)
-    if actual_group_count < 1:
+    try:
+        q_bins = fixed_width_q_bins(
+            lower_q_edge=lower_limit,
+            upper_q_limit=upper_limit,
+            step=step,
+        )
+    except ValueError as error:
         _fail(
             "dave_q_bins_no_complete_bins",
-            "DAVE Q limits and step do not define a complete Q bin",
+            f"DAVE Q limits and step do not define valid complete Q bins: {error}",
         )
-    edges = lower_limit + step * np.arange(actual_group_count + 1)
-    q_bins = QBins.from_edges(edges)
+    actual_group_count = q_bins.group_count
 
     diagnostics: tuple[ImportDiagnostic, ...] = ()
     if reported_group_count != actual_group_count:

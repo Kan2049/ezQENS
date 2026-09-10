@@ -66,14 +66,19 @@ delta_Q = (upper_q_edge - lower_q_edge) / N
 edges = lower_q_edge + i * delta_Q, i = 0, ..., N
 ```
 
-The outer edges are not first/last group centers. The known four-value DAVE
-Q-bin parameter format has different semantics: lower limit, upper limit,
-reported group count, and actual step. Complete fixed-width bins start at the
-lower limit and are included only when their upper edge does not exceed the
-source upper limit within floating-point tolerance. No partial final bin is
-created, so the source upper limit may exceed the final actual edge. The
-reported group count is retained and compared with the reconstructed count;
-disagreement produces a warning and does not replace the step-derived bins.
+The outer edges are not first/last group centers. Fixed-width construction uses
+an authoritative lower edge, requested upper limit, and step. It includes every
+complete equal-width bin whose upper edge remains within the requested limit
+under the validated local floating-point tolerance. It never creates a partial
+final bin, so a remainder smaller than one step remains uncovered and the
+requested upper limit may exceed the final actual edge. Construction fails when
+float64 cannot represent finite, strictly increasing edges whose represented
+widths match the requested step within the same tightly capped local tolerance.
+
+The known four-value DAVE Q-bin parameter format uses this same complete-bin
+construction. Its reported group count is retained as source metadata and
+compared with the reconstructed count; disagreement produces a warning and does
+not replace the step-derived bins.
 
 Q-bin/value count must equal spectrum count. No mismatch is repaired by sorting,
 deduplication, truncation, padding, extrapolation, interpolation, or nearest-Q

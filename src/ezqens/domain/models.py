@@ -385,6 +385,140 @@ def uniform_q_bins(
     return QBins.from_edges(edges)
 
 
+def _fixed_width_edge_tolerance(
+    lower_q_edge: float,
+    upper_q_limit: float,
+    step: float,
+    candidate_edge: float,
+) -> float:
+    """Return the locally capped tolerance for fixed-width edge arithmetic."""
+
+    roundoff = (
+        np.finfo(np.float64).eps
+        * max(
+            1.0,
+            abs(lower_q_edge),
+            abs(upper_q_limit),
+            abs(candidate_edge),
+        )
+        * 16.0
+    )
+    # Never let coordinate-scale roundoff become a material fraction of a
+    # Q bin. Normal binary noise is far below this local one-step cap.
+    one_step_cap = float(np.sqrt(np.finfo(np.float64).eps) * abs(step))
+    return min(roundoff, one_step_cap)
+
+
+def _complete_fixed_width_bin_count(
+    lower_q_edge: float,
+    upper_q_limit: float,
+    step: float,
+) -> int:
+    """Return the complete fixed-width bins contained by the requested limits."""
+
+    with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+        span = float(np.subtract(np.float64(upper_q_limit), lower_q_edge))
+    if not np.isfinite(span):
+        raise ValueError("fixed-width Q span must be finite")
+    with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+        quotient = float(np.divide(np.float64(span), step))
+    if not np.isfinite(quotient):
+        raise ValueError("fixed-width Q-bin count must be finite")
+    maximum_exact_float64_integer = 1 << (np.finfo(np.float64).nmant + 1)
+    maximum_group_count = min(
+        int(np.iinfo(np.intp).max),
+        maximum_exact_float64_integer,
+    )
+    if quotient >= float(maximum_group_count):
+        raise ValueError("fixed-width Q-bin count is not representable")
+    group_count = int(np.floor(quotient))
+    # Confirm the complete-edge condition directly. At most the bin adjacent
+    # to floor(span / step) can be affected by ordinary floating-point noise.
+    with np.errstate(over="ignore", invalid="ignore"):
+        candidate_edge = float(np.add(lower_q_edge, np.multiply(group_count, step)))
+    if group_count > 0 and candidate_edge > upper_q_limit + _fixed_width_edge_tolerance(
+        lower_q_edge,
+        upper_q_limit,
+        step,
+        candidate_edge,
+    ):
+        group_count -= 1
+    next_count = group_count + 1
+    with np.errstate(over="ignore", invalid="ignore"):
+        next_edge = float(np.add(lower_q_edge, np.multiply(next_count, step)))
+    if next_edge <= upper_q_limit + _fixed_width_edge_tolerance(
+        lower_q_edge,
+        upper_q_limit,
+        step,
+        next_edge,
+    ):
+        group_count += 1
+    if group_count >= maximum_group_count:
+        raise ValueError("fixed-width Q-bin count is not representable")
+    return group_count
+
+
+def fixed_width_q_bins(
+    *, lower_q_edge: float, upper_q_limit: float, step: float
+) -> QBins:
+    """Generate every complete fixed-width bin within requested Q limits."""
+
+    inputs = {
+        "lower_q_edge": lower_q_edge,
+        "upper_q_limit": upper_q_limit,
+        "step": step,
+    }
+    if any(
+        isinstance(value, bool) or not isinstance(value, Real)
+        for value in inputs.values()
+    ):
+        raise ValueError("fixed-width Q-bin inputs must be finite numbers")
+    lower = float(lower_q_edge)
+    upper = float(upper_q_limit)
+    numeric_step = float(step)
+    if not np.isfinite(lower) or not np.isfinite(upper):
+        raise ValueError("fixed-width Q limits must be finite")
+    if lower >= upper:
+        raise ValueError("lower_q_edge must be less than upper_q_limit")
+    if not np.isfinite(numeric_step) or numeric_step <= 0.0:
+        raise ValueError("step must be finite and strictly positive")
+
+    group_count = _complete_fixed_width_bin_count(lower, upper, numeric_step)
+    if group_count < 1:
+        raise ValueError("requested Q range does not contain one complete bin")
+    try:
+        indices = np.arange(group_count + 1, dtype=np.float64)
+    except (MemoryError, OverflowError, ValueError) as error:
+        raise ValueError(
+            "fixed-width Q-bin edge array cannot be represented"
+        ) from error
+    with np.errstate(over="ignore", invalid="ignore"):
+        edges = lower + numeric_step * indices
+    if not np.all(np.isfinite(edges)):
+        raise ValueError("fixed-width Q-bin edges must be finite")
+    represented_widths = np.diff(edges)
+    largest_edge = max((float(edges[0]), float(edges[-1])), key=abs)
+    width_tolerance = _fixed_width_edge_tolerance(
+        lower,
+        upper,
+        numeric_step,
+        largest_edge,
+    )
+    if not np.all(
+        np.isclose(
+            represented_widths,
+            numeric_step,
+            rtol=0.0,
+            atol=width_tolerance,
+        )
+    ):
+        raise ValueError(
+            "step cannot be represented as a uniform float64 Q-bin grid at "
+            "the supplied coordinate scale"
+        )
+    return QBins.from_edges(edges)
+
+
 @dataclass(frozen=True, slots=True)
 class Spectrum:
     """One reduced spectrum with immutable original values and invalid masks."""

@@ -141,12 +141,13 @@ grids/lengths, original arrays, and source layout; it never interpolates.
 
 Q identity is dataset-level `QBins`: one ordered representative value per
 spectrum plus optional explicit edges. Count-driven `uniform_q_bins()` exactly
-covers its inclusive outer edges. The DAVE parser instead reconstructs complete
-fixed-width bins from the source lower limit, upper limit, and step, so its
-source upper limit may exceed the final actual edge. It retains the stored group
-count as source metadata and warns if it differs from the reconstructed count.
-Both edge-defined paths produce midpoint representatives; explicit values leave
-edges unknown. The explicit representative-values plus uniform-step constructor
+covers its inclusive outer edges. Step-driven `fixed_width_q_bins()` instead
+constructs only complete bins from a fixed lower edge through a requested upper
+limit, leaving a sub-step remainder uncovered. The DAVE parser reuses this
+domain primitive, retains its source upper limit and stored group count as source
+metadata, and warns if that count differs from the reconstructed count. Both
+edge-defined paths produce midpoint representatives; explicit values leave edges
+unknown. The explicit representative-values plus uniform-step constructor
 preserves the supplied representative values and proposes centered uniform edges
 only for that selected assignment mode; it creates no general midpoint assumption.
 Source-specific metadata and diagnostics stay in `io`, while the scientific object
@@ -450,6 +451,7 @@ detect_reduced_data_format(source, optional_override) -> FormatDetectionResult
 import_reduced_data(source, role, units) -> ReducedDataset
 QBins.from_edges(edges) / QBins.from_q_values(values) -> QBins
 uniform_q_bins(lower_q_edge, upper_q_edge, group_count) -> QBins
+fixed_width_q_bins(lower_q_edge, upper_q_limit, step) -> QBins
 QBins.from_q_values_and_uniform_step(q_values, step) -> QBins
 parse_dave_q_bins(source) -> DAVEQBinsResult
 dataset.assign_q_bins(q_bins) -> ReducedDataset
