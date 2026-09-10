@@ -295,9 +295,15 @@ def test_collapsed_navigator_click_and_drag_use_same_discrete_group_state(
     view = window.dataset_view
     view.set_overview_visible(False)
     assert view.navigator_axes is not None
+    navigator_axes = view.navigator_axes
+    navigator_highlight = view.navigator_active_highlight
+    assert navigator_highlight is not None
 
     view.select_group_from_navigator(2.0)
     assert view.current_group_index == 1
+    assert view.navigator_axes is navigator_axes
+    assert view.navigator_active_highlight is navigator_highlight
+    np.testing.assert_array_equal(navigator_highlight.get_offsets(), [[2.0, 0.0]])
     view.select_group_from_navigator(1.0)
     assert view.current_group_index == 0
     press = cast(
@@ -750,6 +756,62 @@ def test_overview_active_band_brightens_full_current_cell_without_changing_data(
         strict=True,
     ):
         np.testing.assert_array_equal(rendered.ravel(), spectrum.intensity)
+    window.close()
+
+
+def test_dense_group_navigation_reuses_overview_and_updates_group_presentation(
+    application: QApplication,
+) -> None:
+    group_count = 280
+    energy = np.array([-1.0, 0.0, 1.0])
+    dataset = ReducedDataset(
+        role=SpectrumRole.SAMPLE,
+        spectra=tuple(
+            Spectrum(
+                role=SpectrumRole.SAMPLE,
+                group_index=index,
+                group_label=f"Group {index + 1}",
+                energy=energy,
+                intensity=np.array([1.0, 2.0 + index, 1.0]),
+                uncertainty=np.full(3, 0.1),
+                energy_unit="meV",
+                intensity_unit="arb. unit",
+                uncertainty_unit="arb. unit",
+            )
+            for index in range(group_count)
+        ),
+    )
+    window = MainWindow()
+    project = window.workspace.new_project()
+    state = window.workspace.add_dataset(project, dataset)
+    window.open_dataset(project, state)
+    view = window.dataset_view
+    overview_axes = view.overview_axes
+    overview_meshes = view.overview_meshes
+    highlight = view.overview_active_highlight
+    assert overview_axes is not None
+    assert highlight is not None
+    overview_axes.set_xlim(0.5, 20.5)
+    overview_limits = overview_axes.get_xlim()
+
+    view.set_current_group(217)
+
+    assert view.overview_axes is overview_axes
+    assert view.overview_meshes == overview_meshes
+    assert view.overview_active_highlight is highlight
+    assert _highlight_x_bounds(window) == view.overview_x_cell_bounds[217]
+    assert overview_axes.get_xlim() == pytest.approx(overview_limits)
+    assert view.group_spinbox.value() == 218
+    assert "218" in {label.get_text() for label in overview_axes.get_xticklabels()}
+    assert view.spectrum_axes is not None
+    np.testing.assert_array_equal(
+        view.spectrum_axes.lines[0].get_ydata(),
+        dataset.spectra[217].intensity,
+    )
+
+    assert view.set_heatmap_scale("log")
+    assert view.overview_axes is not overview_axes
+    assert view.overview_meshes != overview_meshes
     window.close()
 
 

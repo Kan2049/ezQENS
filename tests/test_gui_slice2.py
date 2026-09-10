@@ -28,7 +28,14 @@ from ezqens.domain import QBins, ReducedDataset, Spectrum, SpectrumRole
 from ezqens.gui import MainWindow, create_application
 from ezqens.gui import masking as masking_module
 from ezqens.gui.masking import AutoMaskState, MaskTaskDraft, create_auto_mask_state
-from ezqens.gui.q_editor import Q_CENTER, Q_EDGES, QAssignmentEditor
+from ezqens.gui.q_editor import (
+    EXPLICIT_VALUES,
+    Q_CENTER,
+    Q_EDGES,
+    REGULAR_GRID,
+    QAssignmentEditor,
+    parse_q_values,
+)
 from ezqens.gui.units_editor import SourceUnitsDialog
 from ezqens.gui.workspace import DatasetAnalysisState, dataset_analysis_state
 from ezqens.io import parse_dave_q_bins
@@ -447,7 +454,7 @@ def test_q_editor_validates_pasted_count_before_emitting_any_assignment(
     editor.open_for_dataset(_dataset())
     emitted: list[QBins] = []
     editor.q_bins_applied.connect(lambda q_bins, _diagnostics: emitted.append(q_bins))
-    editor.advanced_values_button.setChecked(True)
+    editor.input_mode_combo.setCurrentText(EXPLICIT_VALUES)
     editor.values_edit.setPlainText("0.42")
 
     assert not editor.apply()
@@ -484,11 +491,458 @@ def test_q_editor_default_uniform_centers_resolve_through_qbins(
 
     q_bins = editor.build_q_bins()
 
-    assert not editor.advanced_values_button.isChecked()
+    assert editor.input_mode_combo.currentText() == REGULAR_GRID
     assert q_bins.q_values.tolist() == pytest.approx([0.4, 0.6])
     assert q_bins.edges is not None
     assert q_bins.edges.tolist() == pytest.approx([0.3, 0.5, 0.7])
     assert "Centers" in editor.preview_label.text()
+    editor.close()
+
+
+def test_q_editor_advanced_values_can_return_to_valid_regular_draft(
+    application: QApplication,
+) -> None:
+    editor = QAssignmentEditor()
+    editor.open_for_dataset(_dataset())
+    editor.start_edit.setText("0.4")
+    editor.step_edit.setText("0.2")
+    editor.end_edit.setText("0.6")
+
+    editor.input_mode_combo.setCurrentText(EXPLICIT_VALUES)
+
+    assert editor.uniform_fields.isHidden()
+    assert not editor.input_mode_combo.isHidden()
+    assert not editor.values_edit.isHidden()
+    assert parse_q_values(editor.values_edit.toPlainText()).tolist() == pytest.approx(
+        [0.4, 0.6]
+    )
+
+    editor.input_mode_combo.setCurrentText(REGULAR_GRID)
+
+    assert not editor.uniform_fields.isHidden()
+    assert not editor.input_mode_combo.isHidden()
+    assert editor.values_edit.isHidden()
+    assert editor.start_edit.text() == "0.4"
+    assert editor.step_edit.text() == "0.2"
+    assert editor.end_edit.text() == "0.6"
+    q_bins = editor.build_q_bins()
+    assert q_bins.q_values.tolist() == pytest.approx([0.4, 0.6])
+    assert q_bins.edges is not None
+    assert q_bins.edges.tolist() == pytest.approx([0.3, 0.5, 0.7])
+    editor.close()
+
+
+def test_q_editor_programmatic_q_center_edit_does_not_restore_stale_regular_values(
+    application: QApplication,
+) -> None:
+    q_bins = QBins.from_q_values_and_uniform_step([0.5, 1.0], 0.5)
+    editor = QAssignmentEditor()
+    editor.open_for_dataset(_dataset(q_bins=q_bins))
+    assert editor.input_mode_combo.currentText() == REGULAR_GRID
+
+    editor.set_q_center_slot(1, "1.2")
+
+    assert editor.input_mode_combo.currentText() == EXPLICIT_VALUES
+    assert editor.q_center_slots() == pytest.approx((0.5, 1.2))
+    assert parse_q_values(editor.values_edit.toPlainText()).tolist() == pytest.approx(
+        [0.5, 1.2]
+    )
+    assert editor.build_q_bins().q_values.tolist() == pytest.approx([0.5, 1.2])
+    editor.close()
+
+
+def test_q_editor_regular_fields_are_coupled_to_fixed_dataset_group_count(
+    application: QApplication,
+) -> None:
+    editor = QAssignmentEditor()
+    editor.open_for_dataset(_dataset())
+
+    assert editor.groups_edit.isReadOnly()
+    assert editor.groups_edit.text() == "2"
+    editor.start_edit.setText("0.5")
+    editor.step_edit.setText("0.25")
+    assert float(editor.end_edit.text()) == pytest.approx(0.75)
+    editor.end_edit.setText("1.0")
+    assert float(editor.step_edit.text()) == pytest.approx(0.5)
+    editor.start_edit.setText("0.6")
+    assert float(editor.step_edit.text()) == pytest.approx(0.5)
+    assert float(editor.end_edit.text()) == pytest.approx(1.1)
+
+    editor.representation_combo.setCurrentText(Q_EDGES)
+    editor.start_edit.setText("0.0")
+    editor.step_edit.setText("0.25")
+    assert float(editor.end_edit.text()) == pytest.approx(0.5)
+    editor.end_edit.setText("0.8")
+    assert float(editor.step_edit.text()) == pytest.approx(0.4)
+    editor.start_edit.setText("0.1")
+    assert float(editor.step_edit.text()) == pytest.approx(0.4)
+    assert float(editor.end_edit.text()) == pytest.approx(0.9)
+    editor.close()
+
+
+def test_q_editor_nonuniform_explicit_values_survive_regular_mode_round_trip(
+    application: QApplication,
+) -> None:
+    q_bins = QBins.from_q_values([0.4, 0.7, 1.3])
+    editor = QAssignmentEditor()
+    editor.open_for_dataset(_dataset(group_count=3, q_bins=q_bins))
+    assert editor.input_mode_combo.currentText() == EXPLICIT_VALUES
+
+    editor.input_mode_combo.setCurrentText(REGULAR_GRID)
+    assert editor.step_edit.text() == ""
+    editor.input_mode_combo.setCurrentText(EXPLICIT_VALUES)
+
+    np.testing.assert_array_equal(editor.build_q_bins().q_values, q_bins.q_values)
+    editor.close()
+
+
+def test_q_editor_derived_step_stays_exact_across_display_mode_round_trip(
+    application: QApplication,
+) -> None:
+    editor = QAssignmentEditor()
+    editor.open_for_dataset(_dataset(group_count=4))
+    editor.start_edit.setText("0")
+    editor.end_edit.setText("1")
+    exact_step = 1.0 / 3.0
+    assert editor._regular_exact_values["step"] == exact_step
+
+    editor.input_mode_combo.setCurrentText(EXPLICIT_VALUES)
+    editor.input_mode_combo.setCurrentText(REGULAR_GRID)
+
+    assert editor._regular_exact_values["step"] == exact_step
+    np.testing.assert_array_equal(
+        editor.build_q_bins().q_values,
+        np.linspace(0.0, 1.0, 4),
+    )
+    editor.close()
+
+
+def test_q_editor_single_center_group_keeps_explicit_uniform_width(
+    application: QApplication,
+) -> None:
+    q_bins = QBins.from_q_values_and_uniform_step([0.5], 0.2)
+    editor = QAssignmentEditor()
+    editor.open_for_dataset(_dataset(group_count=1, q_bins=q_bins))
+
+    editor.input_mode_combo.setCurrentText(REGULAR_GRID)
+    assert editor.groups_edit.text() == "1"
+    assert float(editor.start_edit.text()) == pytest.approx(0.5)
+    assert float(editor.end_edit.text()) == pytest.approx(0.5)
+    assert float(editor.step_edit.text()) == pytest.approx(0.2)
+    rebuilt = editor.build_q_bins()
+    assert rebuilt.edges is not None
+    np.testing.assert_allclose(rebuilt.edges, [0.4, 0.6])
+    editor.close()
+
+
+def test_q_editor_single_center_end_edit_synchronizes_authoritative_value(
+    application: QApplication,
+) -> None:
+    editor = QAssignmentEditor()
+    editor.open_for_dataset(_dataset(group_count=1))
+    editor.start_edit.setText("0.5")
+    editor.step_edit.setText("0.2")
+    authoritative = 0.500004123456789
+
+    editor.end_edit.setText(str(authoritative))
+    editor.end_edit.editingFinished.emit()
+
+    assert editor.start_edit.text() == editor.end_edit.text() == "0.500004123457"
+    assert editor._regular_exact_values["start"] == authoritative
+    assert editor._regular_exact_values["end"] == authoritative
+    assert editor.build_q_bins().q_values[0] == authoritative
+    editor.close()
+
+
+def test_q_editor_single_center_start_edit_synchronizes_authoritative_value(
+    application: QApplication,
+) -> None:
+    editor = QAssignmentEditor()
+    editor.open_for_dataset(_dataset(group_count=1))
+    editor.end_edit.setText("0.500004")
+    editor.step_edit.setText("0.2")
+    authoritative = 0.612345678901234
+
+    editor.start_edit.setText(str(authoritative))
+    editor.start_edit.editingFinished.emit()
+
+    assert editor.start_edit.text() == editor.end_edit.text() == "0.612345678901"
+    assert editor._regular_exact_values["start"] == authoritative
+    assert editor._regular_exact_values["end"] == authoritative
+    assert editor.build_q_bins().q_values[0] == authoritative
+    editor.close()
+
+
+def test_q_editor_single_center_mode_round_trip_preserves_synchronized_value(
+    application: QApplication,
+) -> None:
+    editor = QAssignmentEditor()
+    editor.open_for_dataset(_dataset(group_count=1))
+    editor.start_edit.setText("0.5")
+    editor.step_edit.setText("0.2")
+    editor.end_edit.setText("0.500004")
+
+    editor.input_mode_combo.setCurrentText(EXPLICIT_VALUES)
+    assert parse_q_values(editor.values_edit.toPlainText())[0] == 0.500004
+    editor.input_mode_combo.setCurrentText(REGULAR_GRID)
+
+    assert editor._regular_exact_values["start"] == 0.500004
+    assert editor._regular_exact_values["end"] == 0.500004
+    assert editor.start_edit.text() == "0.500004"
+    assert editor.end_edit.text() == "0.500004"
+    assert editor.build_q_bins().q_values[0] == 0.500004
+    editor.close()
+
+
+def test_q_editor_single_center_keyboard_decimal_commits_without_rewriting_input(
+    application: QApplication,
+) -> None:
+    editor = QAssignmentEditor()
+    editor.open_for_dataset(_dataset(group_count=1))
+    editor.step_edit.setText("0.2")
+    editor.show()
+    editor.start_edit.setFocus()
+    application.processEvents()
+
+    QTest.keyClicks(editor.start_edit, "0")
+    assert editor.start_edit.text() == "0"
+    QTest.keyClicks(editor.start_edit, ".")
+    assert editor.start_edit.text() == "0."
+    QTest.keyClicks(editor.start_edit, "5")
+    assert editor.start_edit.text() == "0.5"
+    QTest.keyClick(editor.start_edit, Qt.Key.Key_Tab)
+    application.processEvents()
+
+    assert editor.start_edit.text() == editor.end_edit.text() == "0.5"
+    assert editor._regular_exact_values["start"] == 0.5
+    assert editor._regular_exact_values["end"] == 0.5
+    assert editor.build_q_bins().q_values[0] == 0.5
+    editor.close()
+
+
+def test_q_editor_single_center_keyboard_end_keeps_exact_high_precision(
+    application: QApplication,
+) -> None:
+    editor = QAssignmentEditor()
+    editor.open_for_dataset(
+        _dataset(
+            group_count=1,
+            q_bins=QBins.from_q_values_and_uniform_step([0.5], 0.2),
+        )
+    )
+    editor.input_mode_combo.setCurrentText(REGULAR_GRID)
+    editor.show()
+    editor.end_edit.setFocus()
+    editor.end_edit.selectAll()
+    application.processEvents()
+    authoritative = 0.612345678901234
+
+    QTest.keyClick(editor.end_edit, Qt.Key.Key_Backspace)
+    QTest.keyClicks(editor.end_edit, str(authoritative))
+    assert editor.end_edit.text() == str(authoritative)
+    QTest.keyClick(editor.end_edit, Qt.Key.Key_Tab)
+    application.processEvents()
+
+    assert editor.start_edit.text() == editor.end_edit.text() == "0.612345678901"
+    assert editor._regular_exact_values["start"] == authoritative
+    assert editor._regular_exact_values["end"] == authoritative
+    assert editor.build_q_bins().q_values[0] == authoritative
+    editor.close()
+
+
+def test_q_editor_single_center_apply_commits_active_valid_keyboard_edit(
+    application: QApplication,
+) -> None:
+    editor = QAssignmentEditor()
+    editor.open_for_dataset(
+        _dataset(
+            group_count=1,
+            q_bins=QBins.from_q_values_and_uniform_step([0.25], 0.2),
+        )
+    )
+    editor.input_mode_combo.setCurrentText(REGULAR_GRID)
+    emitted: list[QBins] = []
+    editor.q_bins_applied.connect(lambda q_bins, _diagnostics: emitted.append(q_bins))
+    editor.show()
+    editor.start_edit.setFocus()
+    editor.start_edit.selectAll()
+    application.processEvents()
+
+    QTest.keyClick(editor.start_edit, Qt.Key.Key_Backspace)
+    QTest.keyClicks(editor.start_edit, "0.75")
+    assert editor.start_edit.text() == "0.75"
+    assert editor.end_edit.text() == "0.25"
+    assert editor.apply()
+
+    assert editor.start_edit.text() == editor.end_edit.text() == "0.75"
+    assert editor._regular_exact_values["start"] == 0.75
+    assert editor._regular_exact_values["end"] == 0.75
+    assert emitted[-1].q_values[0] == 0.75
+    editor.close()
+
+
+def test_q_editor_single_center_incomplete_keyboard_edit_is_not_silently_applied(
+    application: QApplication,
+) -> None:
+    editor = QAssignmentEditor()
+    editor.open_for_dataset(
+        _dataset(
+            group_count=1,
+            q_bins=QBins.from_q_values_and_uniform_step([0.5], 0.2),
+        )
+    )
+    editor.input_mode_combo.setCurrentText(REGULAR_GRID)
+    editor.show()
+    editor.start_edit.setFocus()
+    editor.start_edit.selectAll()
+    application.processEvents()
+
+    QTest.keyClick(editor.start_edit, Qt.Key.Key_Backspace)
+    QTest.keyClicks(editor.start_edit, "1e")
+    assert editor.start_edit.text() == "1e"
+    with pytest.raises(ValueError, match="Start must be a finite number"):
+        editor.build_q_bins()
+
+    assert editor.start_edit.text() == "1e"
+    assert editor._regular_exact_values["start"] == 0.5
+    assert editor._regular_exact_values["end"] == 0.5
+    editor.close()
+
+
+def test_q_editor_single_center_invalid_pending_edit_rejects_explicit_mode_switch(
+    application: QApplication,
+) -> None:
+    editor = QAssignmentEditor()
+    editor.open_for_dataset(
+        _dataset(
+            group_count=1,
+            q_bins=QBins.from_q_values_and_uniform_step([0.4], 0.2),
+        )
+    )
+    explicit_before = editor.values_edit.toPlainText()
+    editor.input_mode_combo.setCurrentText(REGULAR_GRID)
+    editor.show()
+    editor.start_edit.setFocus()
+    editor.start_edit.selectAll()
+    application.processEvents()
+    QTest.keyClick(editor.start_edit, Qt.Key.Key_Backspace)
+    QTest.keyClicks(editor.start_edit, "1e")
+
+    editor.input_mode_combo.setFocus()
+    application.processEvents()
+    QTest.keyClick(editor.input_mode_combo, Qt.Key.Key_End)
+    application.processEvents()
+
+    assert editor.input_mode_combo.currentText() == REGULAR_GRID
+    assert editor._visible_input_mode == REGULAR_GRID
+    assert not editor.uniform_fields.isHidden()
+    assert editor.values_edit.isHidden()
+    assert editor.start_edit.text() == "1e"
+    assert editor.values_edit.toPlainText() == explicit_before
+    assert editor._q_values is not None
+    assert editor._q_values[0] == 0.4
+    editor.close()
+
+
+def test_q_editor_single_center_rejected_mode_switch_keeps_apply_invalid(
+    application: QApplication,
+) -> None:
+    editor = QAssignmentEditor()
+    editor.open_for_dataset(
+        _dataset(
+            group_count=1,
+            q_bins=QBins.from_q_values_and_uniform_step([0.4], 0.2),
+        )
+    )
+    editor.input_mode_combo.setCurrentText(REGULAR_GRID)
+    emitted: list[QBins] = []
+    editor.q_bins_applied.connect(lambda q_bins, _diagnostics: emitted.append(q_bins))
+    editor.show()
+    editor.start_edit.setFocus()
+    editor.start_edit.selectAll()
+    application.processEvents()
+    QTest.keyClick(editor.start_edit, Qt.Key.Key_Backspace)
+    QTest.keyClicks(editor.start_edit, "1e")
+    editor.input_mode_combo.setFocus()
+    application.processEvents()
+    QTest.keyClick(editor.input_mode_combo, Qt.Key.Key_End)
+    application.processEvents()
+
+    assert not editor.apply()
+    assert emitted == []
+    assert editor.input_mode_combo.currentText() == REGULAR_GRID
+    assert editor.start_edit.text() == "1e"
+    assert "finite number" in editor.status_label.text()
+    editor.close()
+
+
+def test_q_editor_single_center_valid_pending_edit_switches_to_explicit(
+    application: QApplication,
+) -> None:
+    editor = QAssignmentEditor()
+    editor.open_for_dataset(
+        _dataset(
+            group_count=1,
+            q_bins=QBins.from_q_values_and_uniform_step([0.4], 0.2),
+        )
+    )
+    editor.input_mode_combo.setCurrentText(REGULAR_GRID)
+    editor.show()
+    editor.start_edit.setFocus()
+    editor.start_edit.selectAll()
+    application.processEvents()
+    QTest.keyClick(editor.start_edit, Qt.Key.Key_Backspace)
+    QTest.keyClicks(editor.start_edit, "0.5")
+
+    editor.input_mode_combo.setFocus()
+    application.processEvents()
+    QTest.keyClick(editor.input_mode_combo, Qt.Key.Key_End)
+    application.processEvents()
+
+    assert editor.input_mode_combo.currentText() == EXPLICIT_VALUES
+    assert editor._visible_input_mode == EXPLICIT_VALUES
+    assert parse_q_values(editor.values_edit.toPlainText())[0] == 0.5
+    assert editor._regular_exact_values["start"] == 0.5
+    assert editor._regular_exact_values["end"] == 0.5
+    assert editor.build_q_bins().q_values[0] == 0.5
+    editor.close()
+
+
+def test_q_editor_single_center_valid_retry_switches_after_invalid_rejection(
+    application: QApplication,
+) -> None:
+    editor = QAssignmentEditor()
+    editor.open_for_dataset(
+        _dataset(
+            group_count=1,
+            q_bins=QBins.from_q_values_and_uniform_step([0.4], 0.2),
+        )
+    )
+    editor.input_mode_combo.setCurrentText(REGULAR_GRID)
+    editor.show()
+    editor.start_edit.setFocus()
+    editor.start_edit.selectAll()
+    application.processEvents()
+    QTest.keyClick(editor.start_edit, Qt.Key.Key_Backspace)
+    QTest.keyClicks(editor.start_edit, "1e")
+    editor.input_mode_combo.setFocus()
+    application.processEvents()
+    QTest.keyClick(editor.input_mode_combo, Qt.Key.Key_End)
+    application.processEvents()
+    assert editor.input_mode_combo.currentText() == REGULAR_GRID
+
+    editor.start_edit.setFocus()
+    editor.start_edit.selectAll()
+    QTest.keyClick(editor.start_edit, Qt.Key.Key_Backspace)
+    QTest.keyClicks(editor.start_edit, "0.6")
+    editor.input_mode_combo.setFocus()
+    application.processEvents()
+    QTest.keyClick(editor.input_mode_combo, Qt.Key.Key_End)
+    application.processEvents()
+
+    assert editor.input_mode_combo.currentText() == EXPLICIT_VALUES
+    assert parse_q_values(editor.values_edit.toPlainText())[0] == 0.6
+    assert editor.build_q_bins().q_values[0] == 0.6
     editor.close()
 
 
@@ -508,8 +962,8 @@ def test_q_editor_default_uniform_edges_require_group_count_consistency(
     assert q_bins.edges is not None
     assert q_bins.edges.tolist() == pytest.approx([0.25, 0.5, 0.75])
     editor.step_edit.setText("0.2")
-    assert not editor.apply()
-    assert "inconsistent" in editor.status_label.text().casefold()
+    assert float(editor.end_edit.text()) == pytest.approx(0.65)
+    assert editor.apply()
     editor.close()
 
 
@@ -584,7 +1038,7 @@ def test_q_application_updates_viewer_but_does_not_implicitly_save_method(
     state = window.workspace.add_dataset(project, _dataset(units=("meV", "counts")))
     window.open_dataset(project, state)
     window.show_q_editor()
-    window.dataset_view.q_editor.advanced_values_button.setChecked(True)
+    window.dataset_view.q_editor.input_mode_combo.setCurrentText(EXPLICIT_VALUES)
     window.dataset_view.q_editor.values_edit.setPlainText("0.42\n0.58")
 
     assert window.dataset_view.q_editor.apply()

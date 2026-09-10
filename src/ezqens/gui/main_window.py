@@ -60,6 +60,7 @@ from ezqens.gui.dialogs import (
 from ezqens.gui.icons import IconName, apply_disclosure_icon, load_icon
 from ezqens.gui.manual_fit import ManualFitEditor, ManualFitLifecycle
 from ezqens.gui.masking import MaskTaskDraft
+from ezqens.gui.q_rebin import QRebinDialog, QRebinPreview
 from ezqens.gui.theme import (
     DEFAULT_LAYOUT_TOKENS,
     Appearance,
@@ -89,6 +90,7 @@ from ezqens.workflow import (
     WorkflowProject,
     add_project_dataset,
     adopt_single_q_auto_fit_candidate,
+    applied_resolution,
     apply_resolution,
     begin_component_interaction,
     commit_fitting_selection,
@@ -366,6 +368,8 @@ class MainWindow(QMainWindow):
         self._mask_draft: MaskTaskDraft | None = None
         self._mask_draft_owner: DatasetState | None = None
         self._workflow_projects: dict[ProjectState, WorkflowProject] = {}
+        self._preserved_q_sources: dict[tuple[ProjectState, str], ReducedDataset] = {}
+        self.q_rebin_dialog: QRebinDialog | None = None
         self._manual_sessions: dict[tuple[ProjectState, str], ManualFitSession] = {}
         self._active_manual_session: ManualFitSession | None = None
         self._sample_view_sessions: dict[
@@ -521,6 +525,12 @@ class MainWindow(QMainWindow):
             lambda _checked=False: self.enter_mask_task(),
         )
 
+        self.q_rebin_action = QAction("Q Rebin…", self)
+        self.q_rebin_action.setEnabled(False)
+        self.q_rebin_action.triggered.connect(
+            lambda _checked=False: self.show_q_rebin(),
+        )
+
         self.manual_fit_action = QAction("Fitting Parameters…", self)
         self.manual_fit_action.setEnabled(False)
         self.manual_fit_action.triggered.connect(
@@ -591,6 +601,8 @@ class MainWindow(QMainWindow):
 
         analysis_menu = menu_bar.addMenu("&Analysis")
         assert analysis_menu is not None
+        analysis_menu.addAction(self.q_rebin_action)
+        analysis_menu.addSeparator()
         analysis_menu.addAction(self.edit_mask_action)
         analysis_menu.addAction(self.auto_fit_action)
         analysis_menu.addAction(self.manual_fit_action)
@@ -1092,9 +1104,15 @@ class MainWindow(QMainWindow):
         if workflow is None:
             workflow = create_project(project.name)
         states = {state.workflow_dataset_id: state for state in project.datasets}
+        retained_workflow_ids = {
+            association.resolution_id
+            for association in workflow.resolution_associations
+        }
         for reference in tuple(workflow.datasets):
             state = states.pop(reference.dataset_id, None)
             if state is None:
+                if reference.dataset_id in retained_workflow_ids:
+                    continue
                 workflow = remove_project_dataset(workflow, reference)
             elif reference.dataset is not state.dataset:
                 workflow, _ = replace_project_dataset(
@@ -1413,6 +1431,7 @@ class MainWindow(QMainWindow):
         self._open_dataset = dataset
         self.dataset_view.open_dataset(
             dataset.dataset,
+            overview_source=self._preserved_q_sources.get(owner),
             group_index=0 if view_session is None else view_session.group_index,
             y_scale="linear" if view_session is None else view_session.y_scale,
             heatmap_scale=(
@@ -1433,6 +1452,142 @@ class MainWindow(QMainWindow):
         if session is not None:
             session.group_index = self.dataset_view.current_group_index
             self._activate_manual_session(session)
+        return True
+
+    def show_q_rebin(
+        self,
+        project: ProjectState | None = None,
+        dataset: DatasetState | None = None,
+    ) -> QRebinDialog | None:
+        """Open one modal, preview-first Q-rebin task for the selected Sample."""
+
+        if self.q_rebin_dialog is not None:
+            self.q_rebin_dialog.raise_()
+            self.q_rebin_dialog.activateWindow()
+            return self.q_rebin_dialog
+        target_project, target_dataset = self._editing_target(project, dataset)
+        if (
+            target_project is None
+            or target_dataset is None
+            or target_dataset.dataset.role is not SpectrumRole.SAMPLE
+        ):
+            return None
+        if (
+            target_project is not self._open_project
+            or target_dataset is not self._open_dataset
+        ) and not self.open_dataset(target_project, target_dataset):
+            return None
+        workflow = self._workflow_project_for(target_project)
+        sample = self._workflow_dataset(workflow, target_dataset)
+        resolution = applied_resolution(workflow, sample)
+        preserved_sample = self._preserved_q_sources.get(
+            (target_project, sample.dataset_id),
+            sample.dataset,
+        )
+        preserved_resolution = (
+            None
+            if resolution is None
+            else self._preserved_q_sources.get(
+                (target_project, resolution.dataset_id),
+                resolution.dataset,
+            )
+        )
+        dialog = QRebinDialog(
+            workflow,
+            sample,
+            sample_name=target_dataset.name,
+            preserved_sample=preserved_sample,
+            preserved_resolution=preserved_resolution,
+            resolution_name=(
+                None
+                if resolution is None
+                else self._dataset_name_for_workflow_id(
+                    target_project,
+                    resolution.dataset_id,
+                )
+            ),
+            apply_handler=lambda preview: self._apply_q_rebin_preview(
+                target_project,
+                target_dataset,
+                preview,
+            ),
+            parent=self,
+        )
+        self.q_rebin_dialog = dialog
+        dialog.finished.connect(lambda _result: self._q_rebin_finished(dialog))
+        dialog.open()
+        return dialog
+
+    def _q_rebin_finished(self, dialog: QRebinDialog) -> None:
+        if self.q_rebin_dialog is dialog:
+            self.q_rebin_dialog = None
+
+    def _apply_q_rebin_preview(
+        self,
+        project: ProjectState,
+        sample_state: DatasetState,
+        preview: QRebinPreview,
+    ) -> bool:
+        """Adopt one already-validated workflow transaction without replaying it."""
+
+        if (
+            project is self._open_project
+            and sample_state is self._open_dataset
+            and not self._resolve_mask_task_transition()
+        ):
+            return False
+        if project is self._open_project and sample_state is not self._open_dataset:
+            return False
+        if project is self._open_project and self._open_dataset is not None:
+            sample_state = self._open_dataset
+        if sample_state not in project.datasets:
+            return False
+        if self._workflow_projects.get(project) is None:
+            return False
+        visible_resolution = (
+            None
+            if preview.resolution is None
+            else next(
+                (
+                    state
+                    for state in project.datasets
+                    if state.workflow_dataset_id == preview.resolution.dataset_id
+                ),
+                None,
+            )
+        )
+        self._workflow_projects[project] = preview.workflow
+        self._preserved_q_sources.setdefault(
+            (project, preview.sample.dataset_id),
+            preview.sample_source,
+        )
+        if preview.resolution is not None and preview.resolution_source is not None:
+            self._preserved_q_sources.setdefault(
+                (project, preview.resolution.dataset_id),
+                preview.resolution_source,
+            )
+        current_sample, _current_resolution = self.workspace.apply_q_rebin_transaction(
+            project,
+            sample_state,
+            preview.sample.dataset,
+            resolution=visible_resolution,
+            rebinned_resolution=(
+                None
+                if visible_resolution is None or preview.resolution is None
+                else preview.resolution.dataset
+            ),
+        )
+        session = self._sample_view_sessions.setdefault(
+            (project, current_sample.workflow_dataset_id),
+            SampleViewSession(),
+        )
+        session.group_index = (
+            self.dataset_view.current_group_index
+            if project is self._open_project and current_sample is self._open_dataset
+            else 0
+        )
+        self._commit_explicit_fitting_selection(project, current_sample)
+        self._sync_manual_fit_entry()
         return True
 
     def show_manual_fit(
@@ -1689,7 +1844,31 @@ class MainWindow(QMainWindow):
         except WorkflowError as error:
             self._show_workflow_error("Apply Resolution", error)
             return False
+        replayed = applied_resolution(updated_workflow, sample_reference)
+        synchronized_resolution = None
+        if replayed is not None and replayed.dataset is not candidate.dataset:
+            if replayed.dataset_id == candidate.workflow_dataset_id:
+                synchronized_resolution = (
+                    self.workspace.synchronize_replayed_resolution(
+                        target_project,
+                        candidate,
+                        replayed.dataset,
+                    )
+                )
+            self._preserved_q_sources.setdefault(
+                (target_project, replayed.dataset_id),
+                self._preserved_q_sources.get(
+                    (target_project, candidate.workflow_dataset_id),
+                    candidate.dataset,
+                ),
+            )
         self._workflow_projects[target_project] = updated_workflow
+        if synchronized_resolution is not None:
+            self.workspace.dataset_updated.emit(
+                target_project,
+                candidate,
+                synchronized_resolution,
+            )
         association_changed = (
             updated_workflow.resolution_associations != workflow.resolution_associations
         )
@@ -2288,6 +2467,9 @@ class MainWindow(QMainWindow):
         if self._open_project is project:
             self._clear_open_context()
         self._workflow_projects.pop(project, None)
+        for owner in tuple(self._preserved_q_sources):
+            if owner[0] is project:
+                self._preserved_q_sources.pop(owner)
         for owner in tuple(self._manual_sessions):
             if owner[0] is project:
                 self._manual_sessions.pop(owner)
@@ -2340,6 +2522,7 @@ class MainWindow(QMainWindow):
                 self._workflow_dataset(workflow, dataset),
             )
         removed_owner = (project, dataset.workflow_dataset_id)
+        self._preserved_q_sources.pop(removed_owner, None)
         self._manual_sessions.pop(removed_owner, None)
         self._sample_view_sessions.pop(removed_owner, None)
         for session in affected_sessions:
@@ -2863,6 +3046,10 @@ class MainWindow(QMainWindow):
             )
         self.manual_fit_action.setEnabled(available)
         self.auto_fit_action.setEnabled(auto_available)
+        self.q_rebin_action.setEnabled(
+            self._open_dataset is not None
+            and self._open_dataset.dataset.role is SpectrumRole.SAMPLE
+        )
         if not hasattr(self, "manual_fit_button"):
             return
         self.manual_fit_button.setEnabled(available)
@@ -3410,6 +3597,10 @@ class MainWindow(QMainWindow):
         )
         self._workflow_project_for(project)
         if current.dataset.role is not SpectrumRole.SAMPLE:
+            self._preserved_q_sources.pop(
+                (project, current.workflow_dataset_id),
+                None,
+            )
             self._sample_view_sessions.pop(
                 (project, current.workflow_dataset_id),
                 None,
@@ -3427,7 +3618,17 @@ class MainWindow(QMainWindow):
                 self._invalidate_manual_session(session)
         if self._open_project is project and self._open_dataset is previous:
             self._open_dataset = current
-            self.dataset_view.replace_dataset(current.dataset)
+            self.dataset_view.replace_dataset(
+                current.dataset,
+                overview_source=self._preserved_q_sources.get(
+                    (project, current.workflow_dataset_id),
+                ),
+                allow_group_count_change=(
+                    project,
+                    current.workflow_dataset_id,
+                )
+                in self._preserved_q_sources,
+            )
             self.dataset_view.set_selection(
                 None if current.auto_mask is None else current.auto_mask.selection,
             )
@@ -3518,7 +3719,17 @@ class MainWindow(QMainWindow):
                 # Every supported scientific replacement is preflighted above.
                 # Do not retain a draft whose selection is bound to old arrays.
                 self._teardown_mask_task()
-            self.dataset_view.replace_dataset(current.dataset)
+            self.dataset_view.replace_dataset(
+                current.dataset,
+                overview_source=self._preserved_q_sources.get(
+                    (project, current.workflow_dataset_id),
+                ),
+                allow_group_count_change=(
+                    project,
+                    current.workflow_dataset_id,
+                )
+                in self._preserved_q_sources,
+            )
             self.dataset_view.set_selection(
                 None if current.auto_mask is None else current.auto_mask.selection,
             )

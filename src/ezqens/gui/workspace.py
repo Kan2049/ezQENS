@@ -791,6 +791,61 @@ class WorkspaceSidebar(QWidget):
             auto_mask=auto_mask,
         )
 
+    def synchronize_replayed_resolution(
+        self,
+        project: ProjectState,
+        previous: DatasetState,
+        replacement: ReducedDataset,
+    ) -> DatasetState:
+        """Prepare the visible replay result before workflow publication/signals."""
+
+        return self._replace_dataset(
+            project,
+            previous,
+            replacement,
+            auto_mask=create_auto_mask_state(replacement),
+            emit_update=False,
+        )
+
+    def apply_q_rebin_transaction(
+        self,
+        project: ProjectState,
+        sample: DatasetState,
+        rebinned_sample: ReducedDataset,
+        *,
+        resolution: DatasetState | None = None,
+        rebinned_resolution: ReducedDataset | None = None,
+    ) -> tuple[DatasetState, DatasetState | None]:
+        """Replace visible rows only after the paired core transaction succeeds."""
+
+        self.validate_dataset_membership(project, sample)
+        if (resolution is None) is not (rebinned_resolution is None):
+            raise ValueError(
+                "Resolution state and replacement must be supplied together"
+            )
+        if resolution is not None:
+            self.validate_dataset_membership(project, resolution)
+        current_sample = self._replace_dataset(
+            project,
+            sample,
+            rebinned_sample,
+            auto_mask=create_auto_mask_state(rebinned_sample),
+            emit_update=False,
+        )
+        current_resolution = None
+        if resolution is not None and rebinned_resolution is not None:
+            current_resolution = self._replace_dataset(
+                project,
+                resolution,
+                rebinned_resolution,
+                auto_mask=create_auto_mask_state(rebinned_resolution),
+                emit_update=False,
+            )
+        self.dataset_updated.emit(project, sample, current_sample)
+        if resolution is not None and current_resolution is not None:
+            self.dataset_updated.emit(project, resolution, current_resolution)
+        return current_sample, current_resolution
+
     def rename_project(self, project: ProjectState, name: str) -> None:
         """Change only an in-memory Project display name."""
 

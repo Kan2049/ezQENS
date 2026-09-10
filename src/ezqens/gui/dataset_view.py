@@ -7,7 +7,7 @@ from typing import Any
 import numpy as np
 from matplotlib.axes import Axes
 from matplotlib.backend_bases import KeyEvent, MouseButton, MouseEvent
-from matplotlib.collections import QuadMesh
+from matplotlib.collections import PathCollection, QuadMesh
 from matplotlib.colors import ListedColormap, LogNorm, Normalize
 from matplotlib.lines import Line2D
 from matplotlib.patches import Rectangle
@@ -101,6 +101,7 @@ class ReducedDatasetView(QWidget):
         self.canvas = ScientificCanvas()
         self.q_editor = QAssignmentEditor()
         self.dataset: ReducedDataset | None = None
+        self.overview_source_dataset: ReducedDataset | None = None
         self.selection: FittingSelection | None = None
         self.mask_inspection_mode = False
         self.mask_edit_available = False
@@ -132,6 +133,7 @@ class ReducedDatasetView(QWidget):
         self.overview_meshes: tuple[QuadMesh, ...] = ()
         self.overview_x_cell_bounds: tuple[tuple[float, float], ...] = ()
         self.overview_active_highlight: Rectangle | None = None
+        self.navigator_active_highlight: PathCollection | None = None
         self._overview_q_label_artists: tuple[Text, ...] = ()
         self._navigator_q_label_artists: tuple[Text, ...] = ()
         self.spectrum_q_title: Text | None = None
@@ -226,6 +228,11 @@ class ReducedDatasetView(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
         layout.addWidget(self.controls_container)
+        self.overview_provenance_label = QLabel()
+        self.overview_provenance_label.setProperty("secondary", True)
+        self.overview_provenance_label.setWordWrap(True)
+        self.overview_provenance_label.hide()
+        layout.addWidget(self.overview_provenance_label)
         layout.addWidget(self.overview_canvas)
         layout.addWidget(self.q_editor)
         self.manual_interaction_instruction = QLabel()
@@ -315,6 +322,7 @@ class ReducedDatasetView(QWidget):
         self,
         dataset: ReducedDataset,
         *,
+        overview_source: ReducedDataset | None = None,
         group_index: int = 0,
         y_scale: str = "linear",
         heatmap_scale: str = "linear",
@@ -330,6 +338,7 @@ class ReducedDatasetView(QWidget):
 
         self.cancel_manual_component_interaction()
         self.dataset = dataset
+        self.overview_source_dataset = overview_source
         self.selection = None
         self._mask_boundary_coordinates = None
         self._manual_preview = None
@@ -415,6 +424,9 @@ class ReducedDatasetView(QWidget):
         self.cancel_manual_component_interaction()
         self._cancel_spectrum_zoom(redraw=False)
         self.dataset = None
+        self.overview_source_dataset = None
+        self.overview_provenance_label.clear()
+        self.overview_provenance_label.hide()
         self.selection = None
         self._manual_preview = None
         self._manual_fit_result = None
@@ -428,6 +440,7 @@ class ReducedDatasetView(QWidget):
         self.overview_meshes = ()
         self.overview_x_cell_bounds = ()
         self.overview_active_highlight = None
+        self.navigator_active_highlight = None
         self._overview_q_label_artists = ()
         self._navigator_q_label_artists = ()
         self.spectrum_q_title = None
@@ -464,13 +477,28 @@ class ReducedDatasetView(QWidget):
         self.q_method_dropped.emit(project_index, method_index)
         event.acceptProposedAction()
 
-    def replace_dataset(self, dataset: ReducedDataset) -> None:
-        """Refresh an opened dataset after a role-only Workspace change."""
+    def replace_dataset(
+        self,
+        dataset: ReducedDataset,
+        *,
+        overview_source: ReducedDataset | None = None,
+        allow_group_count_change: bool = False,
+    ) -> None:
+        """Refresh an opened dataset and its optional preserved overview source."""
 
         current_dataset = self._require_dataset()
-        if len(dataset.spectra) != len(current_dataset.spectra):
-            raise ValueError("role change must preserve the number of groups")
+        if not allow_group_count_change and len(dataset.spectra) != len(
+            current_dataset.spectra
+        ):
+            raise ValueError("dataset replacement must preserve the number of groups")
         self.dataset = dataset
+        self.overview_source_dataset = overview_source
+        if self.current_group_index >= len(dataset.spectra):
+            self.current_group_index = 0
+        blocker = QSignalBlocker(self.group_spinbox)
+        self.group_spinbox.setRange(1, len(dataset.spectra))
+        self.group_spinbox.setValue(self.current_group_index + 1)
+        del blocker
         self._update_metadata_status()
         self._draw()
 
@@ -639,7 +667,7 @@ class ReducedDatasetView(QWidget):
         blocker = QSignalBlocker(self.group_spinbox)
         self.group_spinbox.setValue(group_index + 1)
         del blocker
-        self._draw()
+        self._draw_current_group()
         self.group_changed.emit(group_index)
 
     def previous_group(self) -> None:
@@ -694,6 +722,13 @@ class ReducedDatasetView(QWidget):
 
     def _draw(self) -> None:
         dataset = self._require_dataset()
+        source = self.overview_source_dataset
+        self.overview_provenance_label.setVisible(source is not None)
+        if source is not None:
+            self.overview_provenance_label.setText(
+                f"Preserved source · {len(source.spectra)} groups"
+                f"   |   Current Q grouping · {len(dataset.spectra)} bins"
+            )
         overview_figure = self.overview_canvas.figure
         overview_figure.clear()
         self._overview_q_label_artists = ()
@@ -702,8 +737,13 @@ class ReducedDatasetView(QWidget):
         if self.overview_visible:
             self.overview_axes = overview_figure.add_subplot(111)
             self.navigator_axes = None
+            self.navigator_active_highlight = None
             self.overview_axes.set_facecolor(self._overview_surface)
-            self._draw_overview(dataset, self.overview_axes)
+            self._draw_overview(
+                self.overview_source_dataset or dataset,
+                dataset,
+                self.overview_axes,
+            )
         else:
             self.overview_axes = None
             self.overview_q_axis = None
@@ -718,6 +758,33 @@ class ReducedDatasetView(QWidget):
         self._update_overview_canvas_height()
         self.overview_canvas.draw_idle()  # type: ignore[no-untyped-call]
         self.canvas.draw_idle()  # type: ignore[no-untyped-call]
+
+    def _draw_current_group(self) -> None:
+        """Redraw Group-dependent artists without rebuilding the overview."""
+
+        dataset = self._require_dataset()
+        self._update_overview_group_presentation(dataset)
+        self._draw_spectrum_figure(dataset)
+        self._update_navigation_state(dataset)
+        self.overview_canvas.draw_idle()  # type: ignore[no-untyped-call]
+        self.canvas.draw_idle()  # type: ignore[no-untyped-call]
+
+    def _update_overview_group_presentation(self, dataset: ReducedDataset) -> None:
+        """Move the active overview marker and refresh its sparse labels."""
+
+        if self.overview_visible:
+            if self.overview_active_highlight is None or self.overview_axes is None:
+                return
+            lower, upper = self.overview_x_cell_bounds[self.current_group_index]
+            self.overview_active_highlight.set_x(lower)
+            self.overview_active_highlight.set_width(upper - lower)
+            self._update_expanded_overview_labels(dataset, self.overview_axes)
+            return
+        if self.navigator_active_highlight is None or self.navigator_axes is None:
+            return
+        coordinate = float(self.current_group_index + 1)
+        self.navigator_active_highlight.set_offsets(np.asarray([[coordinate, 0.0]]))
+        self._update_navigator_labels(dataset, self.navigator_axes)
 
     def _draw_spectrum_figure(self, dataset: ReducedDataset) -> None:
         """Rebuild only the white Spectrum/result figure role."""
@@ -967,22 +1034,35 @@ class ReducedDatasetView(QWidget):
             return np.zeros(point_count, dtype=np.bool_)
         return self.selection.excluded_mask(self.current_group_index)
 
-    def _draw_overview(self, dataset: ReducedDataset, axes: Axes) -> None:
-        coordinates = self._overview_x_coordinates(dataset)
-        self.overview_x_cell_bounds = _overview_x_cell_bounds(dataset, coordinates)
+    def _draw_overview(
+        self,
+        source_dataset: ReducedDataset,
+        navigation_dataset: ReducedDataset,
+        axes: Axes,
+    ) -> None:
+        coordinates = self._overview_x_coordinates(navigation_dataset)
+        self.overview_x_cell_bounds = _overview_x_cell_bounds(
+            navigation_dataset,
+            coordinates,
+        )
+        source_coordinates = self._overview_x_coordinates(source_dataset)
+        source_cell_bounds = _overview_x_cell_bounds(
+            source_dataset,
+            source_coordinates,
+        )
         finite_intensities = np.concatenate(
             [
                 spectrum.intensity[
                     np.isfinite(spectrum.energy) & np.isfinite(spectrum.intensity)
                 ]
-                for spectrum in dataset.spectra
+                for spectrum in source_dataset.spectra
             ]
         )
         norm = _intensity_normalization(finite_intensities, self.heatmap_scale)
         meshes: list[QuadMesh] = []
         for bounds, spectrum in zip(
-            self.overview_x_cell_bounds,
-            dataset.spectra,
+            source_cell_bounds,
+            source_dataset.spectra,
             strict=True,
         ):
             mesh = _draw_spectrum_overview_column(
@@ -995,11 +1075,11 @@ class ReducedDatasetView(QWidget):
             if mesh is not None:
                 meshes.append(mesh)
         self.overview_meshes = tuple(meshes)
-        if self.selection is not None:
+        if self.selection is not None and source_dataset is navigation_dataset:
             for bounds, group_index, spectrum in zip(
                 self.overview_x_cell_bounds,
-                range(len(dataset.spectra)),
-                dataset.spectra,
+                range(len(navigation_dataset.spectra)),
+                navigation_dataset.spectra,
                 strict=True,
             ):
                 _draw_mask_overlay_column(
@@ -1018,19 +1098,9 @@ class ReducedDatasetView(QWidget):
             edgecolor=OVERVIEW_ACTIVE_COLOR,
             zorder=4,
         )
-        spectrum = dataset.spectra[self.current_group_index]
+        spectrum = source_dataset.spectra[0]
         axes.set_ylabel(axis_label("Energy", spectrum.energy_unit), fontsize=8)
         axes.set_xlabel("")
-        label_indices = _discrete_label_indices(
-            len(dataset.spectra),
-            self.current_group_index,
-            axes,
-        )
-        axes.set_xticks(coordinates[list(label_indices)])
-        axes.set_xticklabels(
-            [str(index + 1) for index in label_indices],
-            fontsize=8,
-        )
         axes.xaxis.tick_top()
         axes.tick_params(
             axis="x",
@@ -1050,19 +1120,9 @@ class ReducedDatasetView(QWidget):
         axes.yaxis.label.set_color(self._overview_text)
         for spine in axes.spines.values():
             spine.set_color(self._overview_border)
-        editable_q_values = self._editable_q_center_values(dataset)
+        editable_q_values = self._editable_q_center_values(navigation_dataset)
         if editable_q_values is not None:
             q_axis = axes.secondary_xaxis("bottom")
-            q_axis.set_xticks(coordinates[list(label_indices)])
-            q_axis.set_xticklabels(
-                [
-                    ""
-                    if editable_q_values[index] is None
-                    else f"{editable_q_values[index]:.4g}"
-                    for index in label_indices
-                ],
-                fontsize=8,
-            )
             q_axis.set_xlabel(f"Q ({Q_DISPLAY_UNIT})", color=self._overview_text)
             q_axis.tick_params(
                 labelcolor=self._overview_text,
@@ -1074,14 +1134,48 @@ class ReducedDatasetView(QWidget):
         else:
             self.overview_q_axis = None
             self._overview_q_label_artists = ()
+        self._update_expanded_overview_labels(navigation_dataset, axes)
 
-    def _draw_discrete_navigator(self, dataset: ReducedDataset, axes: Axes) -> None:
-        coordinates = np.arange(1, len(dataset.spectra) + 1, dtype=np.float64)
+    def _update_expanded_overview_labels(
+        self,
+        dataset: ReducedDataset,
+        axes: Axes,
+    ) -> None:
+        """Update width-aware Group/Q labels without rebuilding heatmap artists."""
+
+        coordinates = self._overview_x_coordinates(dataset)
         label_indices = _discrete_label_indices(
             len(dataset.spectra),
             self.current_group_index,
             axes,
         )
+        x_limits = axes.get_xlim()
+        axes.set_xticks(coordinates[list(label_indices)])
+        axes.set_xticklabels(
+            [str(index + 1) for index in label_indices],
+            fontsize=8,
+        )
+        q_axis: Any = self.overview_q_axis
+        editable_q_values = self._editable_q_center_values(dataset)
+        if q_axis is None or editable_q_values is None:
+            self._overview_q_label_artists = ()
+            axes.set_xlim(x_limits)
+            return
+        q_axis.set_xticks(coordinates[list(label_indices)])
+        q_axis.set_xticklabels(
+            [
+                ""
+                if editable_q_values[index] is None
+                else f"{editable_q_values[index]:.4g}"
+                for index in label_indices
+            ],
+            fontsize=8,
+        )
+        self._overview_q_label_artists = tuple(q_axis.get_xticklabels())
+        axes.set_xlim(x_limits)
+
+    def _draw_discrete_navigator(self, dataset: ReducedDataset, axes: Axes) -> None:
+        coordinates = np.arange(1, len(dataset.spectra) + 1, dtype=np.float64)
         axes.plot(
             coordinates,
             np.zeros_like(coordinates),
@@ -1097,7 +1191,7 @@ class ReducedDatasetView(QWidget):
             zorder=2,
         )
         current_coordinate = coordinates[self.current_group_index]
-        axes.scatter(
+        self.navigator_active_highlight = axes.scatter(
             [current_coordinate],
             [0.0],
             color=self._overview_accent,
@@ -1108,8 +1202,6 @@ class ReducedDatasetView(QWidget):
         editable_q_values = self._editable_q_center_values(dataset)
         axes.set_ylim(-0.34 if editable_q_values is not None else -0.18, 0.18)
         axes.set_yticks([])
-        axes.set_xticks(coordinates[list(label_indices)])
-        axes.set_xticklabels([str(index + 1) for index in label_indices], fontsize=7)
         axes.xaxis.tick_top()
         axes.tick_params(
             axis="x",
@@ -1120,22 +1212,7 @@ class ReducedDatasetView(QWidget):
         for spine in axes.spines.values():
             spine.set_visible(False)
         axes.set_facecolor(self._overview_surface)
-        q_label_artists: list[Text] = []
         if editable_q_values is not None:
-            for index in label_indices:
-                q_label_artists.append(
-                    axes.text(
-                        coordinates[index],
-                        -0.19,
-                        ""
-                        if editable_q_values[index] is None
-                        else f"{editable_q_values[index]:.4g}",
-                        ha="center",
-                        va="top",
-                        fontsize=7,
-                        color=self._overview_text,
-                    )
-                )
             axes.text(
                 1.0,
                 -0.19,
@@ -1146,7 +1223,43 @@ class ReducedDatasetView(QWidget):
                 color=self._overview_text,
                 transform=axes.transAxes,
             )
-        self._navigator_q_label_artists = tuple(q_label_artists)
+        self._update_navigator_labels(dataset, axes)
+
+    def _update_navigator_labels(
+        self,
+        dataset: ReducedDataset,
+        axes: Axes,
+    ) -> None:
+        """Update current-aware sparse navigator labels in place."""
+
+        coordinates = np.arange(1, len(dataset.spectra) + 1, dtype=np.float64)
+        label_indices = _discrete_label_indices(
+            len(dataset.spectra),
+            self.current_group_index,
+            axes,
+        )
+        axes.set_xticks(coordinates[list(label_indices)])
+        axes.set_xticklabels([str(index + 1) for index in label_indices], fontsize=7)
+        for artist in self._navigator_q_label_artists:
+            artist.remove()
+        editable_q_values = self._editable_q_center_values(dataset)
+        if editable_q_values is None:
+            self._navigator_q_label_artists = ()
+            return
+        self._navigator_q_label_artists = tuple(
+            axes.text(
+                coordinates[index],
+                -0.19,
+                ""
+                if editable_q_values[index] is None
+                else f"{editable_q_values[index]:.4g}",
+                ha="center",
+                va="top",
+                fontsize=7,
+                color=self._overview_text,
+            )
+            for index in label_indices
+        )
 
     def _update_navigation_state(self, dataset: ReducedDataset) -> None:
         self.previous_button.setEnabled(self.current_group_index > 0)

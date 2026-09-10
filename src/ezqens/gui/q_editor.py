@@ -28,6 +28,8 @@ from ezqens.io import DAVEQBinsResult, parse_dave_q_bins
 
 Q_CENTER = "Q Center"
 Q_EDGES = "Q-bin Edge"
+REGULAR_GRID = "Regular grid"
+EXPLICIT_VALUES = "Explicit values"
 
 
 def parse_q_values(text: str) -> np.ndarray:
@@ -60,7 +62,12 @@ class QAssignmentEditor(QFrame):
         self._q_values: np.ndarray | None = None
         self._edges: np.ndarray | None = None
         self._edited_representation: str | None = None
+        self._text_edited_representation: str | None = None
         self._visible_representation: str | None = None
+        self._visible_input_mode = REGULAR_GRID
+        self._regular_exact_values: dict[str, float] = {}
+        self._setting_regular_numeric_text = False
+        self._pending_singleton_field: str | None = None
         self._diagnostics: tuple[ImportDiagnostic, ...] = ()
         self._available_methods: tuple[tuple[str, QBins], ...] = ()
         self._q_center_slots: list[float | None] = []
@@ -82,8 +89,21 @@ class QAssignmentEditor(QFrame):
         self.end_edit = QLineEdit()
         self.end_edit.setObjectName("qEndEdit")
         self.end_edit.setPlaceholderText("End")
-        for field in (self.start_edit, self.step_edit, self.end_edit):
-            field.textChanged.connect(self._refresh_preview)
+        self.groups_edit = QLineEdit()
+        self.groups_edit.setObjectName("qGroupCountEdit")
+        self.groups_edit.setReadOnly(True)
+        self.groups_edit.setMaximumWidth(54)
+        for key, field in (
+            ("start", self.start_edit),
+            ("step", self.step_edit),
+            ("end", self.end_edit),
+        ):
+            field.textChanged.connect(
+                lambda _text, field_key=key: self._regular_field_changed(field_key)
+            )
+            field.editingFinished.connect(
+                lambda field_key=key: self._regular_field_editing_finished(field_key)
+            )
 
         self.uniform_fields = QWidget()
         uniform_layout = QHBoxLayout(self.uniform_fields)
@@ -93,18 +113,17 @@ class QAssignmentEditor(QFrame):
             ("Start", self.start_edit),
             ("Step", self.step_edit),
             ("End", self.end_edit),
+            ("Groups", self.groups_edit),
         ):
             uniform_layout.addWidget(QLabel(label))
             field.setMaximumWidth(92)
             uniform_layout.addWidget(field)
+        self.groups_edit.setMaximumWidth(54)
 
-        self.advanced_values_button = QToolButton()
-        self.advanced_values_button.setObjectName("advancedQValuesButton")
-        self.advanced_values_button.setText("Advanced values")
-        self.advanced_values_button.setCheckable(True)
-        self.advanced_values_button.toggled.connect(self._set_advanced_values_visible)
-        uniform_layout.addStretch(1)
-        uniform_layout.addWidget(self.advanced_values_button)
+        self.input_mode_combo = QComboBox()
+        self.input_mode_combo.setObjectName("qInputModeCombo")
+        self.input_mode_combo.addItems([REGULAR_GRID, EXPLICIT_VALUES])
+        self.input_mode_combo.currentTextChanged.connect(self._input_mode_changed)
         self._uniform_layout = uniform_layout
 
         self.values_edit = QPlainTextEdit()
@@ -160,6 +179,7 @@ class QAssignmentEditor(QFrame):
         title.setObjectName("qAssignmentTitle")
         top.addWidget(title)
         top.addWidget(self.representation_combo)
+        top.addWidget(self.input_mode_combo)
         top.addWidget(self.uniform_fields)
         top.addStretch(1)
         top.addWidget(self.apply_button)
@@ -195,7 +215,8 @@ class QAssignmentEditor(QFrame):
             self.start_edit,
             self.step_edit,
             self.end_edit,
-            self.advanced_values_button,
+            self.groups_edit,
+            self.input_mode_combo,
             self.import_button,
             self.use_method_button,
             self.apply_button,
@@ -225,16 +246,19 @@ class QAssignmentEditor(QFrame):
         )
         self._diagnostics = ()
         self._edited_representation = None
+        self._text_edited_representation = None
         self._visible_representation = None
+        self._regular_exact_values.clear()
+        self._pending_singleton_field = None
         blocker = QSignalBlocker(self.representation_combo)
         self.representation_combo.setCurrentText(Q_CENTER)
         del blocker
+        mode = (
+            EXPLICIT_VALUES if self._requires_explicit_values(q_bins) else REGULAR_GRID
+        )
+        self._set_input_mode(mode, capture_current=False)
         self._show_representation(Q_CENTER)
-        advanced = self._requires_advanced_values(q_bins)
-        self._set_advanced_values_visible(advanced)
-        button_blocker = QSignalBlocker(self.advanced_values_button)
-        self.advanced_values_button.setChecked(advanced)
-        del button_blocker
+        self.groups_edit.setText(str(len(dataset.spectra)))
         self.show()
         self.q_center_draft_changed.emit()
 
@@ -270,16 +294,17 @@ class QAssignmentEditor(QFrame):
         self._edges = None if q_bins.edges is None else q_bins.edges.copy()
         self._diagnostics = diagnostics
         self._edited_representation = None
+        self._text_edited_representation = None
         self._visible_representation = None
+        self._regular_exact_values.clear()
+        self._pending_singleton_field = None
         representation = Q_EDGES if q_bins.edges is not None else Q_CENTER
         blocker = QSignalBlocker(self.representation_combo)
         self.representation_combo.setCurrentText(representation)
         del blocker
-        self._set_advanced_values_visible(True)
-        button_blocker = QSignalBlocker(self.advanced_values_button)
-        self.advanced_values_button.setChecked(True)
-        del button_blocker
+        self._set_input_mode(EXPLICIT_VALUES, capture_current=False)
         self._show_representation(representation)
+        self.groups_edit.setText(str(self._group_count()))
         self.q_center_draft_changed.emit()
 
     def q_center_slots(self) -> tuple[float | None, ...]:
@@ -306,7 +331,7 @@ class QAssignmentEditor(QFrame):
             del blocker
         else:
             self._q_values = None
-        self.advanced_values_button.setChecked(True)
+        self._set_input_mode(EXPLICIT_VALUES, capture_current=False)
         self._refresh_preview()
         self.q_center_draft_changed.emit()
 
@@ -321,7 +346,12 @@ class QAssignmentEditor(QFrame):
     def build_q_bins(self) -> QBins:
         """Validate the visible draft with the domain's Q semantics."""
 
-        if self.advanced_values_button.isChecked():
+        if self.input_mode_combo.currentText() == REGULAR_GRID:
+            self._commit_pending_singleton_edit()
+        return self._build_visible_q_bins()
+
+    def _build_visible_q_bins(self) -> QBins:
+        if self.input_mode_combo.currentText() == EXPLICIT_VALUES:
             return self._build_explicit_q_bins()
         return self._build_uniform_q_bins()
 
@@ -344,20 +374,21 @@ class QAssignmentEditor(QFrame):
         self._q_center_slots = [float(value) for value in q_bins.q_values]
         self._edges = None if q_bins.edges is None else q_bins.edges.copy()
         self._edited_representation = None
+        self._text_edited_representation = None
         self._refresh_preview()
         return True
 
     def _build_uniform_q_bins(self, representation: str | None = None) -> QBins:
         """Resolve Start/Step/End through the public Q-bin constructors."""
 
-        start = _parse_q_scalar(self.start_edit.text(), "Start")
-        step = _parse_q_scalar(self.step_edit.text(), "Step")
-        end = _parse_q_scalar(self.end_edit.text(), "End")
+        start = self._regular_value("start", self.start_edit, "Start")
+        step = self._regular_value("step", self.step_edit, "Step")
+        end = self._regular_value("end", self.end_edit, "End")
         group_count = self._group_count()
         representation = representation or self.representation_combo.currentText()
         try:
             if representation == Q_CENTER:
-                if group_count == 1 and not np.isclose(start, end):
+                if group_count == 1 and start != end:
                     raise ValueError("Start and End must be identical for one Q Center")
                 q_bins = QBins.from_q_values_and_uniform_step(
                     np.linspace(start, end, group_count, dtype=np.float64),
@@ -386,7 +417,13 @@ class QAssignmentEditor(QFrame):
 
         dataset = self._require_dataset()
         representation = self.representation_combo.currentText()
-        values = parse_q_values(self.values_edit.toPlainText())
+        stored_values = self._q_values if representation == Q_CENTER else self._edges
+        values = (
+            parse_q_values(self.values_edit.toPlainText())
+            if self._text_edited_representation == representation
+            or stored_values is None
+            else stored_values
+        )
         if representation == Q_CENTER:
             if values.size != len(dataset.spectra):
                 raise ValueError("Q Center count must match the dataset Group count")
@@ -407,32 +444,69 @@ class QAssignmentEditor(QFrame):
     def _show_representation(self, representation: str) -> None:
         self._store_visible_draft()
         self._visible_representation = representation
-        if self.advanced_values_button.isChecked():
+        if self.input_mode_combo.currentText() == EXPLICIT_VALUES:
             self._show_explicit_values(representation)
         else:
             self._show_uniform_values(representation)
         self._refresh_preview()
 
-    def _set_advanced_values_visible(self, visible: bool) -> None:
-        self.uniform_fields.setVisible(not visible)
-        self.values_edit.setVisible(visible)
-        if visible:
+    def _input_mode_changed(self, mode: str) -> None:
+        if self._visible_input_mode == REGULAR_GRID and mode != REGULAR_GRID:
+            try:
+                self._commit_pending_singleton_edit()
+            except ValueError as error:
+                blocker = QSignalBlocker(self.input_mode_combo)
+                self.input_mode_combo.setCurrentText(REGULAR_GRID)
+                del blocker
+                self.status_label.setText(str(error))
+                self.preview_label.setText("")
+                return
+        self._set_input_mode(mode, capture_current=True)
+
+    def _set_input_mode(self, mode: str, *, capture_current: bool) -> None:
+        if mode not in {REGULAR_GRID, EXPLICIT_VALUES}:
+            raise ValueError("unknown Q input mode")
+        if capture_current:
+            self._store_visible_draft(mode=self._visible_input_mode)
+        blocker = QSignalBlocker(self.input_mode_combo)
+        self.input_mode_combo.setCurrentText(mode)
+        del blocker
+        self._visible_input_mode = mode
+        regular = mode == REGULAR_GRID
+        self.uniform_fields.setVisible(regular)
+        self.values_edit.setVisible(not regular)
+        if mode == EXPLICIT_VALUES:
             self._show_explicit_values(self.representation_combo.currentText())
         else:
             self._show_uniform_values(self.representation_combo.currentText())
         self._refresh_preview()
 
     def _show_uniform_values(self, representation: str) -> None:
+        self._pending_singleton_field = None
         values = self._q_values if representation == Q_CENTER else self._edges
         start, step, end = _uniform_summary(values)
+        if (
+            representation == Q_CENTER
+            and values is not None
+            and values.size == 1
+            and self._edges is not None
+        ):
+            step = float(self._edges[1] - self._edges[0])
         for field, value in (
             (self.start_edit, start),
             (self.step_edit, step),
             (self.end_edit, end),
         ):
-            blocker = QSignalBlocker(field)
-            field.setText("" if value is None else f"{value:.12g}")
-            del blocker
+            key = {
+                self.start_edit: "start",
+                self.step_edit: "step",
+                self.end_edit: "end",
+            }[field]
+            if value is None:
+                self._clear_regular_value(key, field)
+            else:
+                self._set_regular_value(key, field, value)
+        self.groups_edit.setText(str(self._group_count()))
         if values is None:
             noun = "Q centers" if representation == Q_CENTER else "Q-bin edges"
             self.status_label.setText(
@@ -440,7 +514,7 @@ class QAssignmentEditor(QFrame):
             )
         elif step is None:
             self.status_label.setText(
-                "Existing assignment uses non-uniform values; use Advanced values "
+                "Existing assignment uses non-uniform values; use Explicit values "
                 "to preserve or edit it.",
             )
         else:
@@ -457,20 +531,30 @@ class QAssignmentEditor(QFrame):
                 f"Paste {noun} values for {self._group_count()} Groups",
             )
 
-    def _store_visible_draft(self) -> None:
+    def _store_visible_draft(self, *, mode: str | None = None) -> None:
         if self._visible_representation is None:
             return
-        if not self.advanced_values_button.isChecked():
+        mode = self._visible_input_mode if mode is None else mode
+        if mode == REGULAR_GRID:
             try:
+                self._commit_pending_singleton_edit()
                 q_bins = self._build_uniform_q_bins(self._visible_representation)
             except ValueError:
                 return
             self._q_values = q_bins.q_values.copy()
             self._edges = None if q_bins.edges is None else q_bins.edges.copy()
             return
-        try:
-            draft_values = parse_q_values(self.values_edit.toPlainText())
-        except ValueError:
+        stored_values = (
+            self._q_values if self._visible_representation == Q_CENTER else self._edges
+        )
+        if self._text_edited_representation == self._visible_representation:
+            try:
+                draft_values = parse_q_values(self.values_edit.toPlainText())
+            except ValueError:
+                return
+        elif stored_values is not None:
+            draft_values = stored_values
+        else:
             return
         if self._visible_representation == Q_CENTER:
             self._q_values = draft_values
@@ -478,17 +562,115 @@ class QAssignmentEditor(QFrame):
                 self._q_center_slots = [float(value) for value in draft_values]
         else:
             self._edges = draft_values
+        self._text_edited_representation = None
 
     def _mark_edited(self) -> None:
-        if self.advanced_values_button.isChecked():
+        if self.input_mode_combo.currentText() == EXPLICIT_VALUES:
             self._edited_representation = self.representation_combo.currentText()
+            self._text_edited_representation = self.representation_combo.currentText()
+
+    def _regular_field_changed(self, key: str) -> None:
+        if self._setting_regular_numeric_text:
+            return
+        if self._is_singleton_center_field(key):
+            self._pending_singleton_field = key
+            self._refresh_preview()
+            return
+        self._regular_exact_values.pop(key, None)
+        try:
+            value = _parse_q_scalar(
+                {
+                    "start": self.start_edit,
+                    "step": self.step_edit,
+                    "end": self.end_edit,
+                }[key].text(),
+                key.title(),
+            )
+            self._regular_exact_values[key] = value
+            self._couple_regular_fields(key)
+        except ValueError:
+            pass
+        self._refresh_preview()
+
+    def _regular_field_editing_finished(self, key: str) -> None:
+        if self._pending_singleton_field != key:
+            return
+        try:
+            self._commit_pending_singleton_edit()
+        except ValueError as error:
+            self.status_label.setText(str(error))
+            self.preview_label.setText("")
+            return
+        self._refresh_preview()
+
+    def _commit_pending_singleton_edit(self) -> None:
+        key = self._pending_singleton_field
+        if key is None:
+            return
+        field = self.start_edit if key == "start" else self.end_edit
+        authoritative = _parse_q_scalar(field.text(), key.title())
+        self._pending_singleton_field = None
+        self._set_regular_value("start", self.start_edit, authoritative)
+        self._set_regular_value("end", self.end_edit, authoritative)
+
+    def _is_singleton_center_field(self, key: str) -> bool:
+        return (
+            key in {"start", "end"}
+            and self.representation_combo.currentText() == Q_CENTER
+            and self._group_count() == 1
+        )
+
+    def _couple_regular_fields(self, edited: str) -> None:
+        group_span = self._regular_group_span()
+        if group_span == 0:
+            authoritative = (
+                self._regular_value("end", self.end_edit, "End")
+                if edited == "end"
+                else self._regular_value("start", self.start_edit, "Start")
+            )
+            self._set_regular_value("start", self.start_edit, authoritative)
+            self._set_regular_value("end", self.end_edit, authoritative)
+            return
+        start = self._regular_value("start", self.start_edit, "Start")
+        if edited == "end":
+            end = self._regular_value("end", self.end_edit, "End")
+            self._set_regular_value("step", self.step_edit, (end - start) / group_span)
+            return
+        step = self._regular_value("step", self.step_edit, "Step")
+        self._set_regular_value("end", self.end_edit, start + group_span * step)
+
+    def _regular_group_span(self) -> int:
+        if self.representation_combo.currentText() == Q_CENTER:
+            return self._group_count() - 1
+        return self._group_count()
+
+    def _set_regular_value(self, key: str, field: QLineEdit, value: float) -> None:
+        self._regular_exact_values[key] = float(value)
+        self._setting_regular_numeric_text = True
+        try:
+            field.setText(f"{value:.12g}")
+        finally:
+            self._setting_regular_numeric_text = False
+
+    def _clear_regular_value(self, key: str, field: QLineEdit) -> None:
+        self._regular_exact_values.pop(key, None)
+        self._setting_regular_numeric_text = True
+        try:
+            field.clear()
+        finally:
+            self._setting_regular_numeric_text = False
+
+    def _regular_value(self, key: str, field: QLineEdit, name: str) -> float:
+        if key in self._regular_exact_values:
+            return self._regular_exact_values[key]
+        return _parse_q_scalar(field.text(), name)
 
     def _refresh_preview(self) -> None:
         if self.dataset is None:
             self.preview_label.setText("")
             return
         try:
-            q_bins = self.build_q_bins()
+            q_bins = self._build_visible_q_bins()
         except (RuntimeError, ValueError):
             self.preview_label.setText("")
             return
@@ -551,7 +733,7 @@ class QAssignmentEditor(QFrame):
         except ValueError as error:
             self.status_label.setText(str(error))
 
-    def _requires_advanced_values(self, q_bins: QBins | None) -> bool:
+    def _requires_explicit_values(self, q_bins: QBins | None) -> bool:
         if q_bins is None:
             return False
         if q_bins.edges is None:
