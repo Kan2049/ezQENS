@@ -136,6 +136,18 @@ A finite relaxation time requires a finite positive FWHM. Zero, negative, NaN,
 or infinite FWHM must produce no valid `tau_ps` and an explicit warning rather
 than a misleading number.
 
+When the fitted FWHM has a statistically available standard error
+`sigma_Gamma`, relaxation-time uncertainty is propagated analytically:
+
+```text
+sigma_tau = 1.3164239138 * sigma_Gamma / Gamma_meV^2
+```
+
+A fixed FWHM retains its fitted value and derived relaxation time but has no
+estimated statistical uncertainty; it is not reported with zero uncertainty.
+The derived layer consumes canonical fitted energy quantities in meV and does
+not guess or convert unresolved units.
+
 ## 4. Spectral model semantics
 
 The measured-resolution-convolved model supports:
@@ -234,10 +246,33 @@ the source fit, component areas, included component identifiers, Q value,
 validity status, and warnings so that a future EISF definition can be evaluated
 without discarding information.
 
-EISF uncertainty will later use covariance propagation when the necessary
-covariance is available. The exact propagation and fallback policy are not yet
-authoritative and are unresolved. Missing covariance must not be presented as
-zero uncertainty.
+Elastic-only fits have EISF 1 and Lorentzian-only fits have EISF 0.
+Background-only fits, nonfinite or negative contributing areas, and nonpositive
+total component area produce unavailable EISF. No component is omitted from a
+multi-Lorentzian denominator.
+
+For `T = A_elastic + sum(A_i)`, the covariance-propagation derivatives are:
+
+```text
+dEISF/dA_elastic = sum(A_i) / T^2
+dEISF/dA_i       = -A_elastic / T^2
+variance(EISF)   = g.T @ C @ g
+```
+
+`C` is the full covariance over the relevant free fitted-area optimizer
+parameters, including off-diagonal terms. Before propagation, that submatrix
+must be finite, numerically symmetric, and positive semidefinite within a narrow
+scale-aware floating-point tolerance; a materially indefinite matrix is
+unusable and is never repaired or replaced by diagonal-only errors. Derivatives for component-area
+references that share one optimizer parameter through an explicit tie are
+summed onto that parameter before evaluating the quadratic form. Fixed
+contributors are held at their fitted values and the free-parameter covariance
+therefore gives uncertainty conditional on those fixed values. If every
+contributing area is fixed, or the relevant covariance is missing or unusable,
+the EISF value remains available when otherwise valid but statistical
+uncertainty is explicitly unavailable rather than zero. Structurally exact
+elastic-only and Lorentzian-only EISF values likewise carry no estimated
+statistical uncertainty.
 
 ## 6. Default fitting method
 

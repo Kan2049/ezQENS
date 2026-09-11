@@ -514,9 +514,29 @@ that operation records no seed group. An optimizer-unsuccessful Result remains
 failed evidence and never replaces the nearest successful same-side seed.
 `EXCLUDED`, manual-refit and selected-result state belong to later M6 slices.
 
-`DerivedQENSResult` retains Q, per-component FWHM, valid relaxation times,
-elastic and individual quasielastic integrated areas, EISF, validity, and
-warnings. Missing covariance never means zero uncertainty.
+M6-S4 implements immutable `DerivedQENSResult` and `DerivedQENSPoint` values as
+a read-only view over one existing `MultiQBranchResult` and its explicit
+`QBins`. Every point retains original group order, Q and execution status.
+`FAILED`, `BLOCKED`, `EXCLUDED`, `NOT_RUN`, and separately derived-excluded
+points contain no derived scientific values. A noncanonical FitResult energy
+unit blocks only the affected successful point rather than triggering unit
+guessing or conversion.
+
+Each `LorentzianDerivedQuantity` is keyed by stable `ComponentIdentity` and
+retains fitted intrinsic FWHM, derived relaxation time, their available
+statistical uncertainties, validity, and fixed/unavailable uncertainty state.
+Component order follows the anchor branch identity order; it is not recomputed
+from fitted linewidth.
+
+`EISFResult` retains its source `FitResult`, Q, elastic and individual
+quasielastic `ComponentAreaEstimate` values, optimizer-sharing references,
+value, uncertainty state, and warnings. Full relevant covariance is propagated
+after derivatives for references sharing one optimizer parameter are
+aggregated. Mixed fixed/free propagation is conditional on fixed contributors.
+All-fixed or missing/unusable covariance produces unavailable statistical
+uncertainty, never zero. `derive_qens(branch_result, q_bins)` performs no fit,
+seeding, interpolation, smoothing, ranking, component rematching, or source
+mutation.
 
 ### 4.6 Application/workflow state — pre-GUI
 

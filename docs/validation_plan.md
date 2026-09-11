@@ -49,7 +49,12 @@ Required convention cases include:
 - `tau_ps = 1.3164239138 / Gamma_meV` for representative positive widths;
 - zero/negative/nonfinite FWHM yields invalid tau plus warning;
 - experimental EISF uses integrated elastic and individual quasielastic areas;
-- missing covariance does not produce zero uncertainty;
+- relaxation-time uncertainty follows analytic FWHM-error propagation, while a
+  fixed FWHM has unavailable rather than zero statistical uncertainty;
+- EISF uncertainty uses full relevant covariance, including off-diagonal terms
+  and derivative aggregation for explicitly tied area references;
+- mixed fixed/free EISF uncertainty is conditional on fixed contributors, and
+  all-fixed or missing/unusable covariance does not produce zero uncertainty;
 - default residual sign is `model - data`;
 - default weighting divides by valid `sigma`;
 - only finite, strictly positive sigma is statistically valid;

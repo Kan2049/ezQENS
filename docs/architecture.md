@@ -467,7 +467,7 @@ fit_single_q(prepared_resolution, fitting_selection, group_index,
 execute_multi_q_branch(prepared_resolution, fitting_selection,
                        configurations_by_group, anchor_group_index,
                        anchor_fit, cancellation) -> MultiQBranchResult
-derive_qens(batch_result, configuration) -> DerivedQENSResult
+derive_qens(branch_result, q_bins) -> DerivedQENSResult
 export_analysis(results, reproducibility_summary, destination) -> ExportRecord
 ```
 
