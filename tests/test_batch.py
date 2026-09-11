@@ -6,6 +6,7 @@ import math
 from collections.abc import Callable, Sequence
 from dataclasses import replace
 from types import SimpleNamespace
+from typing import cast
 
 import numpy as np
 import numpy.typing as npt
@@ -13,6 +14,7 @@ import pytest
 
 import ezqens.batch.core as batch_core
 from ezqens.batch import (
+    MultiQBranchResult,
     MultiQExecutionStatus,
     MultiQFitStatus,
     execute_multi_q_branch,
@@ -22,6 +24,7 @@ from ezqens.domain import QBins, ReducedDataset, Spectrum, SpectrumRole
 from ezqens.fitting import (
     BACKGROUND_COMPONENT,
     ELASTIC_COMPONENT,
+    AutoFitRecommendation,
     BackgroundModel,
     CandidateFitResult,
     ComponentFamily,
@@ -51,6 +54,7 @@ from ezqens.resolution import (
     prepare_measured_resolution,
 )
 from ezqens.workflow import (
+    FittingMethod,
     FittingWorkspaceState,
     ManualFitContext,
     ManualFitDraft,
@@ -60,6 +64,8 @@ from ezqens.workflow import (
     MethodTransferOptions,
     MethodTransferOverrides,
     ProjectDataset,
+    SelectedAutoFitMultiQResult,
+    SingleQAutoFitOutcome,
     WorkflowProject,
     add_project_dataset,
     apply_fitting_method,
@@ -68,10 +74,12 @@ from ezqens.workflow import (
     auto_fit_all_q,
     capture_fitting_method,
     commit_fitting_selection,
+    continue_selected_auto_fit_candidates,
     create_project,
     fit_all_q_from_current,
     materialize_manual_model,
     open_manual_fit_draft,
+    resolve_manual_fit_context,
     run_manual_fit,
     save_current_result,
     save_working_method,
@@ -293,6 +301,76 @@ def _workflow_problem(
             _manual_model(background=background, slope_free=slope_free),
         )
     return project, sample, draft
+
+
+def _single_q_auto_outcome(
+    context: ManualFitContext,
+    candidates: Sequence[CandidateFitResult],
+    *,
+    most_recommended: CandidateFitResult | None,
+) -> SingleQAutoFitOutcome:
+    spectrum = context.selection.dataset.spectra[context.group_index]
+    retained = context.selection.retained_mask(context.group_index)
+    recommendation = cast(
+        AutoFitRecommendation,
+        SimpleNamespace(
+            candidate_results=tuple(candidates),
+            most_recommended=most_recommended,
+        ),
+    )
+    return SingleQAutoFitOutcome(
+        scientific_context=context,
+        recommendation=recommendation,
+        measured_energy=spectrum.energy[retained],
+        measured_intensity=spectrum.intensity[retained],
+        measured_uncertainty=spectrum.uncertainty[retained],
+    )
+
+
+@pytest.fixture(scope="module")
+def selected_auto_problem(
+    multi_q_problem: tuple[
+        PreparedResolution,
+        FittingSelection,
+        tuple[SpectralModelDefinition, ...],
+        FitResult,
+    ],
+) -> tuple[
+    WorkflowProject,
+    ProjectDataset,
+    ManualFitDraft,
+    SingleQAutoFitOutcome,
+    tuple[CandidateFitResult, CandidateFitResult],
+]:
+    prepared, selection, _configurations, _anchor = multi_q_problem
+    project, sample, draft = _workflow_problem(prepared, selection)
+    resolved = resolve_manual_fit_context(project, sample, 2)
+    assert resolved.context is not None
+    context = resolved.context
+    one_lorentzian = StandardModelCandidate(1, BackgroundModel.NONE)
+    one_fit = fit_standard_candidate(
+        context.prepared_resolution,
+        context.selection,
+        context.group_index,
+        one_lorentzian,
+        max_nfev=800,
+    )
+    two_lorentzian = StandardModelCandidate(2, BackgroundModel.CONSTANT)
+    two_fit = run_manual_fit(project, draft, context.group_index, max_nfev=800)
+    evidence = (
+        CandidateFitResult(two_lorentzian, two_fit),
+        CandidateFitResult(one_lorentzian, one_fit),
+    )
+    outcome = _single_q_auto_outcome(
+        context,
+        evidence,
+        most_recommended=evidence[0],
+    )
+    empty = replace(
+        draft,
+        setups=tuple(replace(setup, model=None) for setup in draft.setups),
+    )
+    return project, sample, empty, outcome, evidence
 
 
 def _result_with_values(
@@ -1385,40 +1463,362 @@ def test_fit_all_q_runs_missing_manual_anchor_then_continues(
     assert all(item.status is MultiQFitStatus.SUCCESS for item in result.outcomes)
 
 
-def test_fresh_auto_all_q_uses_most_recommended_direct_b0_anchor_only(
-    multi_q_problem: tuple[
-        PreparedResolution,
-        FittingSelection,
-        tuple[SpectralModelDefinition, ...],
-        FitResult,
+def test_selected_auto_candidates_create_ordered_independent_branches(
+    selected_auto_problem: tuple[
+        WorkflowProject,
+        ProjectDataset,
+        ManualFitDraft,
+        SingleQAutoFitOutcome,
+        tuple[CandidateFitResult, CandidateFitResult],
     ],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    prepared, selection, _configurations, _anchor = multi_q_problem
-    project, sample, draft = _workflow_problem(
-        prepared,
-        selection,
-        background=BackgroundModel.CONSTANT,
+    project, _sample, draft, outcome, evidence = selected_auto_problem
+    most_recommended, other_successful = evidence
+
+    def unexpected_anchor_refit(*_args: object, **_kwargs: object) -> FitResult:
+        raise AssertionError("selected AutoFit anchors must not be refit")
+
+    def unexpected_auto_rerun(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("selected branches must reuse one AutoFit evaluation")
+
+    captured_methods: list[FittingMethod] = []
+
+    def record_method(
+        model: ManualModelState,
+        *,
+        context: ManualFitContext | None = None,
+        transfer_defaults: MethodTransferOptions | None = None,
+    ) -> FittingMethod:
+        method = capture_fitting_method(
+            model,
+            context=context,
+            transfer_defaults=transfer_defaults,
+        )
+        captured_methods.append(method)
+        return method
+
+    monkeypatch.setattr(
+        "ezqens.workflow.multi_q.run_manual_fit",
+        unexpected_anchor_refit,
     )
-    anchor = run_manual_fit(project, draft, 2, max_nfev=800)
-    assert anchor.context_binding is not None
-    candidate = CandidateFitResult(
-        StandardModelCandidate(2, BackgroundModel.CONSTANT),
-        anchor,
+    monkeypatch.setattr(
+        "ezqens.workflow.multi_q.run_single_q_auto_fit",
+        unexpected_auto_rerun,
     )
-    context = _manual_context(
-        anchor.context_binding.prepared_resolution,
-        anchor.context_binding.selection,
+    monkeypatch.setattr(
+        "ezqens.workflow.multi_q.capture_fitting_method",
+        record_method,
     )
-    context = replace(context, project_id=project.project_id, sample=sample)
+    result = continue_selected_auto_fit_candidates(
+        project,
+        draft,
+        outcome,
+        (other_successful.candidate, most_recommended.candidate),
+        max_nfev=800,
+    )
+
+    assert result.status is MultiQExecutionStatus.COMPLETED
+    assert result.selected_candidates == (
+        other_successful.candidate,
+        most_recommended.candidate,
+    )
+    assert len(captured_methods) == 2
+    assert captured_methods[0] is not captured_methods[1]
+    for item, original in zip(
+        result.branches,
+        (other_successful, most_recommended),
+        strict=True,
+    ):
+        assert item.anchor_evidence.candidate == original.candidate
+        assert item.anchor_evidence.fit is not None
+        assert original.fit is not None
+        assert item.anchor_evidence.fit.parameters == original.fit.parameters
+        assert item.anchor_evidence.fit.diagnostics == original.fit.diagnostics
+        branch = item.branch_result
+        anchor = branch.outcome(branch.anchor_group_index).fit_result
+        assert anchor is item.anchor_evidence.fit
+        assert all(
+            outcome.status is MultiQFitStatus.SUCCESS for outcome in branch.outcomes
+        )
+        expected_identities = {
+            component.identity
+            for component in item.anchor_evidence.fit.configuration.lorentzians
+        }
+        assert all(
+            group.fit_result is not None
+            and {
+                component.identity
+                for component in group.fit_result.configuration.lorentzians
+            }
+            == expected_identities
+            for group in branch.outcomes
+        )
+    for group_index in (0, 1, 3, 4):
+        first = result.branches[0].branch_result.outcome(group_index).fit_result
+        second = result.branches[1].branch_result.outcome(group_index).fit_result
+        assert first is not None and second is not None
+        assert first is not second
+
+
+def test_selected_auto_candidates_reject_invalid_evidence_before_execution(
+    selected_auto_problem: tuple[
+        WorkflowProject,
+        ProjectDataset,
+        ManualFitDraft,
+        SingleQAutoFitOutcome,
+        tuple[CandidateFitResult, CandidateFitResult],
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project, _sample, draft, outcome, evidence = selected_auto_problem
+    first, second = evidence
+
+    def unexpected_branch(*_args: object, **_kwargs: object) -> MultiQBranchResult:
+        raise AssertionError("all selections must validate before branch execution")
+
+    monkeypatch.setattr(
+        "ezqens.workflow.multi_q.execute_multi_q_branch",
+        unexpected_branch,
+    )
+    with pytest.raises(ValueError, match="duplicate AutoFit candidate"):
+        continue_selected_auto_fit_candidates(
+            project,
+            draft,
+            outcome,
+            (first.candidate, first.candidate),
+        )
+
+    absent = StandardModelCandidate(3, BackgroundModel.NONE)
+    with pytest.raises(ValueError, match="absent from the anchor evaluation"):
+        continue_selected_auto_fit_candidates(
+            project,
+            draft,
+            outcome,
+            (first.candidate, absent),
+        )
+
+    failed_candidate = StandardModelCandidate(0, BackgroundModel.NONE)
+    failed = CandidateFitResult(
+        failed_candidate,
+        None,
+        error_type="FittingError",
+        error_message="candidate failed",
+    )
+    failed_outcome = replace(
+        outcome,
+        recommendation=cast(
+            AutoFitRecommendation,
+            SimpleNamespace(
+                candidate_results=(*evidence, failed),
+                most_recommended=first,
+            ),
+        ),
+    )
+    with pytest.raises(ValueError, match="no successful anchor FitResult"):
+        continue_selected_auto_fit_candidates(
+            project,
+            draft,
+            failed_outcome,
+            (failed_candidate,),
+        )
+
+    assert second.fit is not None
+    binding = second.fit.context_binding
+    assert binding is not None
+    stale_selection = replace(binding.selection)
+    stale_fit = replace(
+        second.fit,
+        context_binding=FitContextBinding(
+            binding.prepared_resolution,
+            stale_selection,
+            binding.group_index,
+        ),
+    )
+    stale = replace(second, fit=stale_fit)
+    stale_outcome = replace(
+        outcome,
+        recommendation=cast(
+            AutoFitRecommendation,
+            SimpleNamespace(
+                candidate_results=(first, stale),
+                most_recommended=first,
+            ),
+        ),
+    )
+    with pytest.raises(ValueError, match="does not belong to the active context"):
+        continue_selected_auto_fit_candidates(
+            project,
+            draft,
+            stale_outcome,
+            (second.candidate,),
+        )
+
+    old_q_bins = binding.prepared_resolution.sample_dataset.q_bins
+    assert old_q_bins is not None
+    foreign_prepared, foreign_selection = _with_q_values(
+        binding.prepared_resolution,
+        binding.selection,
+        old_q_bins.q_values,
+    )
+    foreign_fit = replace(
+        second.fit,
+        context_binding=FitContextBinding(
+            foreign_prepared,
+            foreign_selection,
+            binding.group_index,
+        ),
+    )
+    foreign = replace(second, fit=foreign_fit)
+    foreign_outcome = replace(
+        outcome,
+        recommendation=cast(
+            AutoFitRecommendation,
+            SimpleNamespace(
+                candidate_results=(first, foreign),
+                most_recommended=first,
+            ),
+        ),
+    )
+    with pytest.raises(ValueError, match="does not belong to the active context"):
+        continue_selected_auto_fit_candidates(
+            project,
+            draft,
+            foreign_outcome,
+            (second.candidate,),
+        )
+
+
+def test_selected_auto_candidate_cancellation_preserves_completed_branch(
+    selected_auto_problem: tuple[
+        WorkflowProject,
+        ProjectDataset,
+        ManualFitDraft,
+        SingleQAutoFitOutcome,
+        tuple[CandidateFitResult, CandidateFitResult],
+    ],
+) -> None:
+    project, _sample, draft, outcome, evidence = selected_auto_problem
+    checks = 0
+
+    def cancel_after_first_branch() -> bool:
+        nonlocal checks
+        checks += 1
+        return checks > 4
+
+    result = continue_selected_auto_fit_candidates(
+        project,
+        draft,
+        outcome,
+        (evidence[1].candidate, evidence[0].candidate),
+        cancel_requested=cancel_after_first_branch,
+        max_nfev=800,
+    )
+
+    assert result.status is MultiQExecutionStatus.CANCELLED
+    assert len(result.branches) == 1
+    assert result.branches[0].candidate == evidence[1].candidate
+    assert result.branches[0].branch_result.status is MultiQExecutionStatus.COMPLETED
+    assert all(
+        item.status is not MultiQFitStatus.NOT_RUN
+        for item in result.branches[0].branch_result.outcomes
+    )
+
+
+def test_cancelled_selected_auto_result_requires_an_ordered_terminal_boundary(
+    selected_auto_problem: tuple[
+        WorkflowProject,
+        ProjectDataset,
+        ManualFitDraft,
+        SingleQAutoFitOutcome,
+        tuple[CandidateFitResult, CandidateFitResult],
+    ],
+) -> None:
+    project, _sample, draft, outcome, evidence = selected_auto_problem
+    selected = (evidence[1].candidate, evidence[0].candidate)
+    completed = continue_selected_auto_fit_candidates(
+        project,
+        draft,
+        outcome,
+        selected,
+        max_nfev=800,
+    )
+    cancelled_first = continue_selected_auto_fit_candidates(
+        project,
+        draft,
+        outcome,
+        selected[:1],
+        cancel_requested=lambda: True,
+        max_nfev=800,
+    ).branches[0]
+    cancelled_second = continue_selected_auto_fit_candidates(
+        project,
+        draft,
+        outcome,
+        selected[1:],
+        cancel_requested=lambda: True,
+        max_nfev=800,
+    ).branches[0]
+
+    between_branches = SelectedAutoFitMultiQResult(
+        MultiQExecutionStatus.CANCELLED,
+        selected,
+        completed.branches[:1],
+    )
+    with_partial_final = SelectedAutoFitMultiQResult(
+        MultiQExecutionStatus.CANCELLED,
+        selected,
+        (completed.branches[0], cancelled_second),
+    )
+    assert len(between_branches.branches) == 1
+    assert with_partial_final.branches[-1].branch_result.status is (
+        MultiQExecutionStatus.CANCELLED
+    )
+
+    with pytest.raises(ValueError, match="final retained branch"):
+        SelectedAutoFitMultiQResult(
+            MultiQExecutionStatus.CANCELLED,
+            selected,
+            (cancelled_first, completed.branches[1]),
+        )
+    with pytest.raises(ValueError, match="final retained branch"):
+        SelectedAutoFitMultiQResult(
+            MultiQExecutionStatus.CANCELLED,
+            selected,
+            (cancelled_first, cancelled_second),
+        )
+    with pytest.raises(ValueError, match="selection order"):
+        SelectedAutoFitMultiQResult(
+            MultiQExecutionStatus.CANCELLED,
+            selected,
+            (completed.branches[1],),
+        )
+
+
+def test_fresh_auto_all_q_uses_most_recommended_direct_b0_anchor_only(
+    selected_auto_problem: tuple[
+        WorkflowProject,
+        ProjectDataset,
+        ManualFitDraft,
+        SingleQAutoFitOutcome,
+        tuple[CandidateFitResult, CandidateFitResult],
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project, _sample, draft, outcome, evidence = selected_auto_problem
+    candidate, other_successful = evidence
+    assert candidate.fit is not None
     calls = 0
 
     def fake_auto(*_args: object, **_kwargs: object) -> SimpleNamespace:
         nonlocal calls
         calls += 1
         return SimpleNamespace(
-            recommendation=SimpleNamespace(most_recommended=candidate),
-            scientific_context=context,
+            recommendation=SimpleNamespace(
+                most_recommended=candidate,
+                candidate_results=(candidate, other_successful),
+            ),
+            scientific_context=outcome.scientific_context,
         )
 
     monkeypatch.setattr("ezqens.workflow.multi_q.run_single_q_auto_fit", fake_auto)
@@ -1432,9 +1832,10 @@ def test_fresh_auto_all_q_uses_most_recommended_direct_b0_anchor_only(
     assert calls == 1
     retained_anchor = result.outcome(2).fit_result
     assert retained_anchor is not None
-    assert retained_anchor.parameters == anchor.parameters
-    assert retained_anchor.diagnostics == anchor.diagnostics
-    assert anchor.configuration.background is BackgroundModel.CONSTANT
+    assert retained_anchor.parameters == candidate.fit.parameters
+    assert retained_anchor.diagnostics == candidate.fit.diagnostics
+    assert retained_anchor.configuration.background is BackgroundModel.CONSTANT
+    assert len(retained_anchor.configuration.lorentzians) == 2
 
 
 def test_applied_b0_current_fit_retains_editable_fixed_zero_b1_branch(

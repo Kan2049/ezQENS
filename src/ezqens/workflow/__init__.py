@@ -46,6 +46,7 @@ from ezqens.workflow.manual_state import (
 )
 from ezqens.workflow.multi_q import (
     AppliedFittingMethod,
+    AutoFitCandidateBranchResult,
     FittingMethod,
     FittingWorkspaceState,
     MethodCenterMode,
@@ -59,9 +60,11 @@ from ezqens.workflow.multi_q import (
     MethodTransferOverrides,
     SavedFitResult,
     SavedFittingMethod,
+    SelectedAutoFitMultiQResult,
     apply_fitting_method,
     auto_fit_all_q,
     capture_fitting_method,
+    continue_selected_auto_fit_candidates,
     fit_all_q_from_current,
     save_current_result,
     save_working_method,
@@ -96,6 +99,7 @@ from ezqens.workflow.project import (
 
 __all__ = [
     "AppliedFittingMethod",
+    "AutoFitCandidateBranchResult",
     "CommittedFittingSelection",
     "FittingMethod",
     "FittingWorkspaceState",
@@ -130,6 +134,7 @@ __all__ = [
     "ResolutionAssociation",
     "SavedFitResult",
     "SavedFittingMethod",
+    "SelectedAutoFitMultiQResult",
     "WorkflowDiagnostic",
     "WorkflowDiagnosticCode",
     "WorkflowError",
@@ -148,6 +153,7 @@ __all__ = [
     "complete_background_interaction",
     "complete_elastic_interaction",
     "complete_lorentzian_interaction",
+    "continue_selected_auto_fit_candidates",
     "create_parameter_tie",
     "create_project",
     "fit_all_q_from_current",

@@ -3,17 +3,22 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, replace
 from enum import StrEnum
 
 import numpy as np
 
-from ezqens.batch import MultiQBranchResult, execute_multi_q_branch
+from ezqens.batch import (
+    MultiQBranchResult,
+    MultiQExecutionStatus,
+    execute_multi_q_branch,
+)
 from ezqens.domain import QBins
 from ezqens.fitting import (
     ELASTIC_COMPONENT,
     BackgroundModel,
+    CandidateFitResult,
     ComponentFamily,
     ComponentIdentity,
     FitContextBinding,
@@ -23,11 +28,18 @@ from ezqens.fitting import (
     ParameterFamily,
     ParameterReference,
     SpectralModelDefinition,
+    StandardModelCandidate,
 )
 from ezqens.preprocessing import EdgePaddingDetectionResult, FittingSelection
 from ezqens.resolution import PreparedResolution
 
-from .manual import ManualFitDraft, run_manual_fit, run_single_q_auto_fit
+from .manual import (
+    ManualFitDraft,
+    SingleQAutoFitOutcome,
+    _single_q_auto_fit_context_unchanged,
+    run_manual_fit,
+    run_single_q_auto_fit,
+)
 from .manual_state import (
     ManualCenterGroupState,
     ManualLorentzianState,
@@ -48,6 +60,87 @@ class MethodTransferCategory(StrEnum):
     RESOLUTION = "resolution"
     Q_BINS = "q_bins"
     FITTING_SELECTION = "fitting_selection"
+
+
+@dataclass(frozen=True, slots=True)
+class AutoFitCandidateBranchResult:
+    """One selected anchor candidate together with its independent Q branch."""
+
+    anchor_evidence: CandidateFitResult
+    branch_result: MultiQBranchResult
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.anchor_evidence, CandidateFitResult):
+            raise ValueError("anchor_evidence must be a CandidateFitResult")
+        if not self.anchor_evidence.success or self.anchor_evidence.fit is None:
+            raise ValueError("anchor_evidence must contain a successful FitResult")
+        if not isinstance(self.branch_result, MultiQBranchResult):
+            raise ValueError("branch_result must be a MultiQBranchResult")
+        retained_anchor = self.branch_result.outcome(
+            self.branch_result.anchor_group_index
+        ).fit_result
+        if retained_anchor is not self.anchor_evidence.fit:
+            raise ValueError(
+                "the branch must retain the selected candidate's anchor FitResult"
+            )
+
+    @property
+    def candidate(self) -> StandardModelCandidate:
+        """Return the typed selected candidate identity."""
+
+        return self.anchor_evidence.candidate
+
+
+@dataclass(frozen=True, slots=True)
+class SelectedAutoFitMultiQResult:
+    """Ordered independent branches for one selected-candidate operation."""
+
+    status: MultiQExecutionStatus
+    selected_candidates: tuple[StandardModelCandidate, ...]
+    branches: tuple[AutoFitCandidateBranchResult, ...]
+
+    def __post_init__(self) -> None:
+        selected = tuple(self.selected_candidates)
+        branches = tuple(self.branches)
+        if not isinstance(self.status, MultiQExecutionStatus):
+            raise ValueError("status must be a MultiQExecutionStatus")
+        if not selected:
+            raise ValueError("at least one AutoFit candidate must be selected")
+        if any(not isinstance(item, StandardModelCandidate) for item in selected):
+            raise ValueError(
+                "selected candidates must be StandardModelCandidate values"
+            )
+        if len(set(selected)) != len(selected):
+            raise ValueError("selected AutoFit candidates must be unique")
+        if any(not isinstance(item, AutoFitCandidateBranchResult) for item in branches):
+            raise ValueError(
+                "branches must contain AutoFitCandidateBranchResult values"
+            )
+        if tuple(item.candidate for item in branches) != selected[: len(branches)]:
+            raise ValueError("branch results must preserve caller selection order")
+        if self.status is MultiQExecutionStatus.COMPLETED:
+            if len(branches) != len(selected) or any(
+                item.branch_result.status is not MultiQExecutionStatus.COMPLETED
+                for item in branches
+            ):
+                raise ValueError(
+                    "a completed operation requires every completed branch"
+                )
+        else:
+            cancelled_positions = tuple(
+                index
+                for index, item in enumerate(branches)
+                if item.branch_result.status is MultiQExecutionStatus.CANCELLED
+            )
+            if cancelled_positions and cancelled_positions != (len(branches) - 1,):
+                raise ValueError("a cancelled branch must be the final retained branch")
+            if not cancelled_positions and len(branches) == len(selected):
+                raise ValueError(
+                    "a cancelled operation must stop before a later selection or "
+                    "retain a final cancelled branch"
+                )
+        object.__setattr__(self, "selected_candidates", selected)
+        object.__setattr__(self, "branches", branches)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1038,6 +1131,127 @@ def _manual_state_from_core(model: SpectralModelDefinition) -> ManualModelState:
     )
 
 
+def _selected_auto_fit_evidence(
+    outcome: SingleQAutoFitOutcome,
+    selected_candidates: Sequence[StandardModelCandidate],
+    context: ManualFitContext,
+) -> tuple[CandidateFitResult, ...]:
+    """Validate and bind all selected anchor evidence before any branch starts."""
+
+    selected = tuple(selected_candidates)
+    if not selected:
+        raise ValueError("at least one AutoFit candidate must be selected")
+    if any(not isinstance(item, StandardModelCandidate) for item in selected):
+        raise ValueError("selected candidates must be StandardModelCandidate values")
+    if len(set(selected)) != len(selected):
+        raise ValueError("duplicate AutoFit candidate selections are not allowed")
+    if not _single_q_auto_fit_context_unchanged(
+        outcome.scientific_context,
+        context,
+    ):
+        raise ValueError("AutoFit evaluation does not belong to the active context")
+
+    evidence_by_candidate: dict[StandardModelCandidate, CandidateFitResult] = {}
+    for evidence in outcome.recommendation.candidate_results:
+        candidate = evidence.candidate
+        if candidate in evidence_by_candidate:
+            raise ValueError("AutoFit evaluation contains duplicate candidate evidence")
+        evidence_by_candidate[candidate] = evidence
+
+    validated: list[CandidateFitResult] = []
+    for candidate in selected:
+        selected_evidence = evidence_by_candidate.get(candidate)
+        if selected_evidence is None:
+            raise ValueError(
+                f"selected AutoFit candidate {candidate.name} is absent from the "
+                "anchor evaluation"
+            )
+        if not selected_evidence.success or selected_evidence.fit is None:
+            raise ValueError(
+                f"selected AutoFit candidate {candidate.name} has no successful "
+                "anchor FitResult"
+            )
+        active_fit = _result_in_active_context(
+            selected_evidence.fit,
+            context,
+            context.group_index,
+        )
+        if (
+            active_fit.provenance.group_index != context.group_index
+            or active_fit.provenance.q_value
+            != context.prepared_resolution.q_value(context.group_index)
+        ):
+            raise ValueError(
+                f"selected AutoFit candidate {candidate.name} has stale anchor "
+                "group or Q provenance"
+            )
+        validated.append(
+            selected_evidence
+            if active_fit is selected_evidence.fit
+            else replace(selected_evidence, fit=active_fit)
+        )
+    return tuple(validated)
+
+
+def continue_selected_auto_fit_candidates(
+    project: WorkflowProject,
+    draft: ManualFitDraft,
+    outcome: SingleQAutoFitOutcome,
+    selected_candidates: Sequence[StandardModelCandidate],
+    *,
+    fit_excluded_groups: Collection[int] = (),
+    derived_result_excluded_groups: Collection[int] = (),
+    cancel_requested: Callable[[], bool] | None = None,
+    max_nfev: int = 2500,
+) -> SelectedAutoFitMultiQResult:
+    """Continue selected successful anchor candidates as independent Q branches."""
+
+    anchor_group_index = outcome.scientific_context.group_index
+    context = _resolved_context(project, draft, anchor_group_index)
+    evidence = _selected_auto_fit_evidence(
+        outcome,
+        selected_candidates,
+        context,
+    )
+    selected = tuple(item.candidate for item in evidence)
+    branches: list[AutoFitCandidateBranchResult] = []
+    overall_status = MultiQExecutionStatus.COMPLETED
+
+    for branch_index, anchor_evidence in enumerate(evidence):
+        if branch_index > 0 and cancel_requested is not None and cancel_requested():
+            overall_status = MultiQExecutionStatus.CANCELLED
+            break
+        anchor_fit = anchor_evidence.fit
+        if anchor_fit is None:  # guarded by _selected_auto_fit_evidence
+            raise RuntimeError("validated AutoFit evidence lost its anchor FitResult")
+        source = _manual_state_from_core(anchor_fit.configuration)
+        method = capture_fitting_method(source, context=context)
+        working = draft.with_model(anchor_group_index, source)
+        configurations = _branch_configurations(
+            working,
+            context,
+            method,
+            MethodTransferOverrides(),
+        )
+        branch = execute_multi_q_branch(
+            context.prepared_resolution,
+            context.selection,
+            configurations,
+            anchor_group_index=anchor_group_index,
+            anchor_fit=anchor_fit,
+            fit_excluded_groups=fit_excluded_groups,
+            derived_result_excluded_groups=derived_result_excluded_groups,
+            cancel_requested=cancel_requested,
+            max_nfev=max_nfev,
+        )
+        branches.append(AutoFitCandidateBranchResult(anchor_evidence, branch))
+        if branch.status is MultiQExecutionStatus.CANCELLED:
+            overall_status = MultiQExecutionStatus.CANCELLED
+            break
+
+    return SelectedAutoFitMultiQResult(overall_status, selected, tuple(branches))
+
+
 def auto_fit_all_q(
     project: WorkflowProject,
     draft: ManualFitDraft,
@@ -1059,17 +1273,14 @@ def auto_fit_all_q(
     selected = outcome.recommendation.most_recommended
     if selected is None or selected.fit is None:
         raise ValueError("AutoFit All Q requires a Most Recommended anchor Result")
-    source = _manual_state_from_core(selected.fit.configuration)
-    method = capture_fitting_method(source, context=outcome.scientific_context)
-    working = draft.with_model(anchor_group_index, source)
-    return fit_all_q_from_current(
+    result = continue_selected_auto_fit_candidates(
         project,
-        working,
-        anchor_group_index=anchor_group_index,
-        current_fit=selected.fit,
-        method=method,
+        draft,
+        outcome,
+        (selected.candidate,),
         fit_excluded_groups=fit_excluded_groups,
         derived_result_excluded_groups=derived_result_excluded_groups,
         cancel_requested=cancel_requested,
         max_nfev=max_nfev,
     )
+    return result.branches[0].branch_result

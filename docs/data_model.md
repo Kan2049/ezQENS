@@ -479,6 +479,13 @@ structured blocker or failure evidence. The branch records its anchor index and
 evidence but never becomes a continuation seed. The retained anchor is a
 `SUCCESS` outcome and is not refitted.
 
+M6-S3A represents one caller-ordered selected-candidate operation as
+`SelectedAutoFitMultiQResult`. Each `AutoFitCandidateBranchResult` keeps the
+selected `CandidateFitResult` anchor evidence together with its independent
+`MultiQBranchResult`; candidate identity remains the typed
+`StandardModelCandidate`. A cancelled operation retains its completed or partial
+branch prefix and does not synthesize results for later selections.
+
 Each production `FitResult` carries a small runtime `FitContextBinding` to the
 exact immutable `PreparedResolution`, `FittingSelection`, and group index used
 for that execution. This is an object association, not a persistent UUID,
