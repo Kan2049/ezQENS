@@ -201,6 +201,13 @@ Elastic and Lorentzian amplitude parameters used for EISF are integrated areas,
 not peak heights. Component identifiers and individual quasielastic areas must
 be retained even when an aggregate is displayed.
 
+Integrated elastic and Lorentzian areas are nonnegative model/core invariants
+for both automatic and Manual fitting. Background parameters are not component
+areas and remain signed: production AutoFit B0 permits signed `b0`, production
+AutoFit B1 permits signed `b0` and `b1`, and Manual background parameters may
+likewise be negative. A negative fitted background never relaxes or changes the
+nonnegative component-area bounds.
+
 Let `R_Q(E)` be the measured resolution after accepted-support selection and
 unit-area normalization. Milestone 3 applies no baseline subtraction, clipping,
 or energy shift.

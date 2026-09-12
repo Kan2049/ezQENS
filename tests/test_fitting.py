@@ -1516,6 +1516,57 @@ def test_standard_candidate_keeps_elastic_identity_when_area_approaches_zero() -
     assert result.parameter("elastic_area").value < 1.0e-4
 
 
+def test_standard_autofit_component_areas_keep_nonnegative_bounds() -> None:
+    truth = model_definition(
+        lorentzians=((0.45, 0.12),),
+        background=BackgroundModel.LINEAR,
+        b0=-0.004,
+        b1=-0.012,
+    )
+    prepared, selection = synthetic_problem(truth)
+
+    result = fit_standard_candidate(
+        prepared,
+        selection,
+        0,
+        StandardModelCandidate(1, BackgroundModel.LINEAR),
+    )
+
+    elastic = result.parameter("elastic_area")
+    quasielastic = result.parameter("lorentzian_1_area")
+    offset = result.parameter("b0")
+    slope = result.parameter("b1")
+    assert elastic.lower_bound == 0.0
+    assert quasielastic.lower_bound == 0.0
+    assert elastic.value >= 0.0
+    assert quasielastic.value >= 0.0
+    assert np.isneginf(offset.lower_bound) and np.isposinf(offset.upper_bound)
+    assert np.isneginf(slope.lower_bound) and np.isposinf(slope.upper_bound)
+    assert offset.value == pytest.approx(-0.004, abs=1.0e-8)
+    assert slope.value == pytest.approx(-0.012, abs=1.0e-8)
+
+
+def test_standard_autofit_b0_fits_a_slightly_negative_baseline() -> None:
+    truth = model_definition(
+        background=BackgroundModel.CONSTANT,
+        b0=-0.004,
+    )
+    prepared, selection = synthetic_problem(truth)
+
+    result = fit_standard_candidate(
+        prepared,
+        selection,
+        0,
+        StandardModelCandidate(0, BackgroundModel.CONSTANT),
+    )
+
+    offset = result.parameter("b0")
+    assert np.isneginf(offset.lower_bound) and np.isposinf(offset.upper_bound)
+    assert offset.value == pytest.approx(-0.004, abs=1.0e-8)
+    assert result.parameter("elastic_area").lower_bound == 0.0
+    assert result.parameter("elastic_area").value >= 0.0
+
+
 @pytest.mark.parametrize("true_e0", [0.08, 0.44, -0.44])
 def test_standard_elastic_fit_uses_full_legal_e0_interval(true_e0: float) -> None:
     truth = SpectralModelDefinition(
