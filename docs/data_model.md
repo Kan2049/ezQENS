@@ -486,6 +486,21 @@ selected `CandidateFitResult` anchor evidence together with its independent
 `StandardModelCandidate`. A cancelled operation retains its completed or partial
 branch prefix and does not synthesize results for later selections.
 
+Multi-Q execution optionally publishes immutable terminal-outcome progress.
+`execute_multi_q_branch(...)` first publishes the retained successful anchor,
+then every already-authoritative fitting `EXCLUDED` outcome in dataset order,
+then each finalized `SUCCESS`, `FAILED`, or `BLOCKED` target in physical-Q
+execution order. The callback receives the same `MultiQFitOutcome` retained by
+the returned branch, exactly once per published Q slot; `NOT_RUN` is never a
+progress event, and callback return values do not affect execution or
+cancellation. Ordinary callback exceptions are isolated at this observer
+boundary and later notifications are still attempted; `BaseException` is not
+intercepted. Selected-candidate continuation wraps each branch event in a frozen
+`SelectedAutoFitProgressEvent` containing its typed
+`StandardModelCandidate`. Candidate event blocks preserve caller selection
+order, and cancellation emits nothing for a later candidate whose branch never
+starts.
+
 Each production `FitResult` carries a small runtime `FitContextBinding` to the
 exact immutable `PreparedResolution`, `FittingSelection`, and group index used
 for that execution. This is an object association, not a persistent UUID,

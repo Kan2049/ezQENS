@@ -13,9 +13,11 @@ import numpy.typing as npt
 import pytest
 
 import ezqens.batch.core as batch_core
+import ezqens.workflow.multi_q as multi_q_workflow
 from ezqens.batch import (
     MultiQBranchResult,
     MultiQExecutionStatus,
+    MultiQFitOutcome,
     MultiQFitStatus,
     execute_multi_q_branch,
 )
@@ -65,6 +67,7 @@ from ezqens.workflow import (
     MethodTransferOverrides,
     ProjectDataset,
     SelectedAutoFitMultiQResult,
+    SelectedAutoFitProgressEvent,
     SingleQAutoFitOutcome,
     WorkflowProject,
     add_project_dataset,
@@ -81,6 +84,7 @@ from ezqens.workflow import (
     open_manual_fit_draft,
     resolve_manual_fit_context,
     run_manual_fit,
+    run_single_q_auto_fit,
     save_current_result,
     save_working_method,
     set_current_result,
@@ -373,6 +377,33 @@ def selected_auto_problem(
     return project, sample, empty, outcome, evidence
 
 
+def _workflow_with_nan_resolution_uncertainty(
+    prepared: PreparedResolution,
+    selection: FittingSelection,
+) -> tuple[WorkflowProject, ProjectDataset, ManualFitDraft]:
+    resolution_spectra = list(prepared.resolution_dataset.spectra)
+    source = resolution_spectra[2]
+    uncertainty = np.array(source.uncertainty, copy=True)
+    uncertainty[uncertainty.size // 2] = np.nan
+    resolution_spectra[2] = replace(source, uncertainty=uncertainty)
+    resolution_dataset = replace(
+        prepared.resolution_dataset,
+        spectra=tuple(resolution_spectra),
+    )
+    nan_prepared = prepare_measured_resolution(
+        prepared.sample_dataset,
+        resolution_dataset,
+    )
+    rebound_selection = FittingSelection(
+        dataset=prepared.sample_dataset,
+        padding=nan_prepared.sample_padding,
+        ranges=selection.ranges,
+        manual_exclusion_masks=selection.manual_exclusion_masks,
+        manual_auto_reinclusion_masks=selection.manual_auto_reinclusion_masks,
+    )
+    return _workflow_problem(nan_prepared, rebound_selection)
+
+
 def _result_with_values(
     anchor: FitResult,
     group_index: int,
@@ -530,6 +561,176 @@ def test_middle_anchor_uses_independent_outward_success_chains(
     assert [item.seed_group_index for item in result.outcomes] == [1, 2, None, 2, 3]
     assert result.outcome(2).fit_result is anchor
     assert result.status is MultiQExecutionStatus.COMPLETED
+
+
+def test_branch_progress_publishes_authoritative_terminal_outcomes_in_order(
+    multi_q_problem: tuple[
+        PreparedResolution,
+        FittingSelection,
+        tuple[SpectralModelDefinition, ...],
+        FitResult,
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared, selection, configurations, base_anchor = multi_q_problem
+    anchor = _result_with_values(
+        base_anchor,
+        2,
+        base_anchor.configuration,
+        _elastic_value(1.0),
+    )
+    target_configurations: list[SpectralModelDefinition | None] = list(configurations)
+    target_configurations[1] = None
+    calls: list[tuple[int, SpectralModelDefinition]] = []
+    monkeypatch.setattr(
+        batch_core,
+        "fit_single_q",
+        _recording_fit(anchor, calls, {4: 1.4}, {3}),
+    )
+    events: list[MultiQFitOutcome] = []
+
+    def record(outcome: MultiQFitOutcome) -> bool:
+        events.append(outcome)
+        return True
+
+    result = execute_multi_q_branch(
+        prepared,
+        selection,
+        target_configurations,
+        anchor_group_index=2,
+        anchor_fit=anchor,
+        fit_excluded_groups=(0,),
+        derived_result_excluded_groups=(4,),
+        progress_callback=record,
+    )
+
+    assert [(item.group_index, item.status) for item in events] == [
+        (2, MultiQFitStatus.SUCCESS),
+        (0, MultiQFitStatus.EXCLUDED),
+        (1, MultiQFitStatus.BLOCKED),
+        (3, MultiQFitStatus.FAILED),
+        (4, MultiQFitStatus.SUCCESS),
+    ]
+    assert all(item.status is not MultiQFitStatus.NOT_RUN for item in events)
+    assert len({item.group_index for item in events}) == len(events)
+    assert all(item is result.outcome(item.group_index) for item in events)
+    assert events[-1].derived_result_excluded
+    assert [group for group, _model in calls] == [3, 4]
+
+
+def test_branch_progress_omits_targets_not_processed_after_cancellation(
+    multi_q_problem: tuple[
+        PreparedResolution,
+        FittingSelection,
+        tuple[SpectralModelDefinition, ...],
+        FitResult,
+    ],
+) -> None:
+    prepared, selection, configurations, anchor = multi_q_problem
+    events: list[MultiQFitOutcome] = []
+
+    result = execute_multi_q_branch(
+        prepared,
+        selection,
+        configurations,
+        anchor_group_index=2,
+        anchor_fit=anchor,
+        cancel_requested=lambda: True,
+        progress_callback=events.append,
+    )
+
+    assert result.status is MultiQExecutionStatus.CANCELLED
+    assert events == [result.outcome(2)]
+    assert all(
+        item.status is MultiQFitStatus.NOT_RUN
+        for index, item in enumerate(result.outcomes)
+        if index != 2
+    )
+
+
+def test_anchor_progress_exception_does_not_stop_branch_or_later_notifications(
+    multi_q_problem: tuple[
+        PreparedResolution,
+        FittingSelection,
+        tuple[SpectralModelDefinition, ...],
+        FitResult,
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared, selection, configurations, anchor = multi_q_problem
+    calls: list[tuple[int, SpectralModelDefinition]] = []
+    monkeypatch.setattr(
+        batch_core,
+        "fit_single_q",
+        _recording_fit(anchor, calls),
+    )
+    attempted: list[MultiQFitOutcome] = []
+
+    def fail_on_anchor(outcome: MultiQFitOutcome) -> None:
+        attempted.append(outcome)
+        if outcome.group_index == 2:
+            raise RuntimeError("observer failed on anchor")
+
+    result = execute_multi_q_branch(
+        prepared,
+        selection,
+        configurations,
+        anchor_group_index=2,
+        anchor_fit=anchor,
+        progress_callback=fail_on_anchor,
+    )
+
+    assert result.status is MultiQExecutionStatus.COMPLETED
+    assert [item.group_index for item in attempted] == [2, 1, 0, 3, 4]
+    assert all(item.status is MultiQFitStatus.SUCCESS for item in result.outcomes)
+    assert [group for group, _model in calls] == [1, 0, 3, 4]
+
+
+def test_target_progress_exception_retains_target_and_continues_notifications(
+    multi_q_problem: tuple[
+        PreparedResolution,
+        FittingSelection,
+        tuple[SpectralModelDefinition, ...],
+        FitResult,
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared, selection, configurations, anchor = multi_q_problem
+    calls: list[tuple[int, SpectralModelDefinition]] = []
+    monkeypatch.setattr(
+        batch_core,
+        "fit_single_q",
+        _recording_fit(anchor, calls),
+    )
+    attempted: list[MultiQFitOutcome] = []
+
+    def fail_on_first_target(outcome: MultiQFitOutcome) -> None:
+        attempted.append(outcome)
+        if outcome.group_index == 1:
+            raise ValueError("observer failed on target")
+
+    result = execute_multi_q_branch(
+        prepared,
+        selection,
+        configurations,
+        anchor_group_index=2,
+        anchor_fit=anchor,
+        progress_callback=fail_on_first_target,
+    )
+
+    assert result.status is MultiQExecutionStatus.COMPLETED
+    assert [item.group_index for item in attempted] == [2, 1, 0, 3, 4]
+    assert attempted[1] is result.outcome(1)
+    assert result.outcome(1).status is MultiQFitStatus.SUCCESS
+    assert all(item.status is MultiQFitStatus.SUCCESS for item in result.outcomes)
+
+
+def test_selected_autofit_progress_event_rejects_not_run_outcome() -> None:
+    with pytest.raises(ValueError, match="cannot publish NOT_RUN"):
+        SelectedAutoFitProgressEvent(
+            StandardModelCandidate(0, BackgroundModel.NONE),
+            MultiQFitOutcome(0, MultiQFitStatus.NOT_RUN),
+        )
 
 
 def test_nonmonotonic_group_order_traverses_by_physical_q_without_reordering_results(
@@ -1463,6 +1664,101 @@ def test_fit_all_q_runs_missing_manual_anchor_then_continues(
     assert all(item.status is MultiQFitStatus.SUCCESS for item in result.outcomes)
 
 
+def test_fresh_selected_autofit_accepts_reprepared_aligned_nan_uncertainty(
+    multi_q_problem: tuple[
+        PreparedResolution,
+        FittingSelection,
+        tuple[SpectralModelDefinition, ...],
+        FitResult,
+    ],
+) -> None:
+    prepared, selection, _configurations, _anchor = multi_q_problem
+    project, sample, draft = _workflow_with_nan_resolution_uncertainty(
+        prepared,
+        selection,
+    )
+    outcome = run_single_q_auto_fit(project, draft, 2, max_nfev=800)
+    refreshed = resolve_manual_fit_context(project, sample, 2)
+    assert refreshed.context is not None
+    assert (
+        refreshed.context.prepared_resolution
+        is not outcome.scientific_context.prepared_resolution
+    )
+    assert np.array_equal(
+        refreshed.context.prepared_resolution.spectra[2].normalized_uncertainty,
+        outcome.scientific_context.prepared_resolution.spectra[
+            2
+        ].normalized_uncertainty,
+        equal_nan=True,
+    )
+    selected = tuple(
+        item.candidate
+        for item in outcome.recommendation.candidate_results
+        if item.success
+    )[:2]
+    assert len(selected) == 2
+
+    result = continue_selected_auto_fit_candidates(
+        project,
+        draft,
+        outcome,
+        selected,
+        max_nfev=800,
+    )
+
+    assert result.status is MultiQExecutionStatus.COMPLETED
+    assert result.selected_candidates == selected
+    assert len(result.branches) == 2
+
+
+def test_prepared_context_nan_equality_is_aligned_and_not_nan_to_finite(
+    multi_q_problem: tuple[
+        PreparedResolution,
+        FittingSelection,
+        tuple[SpectralModelDefinition, ...],
+        FitResult,
+    ],
+) -> None:
+    prepared, _selection, _configurations, _anchor = multi_q_problem
+    base = prepared.spectra[0].normalized_uncertainty
+    aligned_nan = np.array(base, copy=True)
+    aligned_nan[0] = np.nan
+    finite = np.array(aligned_nan, copy=True)
+    finite[0] = 1.0
+
+    def context_view(uncertainty: FloatArray) -> PreparedResolution:
+        spectra = tuple(
+            SimpleNamespace(
+                accepted_mask=item.accepted_mask,
+                normalized_intensity=item.normalized_intensity,
+                normalized_uncertainty=(
+                    uncertainty if index == 0 else item.normalized_uncertainty
+                ),
+            )
+            for index, item in enumerate(prepared.spectra)
+        )
+        return cast(
+            PreparedResolution,
+            SimpleNamespace(
+                sample_dataset=prepared.sample_dataset,
+                resolution_dataset=prepared.resolution_dataset,
+                diagnostics=prepared.diagnostics,
+                padding_comparisons=prepared.padding_comparisons,
+                sample_padding=prepared.sample_padding,
+                resolution_padding=prepared.resolution_padding,
+                spectra=spectra,
+                acceptance_provenance=prepared.acceptance_provenance,
+            ),
+        )
+
+    first = context_view(aligned_nan)
+    second = context_view(np.array(aligned_nan, copy=True))
+    changed = context_view(finite)
+
+    assert multi_q_workflow._prepared_resolution_context_equal(first, second)
+    assert not multi_q_workflow._prepared_resolution_context_equal(first, changed)
+
+
 def test_selected_auto_candidates_create_ordered_independent_branches(
     selected_auto_problem: tuple[
         WorkflowProject,
@@ -1483,6 +1779,7 @@ def test_selected_auto_candidates_create_ordered_independent_branches(
         raise AssertionError("selected branches must reuse one AutoFit evaluation")
 
     captured_methods: list[FittingMethod] = []
+    progress: list[SelectedAutoFitProgressEvent] = []
 
     def record_method(
         model: ManualModelState,
@@ -1515,6 +1812,7 @@ def test_selected_auto_candidates_create_ordered_independent_branches(
         draft,
         outcome,
         (other_successful.candidate, most_recommended.candidate),
+        progress_callback=progress.append,
         max_nfev=800,
     )
 
@@ -1525,6 +1823,23 @@ def test_selected_auto_candidates_create_ordered_independent_branches(
     )
     assert len(captured_methods) == 2
     assert captured_methods[0] is not captured_methods[1]
+    assert [item.candidate for item in progress] == [
+        *([other_successful.candidate] * 5),
+        *([most_recommended.candidate] * 5),
+    ]
+    assert [item.outcome.group_index for item in progress] == [
+        2,
+        1,
+        0,
+        3,
+        4,
+        2,
+        1,
+        0,
+        3,
+        4,
+    ]
+    assert all(item.outcome.status is MultiQFitStatus.SUCCESS for item in progress)
     for item, original in zip(
         result.branches,
         (other_successful, most_recommended),
@@ -1700,6 +2015,7 @@ def test_selected_auto_candidate_cancellation_preserves_completed_branch(
 ) -> None:
     project, _sample, draft, outcome, evidence = selected_auto_problem
     checks = 0
+    progress: list[SelectedAutoFitProgressEvent] = []
 
     def cancel_after_first_branch() -> bool:
         nonlocal checks
@@ -1712,6 +2028,7 @@ def test_selected_auto_candidate_cancellation_preserves_completed_branch(
         outcome,
         (evidence[1].candidate, evidence[0].candidate),
         cancel_requested=cancel_after_first_branch,
+        progress_callback=progress.append,
         max_nfev=800,
     )
 
@@ -1723,6 +2040,43 @@ def test_selected_auto_candidate_cancellation_preserves_completed_branch(
         item.status is not MultiQFitStatus.NOT_RUN
         for item in result.branches[0].branch_result.outcomes
     )
+    assert len(progress) == 5
+    assert all(item.candidate == evidence[1].candidate for item in progress)
+    assert [item.outcome.group_index for item in progress] == [2, 1, 0, 3, 4]
+
+
+def test_selected_auto_progress_exception_does_not_stop_later_candidates(
+    selected_auto_problem: tuple[
+        WorkflowProject,
+        ProjectDataset,
+        ManualFitDraft,
+        SingleQAutoFitOutcome,
+        tuple[CandidateFitResult, CandidateFitResult],
+    ],
+) -> None:
+    project, _sample, draft, outcome, evidence = selected_auto_problem
+    selected = (evidence[1].candidate, evidence[0].candidate)
+    attempted: list[SelectedAutoFitProgressEvent] = []
+
+    def failing_observer(event: SelectedAutoFitProgressEvent) -> None:
+        attempted.append(event)
+        raise RuntimeError("selected progress observer failed")
+
+    result = continue_selected_auto_fit_candidates(
+        project,
+        draft,
+        outcome,
+        selected,
+        progress_callback=failing_observer,
+        max_nfev=800,
+    )
+
+    assert result.status is MultiQExecutionStatus.COMPLETED
+    assert tuple(item.candidate for item in result.branches) == selected
+    assert [item.candidate for item in attempted] == [
+        *([selected[0]] * 5),
+        *([selected[1]] * 5),
+    ]
 
 
 def test_cancelled_selected_auto_result_requires_an_ordered_terminal_boundary(

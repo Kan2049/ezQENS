@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Collection, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from enum import StrEnum
 
 import numpy as np
@@ -435,6 +435,7 @@ def execute_multi_q_branch(
     fit_excluded_groups: Collection[int] = (),
     derived_result_excluded_groups: Collection[int] = (),
     cancel_requested: Callable[[], bool] | None = None,
+    progress_callback: Callable[[MultiQFitOutcome], object] | None = None,
     max_nfev: int = 2500,
 ) -> MultiQBranchResult:
     """Fit one fixed topology independently from a retained anchor outward.
@@ -442,7 +443,8 @@ def execute_multi_q_branch(
     The lower and higher sides maintain independent most-recent-success seed
     chains.  Per-Q configurations already contain target-local bounds, free
     state, fitting selection, and scientific constraints; only initial values
-    are replaced from the predecessor result.
+    are replaced from the predecessor result.  When supplied, progress_callback
+    receives each authoritative terminal outcome and its return value is ignored.
     """
 
     if not isinstance(prepared_resolution, PreparedResolution):
@@ -499,6 +501,7 @@ def execute_multi_q_branch(
                 if index in fit_excluded
                 else MultiQFitStatus.NOT_RUN
             ),
+            derived_result_excluded=index in derived_excluded,
         )
         for index in range(group_count)
     ]
@@ -506,8 +509,27 @@ def execute_multi_q_branch(
         anchor_group_index,
         MultiQFitStatus.SUCCESS,
         fit_result=anchor_fit,
+        derived_result_excluded=anchor_group_index in derived_excluded,
     )
     cancelled = False
+
+    def publish(outcome: MultiQFitOutcome) -> None:
+        if progress_callback is not None:
+            try:
+                progress_callback(outcome)
+            except Exception:
+                pass
+
+    def finalize(outcome: MultiQFitOutcome) -> None:
+        if outcome.status is MultiQFitStatus.NOT_RUN:
+            raise RuntimeError("a NOT_RUN outcome cannot be finalized")
+        outcomes[outcome.group_index] = outcome
+        publish(outcome)
+
+    publish(outcomes[anchor_group_index])
+    for group_index in range(group_count):
+        if outcomes[group_index].status is MultiQFitStatus.EXCLUDED:
+            publish(outcomes[group_index])
 
     def run_side(indices: Sequence[int]) -> None:
         nonlocal cancelled
@@ -525,10 +547,13 @@ def execute_multi_q_branch(
                     group_index,
                     "target Q has no resolved spectral-model configuration",
                 )
-                outcomes[group_index] = MultiQFitOutcome(
-                    group_index,
-                    MultiQFitStatus.BLOCKED,
-                    diagnostics=(diagnostic,),
+                finalize(
+                    MultiQFitOutcome(
+                        group_index,
+                        MultiQFitStatus.BLOCKED,
+                        diagnostics=(diagnostic,),
+                        derived_result_excluded=group_index in derived_excluded,
+                    )
                 )
                 continue
             if _branch_composition(target) != branch_composition:
@@ -536,20 +561,26 @@ def execute_multi_q_branch(
                     group_index,
                     "target Q model composition does not match the anchor branch",
                 )
-                outcomes[group_index] = MultiQFitOutcome(
-                    group_index,
-                    MultiQFitStatus.BLOCKED,
-                    diagnostics=(diagnostic,),
+                finalize(
+                    MultiQFitOutcome(
+                        group_index,
+                        MultiQFitStatus.BLOCKED,
+                        diagnostics=(diagnostic,),
+                        derived_result_excluded=group_index in derived_excluded,
+                    )
                 )
                 continue
             try:
                 seeded = _seed_model_from_result(target, predecessor)
             except (KeyError, ValueError) as error:
                 diagnostic = _blocked_diagnostic(group_index, str(error))
-                outcomes[group_index] = MultiQFitOutcome(
-                    group_index,
-                    MultiQFitStatus.BLOCKED,
-                    diagnostics=(diagnostic,),
+                finalize(
+                    MultiQFitOutcome(
+                        group_index,
+                        MultiQFitStatus.BLOCKED,
+                        diagnostics=(diagnostic,),
+                        derived_result_excluded=group_index in derived_excluded,
+                    )
                 )
                 continue
             readiness = manual_fit_readiness(
@@ -559,11 +590,14 @@ def execute_multi_q_branch(
                 seeded,
             )
             if not readiness.runnable:
-                outcomes[group_index] = MultiQFitOutcome(
-                    group_index,
-                    MultiQFitStatus.BLOCKED,
-                    seed_group_index=predecessor_index,
-                    diagnostics=readiness.diagnostics,
+                finalize(
+                    MultiQFitOutcome(
+                        group_index,
+                        MultiQFitStatus.BLOCKED,
+                        seed_group_index=predecessor_index,
+                        diagnostics=readiness.diagnostics,
+                        derived_result_excluded=group_index in derived_excluded,
+                    )
                 )
                 continue
             try:
@@ -575,12 +609,15 @@ def execute_multi_q_branch(
                     max_nfev=max_nfev,
                 )
             except (RuntimeError, ValueError) as error:
-                outcomes[group_index] = MultiQFitOutcome(
-                    group_index,
-                    MultiQFitStatus.FAILED,
-                    seed_group_index=predecessor_index,
-                    error_type=type(error).__name__,
-                    error_message=str(error),
+                finalize(
+                    MultiQFitOutcome(
+                        group_index,
+                        MultiQFitStatus.FAILED,
+                        seed_group_index=predecessor_index,
+                        error_type=type(error).__name__,
+                        error_message=str(error),
+                        derived_result_excluded=group_index in derived_excluded,
+                    )
                 )
                 continue
             if not _usable_result(
@@ -590,21 +627,28 @@ def execute_multi_q_branch(
                 group_index=group_index,
                 branch_composition=branch_composition,
             ):
-                outcomes[group_index] = MultiQFitOutcome(
-                    group_index,
-                    MultiQFitStatus.FAILED,
-                    fit_result=result,
-                    seed_group_index=predecessor_index,
-                    error_type="UnusableFitResult",
-                    error_message="single-Q fitting did not produce a usable result",
+                finalize(
+                    MultiQFitOutcome(
+                        group_index,
+                        MultiQFitStatus.FAILED,
+                        fit_result=result,
+                        seed_group_index=predecessor_index,
+                        error_type="UnusableFitResult",
+                        error_message=(
+                            "single-Q fitting did not produce a usable result"
+                        ),
+                        derived_result_excluded=group_index in derived_excluded,
+                    )
                 )
                 continue
-            outcomes[group_index] = MultiQFitOutcome(
+            outcome = MultiQFitOutcome(
                 group_index,
                 MultiQFitStatus.SUCCESS,
                 fit_result=result,
                 seed_group_index=predecessor_index,
+                derived_result_excluded=group_index in derived_excluded,
             )
+            finalize(outcome)
             predecessor = result
             predecessor_index = group_index
 
@@ -618,11 +662,5 @@ def execute_multi_q_branch(
             if cancelled
             else MultiQExecutionStatus.COMPLETED
         ),
-        outcomes=tuple(
-            replace(
-                outcome,
-                derived_result_excluded=index in derived_excluded,
-            )
-            for index, outcome in enumerate(outcomes)
-        ),
+        outcomes=tuple(outcomes),
     )

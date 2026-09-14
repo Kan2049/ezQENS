@@ -12,6 +12,8 @@ import numpy as np
 from ezqens.batch import (
     MultiQBranchResult,
     MultiQExecutionStatus,
+    MultiQFitOutcome,
+    MultiQFitStatus,
     execute_multi_q_branch,
 )
 from ezqens.domain import QBins
@@ -89,6 +91,22 @@ class AutoFitCandidateBranchResult:
         """Return the typed selected candidate identity."""
 
         return self.anchor_evidence.candidate
+
+
+@dataclass(frozen=True, slots=True)
+class SelectedAutoFitProgressEvent:
+    """One authoritative terminal Q outcome for a selected AutoFit branch."""
+
+    candidate: StandardModelCandidate
+    outcome: MultiQFitOutcome
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.candidate, StandardModelCandidate):
+            raise ValueError("candidate must be a StandardModelCandidate")
+        if not isinstance(self.outcome, MultiQFitOutcome):
+            raise ValueError("outcome must be a MultiQFitOutcome")
+        if self.outcome.status is MultiQFitStatus.NOT_RUN:
+            raise ValueError("selected AutoFit progress cannot publish NOT_RUN")
 
 
 @dataclass(frozen=True, slots=True)
@@ -912,6 +930,7 @@ def _prepared_resolution_context_equal(
             and np.array_equal(
                 first.spectra[index].normalized_uncertainty,
                 second.spectra[index].normalized_uncertainty,
+                equal_nan=True,
             )
             for index in range(len(first.spectra))
         )
@@ -1202,9 +1221,10 @@ def continue_selected_auto_fit_candidates(
     fit_excluded_groups: Collection[int] = (),
     derived_result_excluded_groups: Collection[int] = (),
     cancel_requested: Callable[[], bool] | None = None,
+    progress_callback: Callable[[SelectedAutoFitProgressEvent], object] | None = None,
     max_nfev: int = 2500,
 ) -> SelectedAutoFitMultiQResult:
-    """Continue selected successful anchor candidates as independent Q branches."""
+    """Continue selected anchors and optionally publish candidate-tagged progress."""
 
     anchor_group_index = outcome.scientific_context.group_index
     context = _resolved_context(project, draft, anchor_group_index)
@@ -1233,6 +1253,21 @@ def continue_selected_auto_fit_candidates(
             method,
             MethodTransferOverrides(),
         )
+
+        current_candidate = anchor_evidence.candidate
+
+        def publish(
+            outcome: MultiQFitOutcome,
+            candidate: StandardModelCandidate = current_candidate,
+        ) -> None:
+            if progress_callback is not None:
+                progress_callback(
+                    SelectedAutoFitProgressEvent(
+                        candidate=candidate,
+                        outcome=outcome,
+                    )
+                )
+
         branch = execute_multi_q_branch(
             context.prepared_resolution,
             context.selection,
@@ -1242,6 +1277,7 @@ def continue_selected_auto_fit_candidates(
             fit_excluded_groups=fit_excluded_groups,
             derived_result_excluded_groups=derived_result_excluded_groups,
             cancel_requested=cancel_requested,
+            progress_callback=publish if progress_callback is not None else None,
             max_nfev=max_nfev,
         )
         branches.append(AutoFitCandidateBranchResult(anchor_evidence, branch))
