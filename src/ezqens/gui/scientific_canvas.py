@@ -7,6 +7,13 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 
 SCIENTIFIC_BACKGROUND = "#ffffff"
+SCIENTIFIC_MEASURED_COLOR = "#292928"
+SCIENTIFIC_UNCERTAINTY_COLOR = "#727272"
+SCIENTIFIC_TOTAL_FIT_COLOR = "#314b63"
+SCIENTIFIC_ELASTIC_COLOR = "#1f77b4"
+SCIENTIFIC_LORENTZIAN_COLORS = ("#ff7f0e", "#2ca02c")
+SCIENTIFIC_BACKGROUND_COLOR = "#8a7564"
+SCIENTIFIC_RESIDUAL_COLOR = "#496d91"
 
 
 def log_display_values(values: np.ndarray) -> np.ndarray:

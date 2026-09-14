@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import numpy as np
@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ezqens.batch import MultiQBranchResult, MultiQFitStatus
 from ezqens.domain import (
     DiagnosticSeverity,
     ImportDiagnostic,
@@ -79,6 +80,8 @@ from ezqens.io import parse_dave_q_bins
 from ezqens.io.importers import import_reduced_data
 from ezqens.preprocessing import BoundarySide, FittingSelection
 from ezqens.workflow import (
+    AutoFitCandidateBranchResult,
+    FittingWorkspaceState,
     ManualComponentKind,
     ManualFitDraft,
     ManualParameterEdit,
@@ -116,6 +119,8 @@ from ezqens.workflow import (
     resolve_manual_fit_context,
     run_and_adopt_manual_fit,
     run_single_q_auto_fit,
+    save_current_result,
+    set_current_result,
     untie_center_group_parameter,
     untie_parameter,
     update_manual_parameter,
@@ -171,6 +176,9 @@ class ManualFitSession:
     draft: ManualFitDraft
     group_index: int
     execution_by_group: dict[int, ManualFitExecutionState] = field(default_factory=dict)
+    result_workspace: FittingWorkspaceState = field(
+        default_factory=FittingWorkspaceState
+    )
     editor_expanded: bool = True
     result_expanded: bool = False
 
@@ -1671,11 +1679,17 @@ class MainWindow(QMainWindow):
             show_message_dialog(self, "AutoFit", str(error))
             return
 
-        dialog = AutoFitCandidateDialog(outcome, self)
+        dialog = AutoFitCandidateDialog(
+            outcome,
+            self,
+            project=workflow,
+            draft=draft,
+        )
         dialog.exec()
         candidate = dialog.accepted_candidate
         if candidate is None:
             return
+        accepted_branches = dialog.accepted_branches
         adoption = adopt_single_q_auto_fit_candidate(
             workflow,
             draft,
@@ -1708,7 +1722,38 @@ class MainWindow(QMainWindow):
         execution.lifecycle = ManualFitLifecycle.CURRENT
         execution.fit_result = adoption.fit_result
         execution.diagnostics = adoption.diagnostics
+        if accepted_branches:
+            self._retain_auto_fit_branches(session, accepted_branches)
         self._activate_manual_session(session, expand=True)
+
+    def _retain_auto_fit_branches(
+        self,
+        session: ManualFitSession,
+        branches: tuple[AutoFitCandidateBranchResult, ...],
+    ) -> None:
+        """Save selected branches and project the canonical first branch as current."""
+
+        active = branches[0].branch_result
+        workspace = session.result_workspace
+        if len(branches) > 1:
+            for selected in branches:
+                workspace = set_current_result(workspace, selected.branch_result)
+                workspace = save_current_result(
+                    workspace,
+                    f"{selected.candidate.name} across Q",
+                )
+        session.result_workspace = set_current_result(workspace, active)
+
+        for group in active.outcomes:
+            execution = session.execution_state(group.group_index)
+            if group.status is MultiQFitStatus.SUCCESS:
+                assert group.fit_result is not None
+                execution.lifecycle = ManualFitLifecycle.CURRENT
+                execution.fit_result = group.fit_result
+            else:
+                execution.lifecycle = ManualFitLifecycle.NEEDS_FIT
+                execution.fit_result = None
+            execution.diagnostics = ()
 
     def _activate_manual_session(
         self,
@@ -1907,6 +1952,11 @@ class MainWindow(QMainWindow):
                 execution.lifecycle = ManualFitLifecycle.NEEDS_FIT
             execution.fit_result = None
             execution.diagnostics = ()
+        if isinstance(session.result_workspace.current_result, MultiQBranchResult):
+            session.result_workspace = replace(
+                session.result_workspace,
+                current_result=None,
+            )
 
     def _invalidate_manual_fit(self) -> None:
         """Mark only the active Group's retained fitted state stale."""

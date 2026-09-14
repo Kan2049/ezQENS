@@ -528,11 +528,32 @@ QMenu::separator {{
     color: {tokens.text_primary};
 }}
 #autoFitCandidateList::item {{
-    padding: 7px;
+    padding: 0;
+    margin: 0;
 }}
 #autoFitCandidateList::item:selected {{
     background: {tokens.surface_selected};
     color: {tokens.text_primary};
+}}
+#autoFitCandidateStatusDot {{
+    min-width: 8px;
+    max-width: 8px;
+    min-height: 8px;
+    max-height: 8px;
+    border-radius: 4px;
+}}
+#autoFitCandidateStatusDot[executionState="red"] {{
+    background: {indicators.error};
+}}
+#autoFitCandidateStatusDot[executionState="orange"] {{
+    background: {indicators.warning};
+}}
+#autoFitCandidateStatusDot[executionState="green"] {{
+    background: {indicators.success};
+}}
+#autoFitCandidateReducedChiSquare,
+#autoFitCandidateRecommendation {{
+    font-size: {TYPOGRAPHY.secondary_size}px;
 }}
 #autoFitUseCandidateButton {{
     background: {tokens.surface_selected};
