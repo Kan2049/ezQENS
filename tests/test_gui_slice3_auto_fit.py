@@ -16,10 +16,13 @@ import numpy as np
 import pytest
 from matplotlib.axes import Axes
 from matplotlib.backend_bases import MouseButton, MouseEvent
+from matplotlib.colors import to_rgba
 from matplotlib.container import ErrorbarContainer
-from PySide6.QtCore import QPoint, Qt, QTimer
+from PySide6.QtCore import QPoint, QPointF, Qt, QTimer
+from PySide6.QtGui import QWheelEvent
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QHBoxLayout,
     QLabel,
     QMenu,
@@ -35,7 +38,18 @@ from ezqens.batch import (
     MultiQFitOutcome,
     MultiQFitStatus,
 )
-from ezqens.domain import QBins, ReducedDataset, Spectrum, SpectrumRole
+from ezqens.derived import (
+    DerivedQENSResult,
+    StatisticalUncertaintyStatus,
+    derive_qens,
+)
+from ezqens.domain import (
+    DiagnosticSeverity,
+    QBins,
+    ReducedDataset,
+    Spectrum,
+    SpectrumRole,
+)
 from ezqens.fitting import (
     BACKGROUND_COMPONENT,
     ELASTIC_COMPONENT,
@@ -43,7 +57,12 @@ from ezqens.fitting import (
     BackgroundModel,
     CandidateFitResult,
     ComponentFamily,
+    ComponentIdentity,
+    FitResult,
+    ManualFitDiagnosticCode,
+    ManualFitReadinessDiagnostic,
     ManualParameterIntent,
+    ParameterEstimate,
     ParameterFamily,
     ParameterReference,
     StandardModelCandidate,
@@ -59,6 +78,7 @@ from ezqens.gui.scientific_canvas import (
     SCIENTIFIC_RESIDUAL_COLOR,
     SCIENTIFIC_TOTAL_FIT_COLOR,
 )
+from ezqens.gui.theme import Q_NAVIGATION_SELECTION
 from ezqens.gui.workspace import DatasetState, ProjectState
 from ezqens.workflow import (
     AutoFitCandidateBranchResult,
@@ -67,6 +87,7 @@ from ezqens.workflow import (
     ManualModelState,
     ManualParameterEdit,
     SelectedAutoFitMultiQResult,
+    SelectedAutoFitProgressEvent,
     SingleQAutoFitOutcome,
     WorkflowProject,
     commit_fitting_selection,
@@ -190,6 +211,10 @@ def _candidate_branch(
     processed_groups: int = 1,
 ) -> AutoFitCandidateBranchResult:
     assert evidence.fit is not None
+    binding = evidence.fit.context_binding
+    assert binding is not None
+    q_bins = binding.selection.dataset.q_bins
+    assert q_bins is not None
     outcomes: list[MultiQFitOutcome] = []
     for group_index in range(group_count):
         if (
@@ -207,15 +232,61 @@ def _candidate_branch(
                 )
             )
         else:
+            fit = evidence.fit
+            if group_index != 0:
+                spectrum = binding.selection.dataset.spectra[group_index]
+                fit = replace(
+                    fit,
+                    provenance=replace(
+                        fit.provenance,
+                        group_index=group_index,
+                        group_label=spectrum.group_label,
+                        q_value=float(q_bins.q_values[group_index]),
+                    ),
+                    context_binding=replace(binding, group_index=group_index),
+                )
             outcomes.append(
                 MultiQFitOutcome(
                     group_index,
                     MultiQFitStatus.SUCCESS,
-                    evidence.fit,
+                    fit,
                 )
             )
     branch = MultiQBranchResult(0, status, tuple(outcomes))
     return AutoFitCandidateBranchResult(evidence, branch)
+
+
+def _selected_progress_event(
+    evidence: CandidateFitResult,
+    group_index: int,
+    status: MultiQFitStatus,
+) -> SelectedAutoFitProgressEvent:
+    if status is MultiQFitStatus.SUCCESS:
+        assert evidence.fit is not None
+        outcome = MultiQFitOutcome(group_index, status, evidence.fit)
+    elif status is MultiQFitStatus.BLOCKED:
+        outcome = MultiQFitOutcome(
+            group_index,
+            status,
+            diagnostics=(
+                ManualFitReadinessDiagnostic(
+                    code=ManualFitDiagnosticCode.INVALID_PARAMETER_CONFIGURATION,
+                    severity=DiagnosticSeverity.ERROR,
+                    message="synthetic blocked target",
+                    group_index=group_index,
+                ),
+            ),
+        )
+    elif status is MultiQFitStatus.FAILED:
+        outcome = MultiQFitOutcome(
+            group_index,
+            status,
+            error_type="RuntimeError",
+            error_message="synthetic failed target",
+        )
+    else:
+        outcome = MultiQFitOutcome(group_index, status)
+    return SelectedAutoFitProgressEvent(evidence.candidate, outcome)
 
 
 def _select_only(
@@ -281,7 +352,7 @@ def test_candidate_checks_are_eligible_ordered_and_independent_from_focus(
         replace(outcome, recommendation=recommendation),
         window,
     )
-    assert len(dialog.findChildren(type(dialog.candidate_checkbox(0)))) == len(
+    assert len(dialog.findChildren(QCheckBox, "autoFitCandidateCheckbox")) == len(
         candidates
     )
     assert not dialog.candidate_checkbox(failed_row).isEnabled()
@@ -386,7 +457,22 @@ def test_checked_candidates_use_responsive_independent_panels(
     assert set(dialog.spectrum_axes_by_candidate) == expected
     assert set(dialog.residual_axes_by_candidate) == expected
     assert len(dialog.preview_canvas.figure.axes) == checked_count * 2
-    assert dialog.preview_title.text() == f"Group 1 / 10 · {checked_count} selected"
+    assert dialog.preview_title.text() == "Group 1 / 10"
+    assert dialog.preview_selection_label.text() == f"{checked_count} selected"
+    header_layout = dialog.preview_header.layout()
+    assert header_layout is not None
+    assert header_layout.indexOf(dialog.previous_group_button) == 0
+    assert header_layout.indexOf(dialog.next_group_button) == 1
+    assert header_layout.indexOf(dialog.preview_title) == 2
+    assert header_layout.indexOf(dialog.preview_selection_label) == 3
+    assert header_layout.indexOf(dialog.fwhm_view_button) == -1
+    assert header_layout.indexOf(dialog.eisf_view_button) == -1
+    assert dialog.run_row.indexOf(dialog.run_selected_button) == 0
+    assert dialog.run_row.indexOf(dialog.fwhm_view_button) == 1
+    assert dialog.run_row.indexOf(dialog.eisf_view_button) == 2
+    assert dialog.run_selected_button.text() == "Fit to all Q"
+    assert dialog.fwhm_view_button.text() == "FWHM"
+    assert dialog.eisf_view_button.text() == "EISF"
     assert dialog._comparison_columns <= 3
     wide_columns = dialog._comparison_columns
     assert dialog.preview_canvas.minimumWidth() >= (dialog._comparison_columns * 320)
@@ -398,6 +484,10 @@ def test_checked_candidates_use_responsive_independent_panels(
         assert candidate.fit is not None
         spectrum_axes = dialog.spectrum_axes_by_candidate[candidate.candidate]
         residual_axes = dialog.residual_axes_by_candidate[candidate.candidate]
+        assert spectrum_axes.get_position().y0 == pytest.approx(
+            residual_axes.get_position().y1,
+            abs=1.0e-10,
+        )
         spectrum_labels = {line.get_label() for line in spectrum_axes.lines}
         expected_components = {
             dialog._component_style(candidate.candidate, curve.component)[0]
@@ -405,6 +495,12 @@ def test_checked_candidates_use_responsive_independent_panels(
         }
         assert {"Total fit", *expected_components} <= spectrum_labels
         assert "Std. residual" in {line.get_label() for line in residual_axes.lines}
+        residual_guides = {
+            float(np.asarray(line.get_ydata())[0])
+            for line in residual_axes.lines
+            if str(line.get_label()).startswith("_residual_")
+        }
+        assert residual_guides == {-1.0, 0.0, 1.0}
 
     if checked_count > 1:
         before = tuple(dialog.spectrum_axes_by_candidate)
@@ -531,17 +627,13 @@ def test_candidate_panels_reuse_function_semantic_colors_and_component_identity(
         component.identity for component in evidence.fit.configuration.lorentzians
     )
     identity_a, identity_b = anchor_identities
-    assert dialog._component_style(evidence.candidate, identity_a) == (
-        "L1",
-        SCIENTIFIC_LORENTZIAN_COLORS[0],
-    )
-    assert dialog._component_style(evidence.candidate, identity_b) == (
-        "L2",
-        SCIENTIFIC_LORENTZIAN_COLORS[1],
-    )
-
     fitted_model = evidence.fit.fitted_model
     assert fitted_model is not None
+    for index, component in enumerate(fitted_model.lorentzians):
+        assert dialog._component_style(evidence.candidate, component.identity) == (
+            f"L{index + 1}",
+            SCIENTIFIC_LORENTZIAN_COLORS[index],
+        )
     fitted_by_identity = {
         component.identity: component for component in fitted_model.lorentzians
     }
@@ -549,13 +641,41 @@ def test_candidate_panels_reuse_function_semantic_colors_and_component_identity(
         (component.fwhm for component in fitted_model.lorentzians),
         key=lambda configuration: configuration.initial_value,
     )
-    anchor_a = replace(fitted_by_identity[identity_a], fwhm=narrow_fwhm)
-    anchor_b = replace(fitted_by_identity[identity_b], fwhm=wide_fwhm)
-    target_a = replace(fitted_by_identity[identity_a], fwhm=wide_fwhm)
-    target_b = replace(fitted_by_identity[identity_b], fwhm=narrow_fwhm)
+    anchor_a = replace(fitted_by_identity[identity_a], fwhm=wide_fwhm)
+    anchor_b = replace(fitted_by_identity[identity_b], fwhm=narrow_fwhm)
+    target_a = replace(fitted_by_identity[identity_a], fwhm=narrow_fwhm)
+    target_b = replace(fitted_by_identity[identity_b], fwhm=wide_fwhm)
+
+    def parameters_with_fwhm(
+        fit: FitResult,
+        values: dict[ComponentIdentity, float],
+    ) -> tuple[ParameterEstimate, ...]:
+        return tuple(
+            replace(
+                parameter,
+                value=next(
+                    (
+                        value
+                        for identity, value in values.items()
+                        if ParameterReference(identity, ParameterFamily.FWHM)
+                        in parameter.references
+                    ),
+                    parameter.value,
+                ),
+            )
+            for parameter in fit.parameters
+        )
+
     anchor_fit = replace(
         evidence.fit,
-        fitted_model=replace(fitted_model, lorentzians=(anchor_a, anchor_b)),
+        parameters=parameters_with_fwhm(
+            evidence.fit,
+            {
+                identity_a: anchor_a.fwhm.initial_value,
+                identity_b: anchor_b.fwhm.initial_value,
+            },
+        ),
+        fitted_model=replace(fitted_model, lorentzians=(anchor_b, anchor_a)),
     )
     target_curves = tuple(
         sorted(
@@ -572,7 +692,14 @@ def test_candidate_panels_reuse_function_semantic_colors_and_component_identity(
     )
     target_fit = replace(
         evidence.fit,
-        fitted_model=replace(fitted_model, lorentzians=(target_b, target_a)),
+        parameters=parameters_with_fwhm(
+            evidence.fit,
+            {
+                identity_a: target_a.fwhm.initial_value,
+                identity_b: target_b.fwhm.initial_value,
+            },
+        ),
+        fitted_model=replace(fitted_model, lorentzians=(target_a, target_b)),
         evaluation=replace(
             evidence.fit.evaluation,
             component_curves=target_curves,
@@ -583,30 +710,52 @@ def test_candidate_panels_reuse_function_semantic_colors_and_component_identity(
     assert anchor_fitted_model is not None
     assert target_fitted_model is not None
     assert tuple(
-        component.identity for component in anchor_fitted_model.lorentzians
+        component.identity for component in anchor_fit.configuration.lorentzians
     ) == (identity_a, identity_b)
     assert tuple(
-        component.identity for component in target_fitted_model.lorentzians
+        component.identity for component in anchor_fitted_model.lorentzians
     ) == (identity_b, identity_a)
-    assert anchor_a.fwhm.initial_value < anchor_b.fwhm.initial_value
-    assert target_a.fwhm.initial_value > target_b.fwhm.initial_value
+    assert tuple(
+        component.identity for component in target_fitted_model.lorentzians
+    ) == (identity_a, identity_b)
+    assert anchor_b.fwhm.initial_value < anchor_a.fwhm.initial_value
+    assert target_a.fwhm.initial_value < target_b.fwhm.initial_value
 
     branch_evidence = replace(evidence, fit=anchor_fit)
     candidate_index = dialog._candidates.index(evidence)
     candidates = list(dialog._candidates)
     candidates[candidate_index] = branch_evidence
     dialog._candidates = tuple(candidates)
-    outcomes = tuple(
-        MultiQFitOutcome(
-            group_index,
-            MultiQFitStatus.SUCCESS,
-            target_fit if group_index == 1 else anchor_fit,
-        )
-        for group_index in range(10)
+    dialog._lorentzian_styles_by_candidate[evidence.candidate] = (
+        dialog._anchor_lorentzian_styles(branch_evidence)
     )
+    assert dialog._lorentzian_styles_by_candidate[evidence.candidate] == {
+        identity_b: ("L1", SCIENTIFIC_LORENTZIAN_COLORS[0]),
+        identity_a: ("L2", SCIENTIFIC_LORENTZIAN_COLORS[1]),
+    }
+    binding = anchor_fit.context_binding
+    assert binding is not None
+    q_bins = binding.selection.dataset.q_bins
+    assert q_bins is not None
+    outcomes: list[MultiQFitOutcome] = []
+    for group_index in range(10):
+        fit = target_fit if group_index == 1 else anchor_fit
+        if group_index != 0:
+            spectrum = binding.selection.dataset.spectra[group_index]
+            fit = replace(
+                fit,
+                provenance=replace(
+                    fit.provenance,
+                    group_index=group_index,
+                    group_label=spectrum.group_label,
+                    q_value=float(q_bins.q_values[group_index]),
+                ),
+                context_binding=replace(binding, group_index=group_index),
+            )
+        outcomes.append(MultiQFitOutcome(group_index, MultiQFitStatus.SUCCESS, fit))
     branch = AutoFitCandidateBranchResult(
         branch_evidence,
-        MultiQBranchResult(0, MultiQExecutionStatus.COMPLETED, outcomes),
+        MultiQBranchResult(0, MultiQExecutionStatus.COMPLETED, tuple(outcomes)),
     )
     dialog._executed_branches[evidence.candidate] = branch
     _select_only(dialog, (branch_evidence,))
@@ -621,8 +770,8 @@ def test_candidate_panels_reuse_function_semantic_colors_and_component_identity(
             if curve.component.family is ComponentFamily.LORENTZIAN
         }
         for identity, label, color in (
-            (identity_a, "L1", SCIENTIFIC_LORENTZIAN_COLORS[0]),
-            (identity_b, "L2", SCIENTIFIC_LORENTZIAN_COLORS[1]),
+            (identity_b, "L1", SCIENTIFIC_LORENTZIAN_COLORS[0]),
+            (identity_a, "L2", SCIENTIFIC_LORENTZIAN_COLORS[1]),
         ):
             line = next(line for line in axes.lines if line.get_label() == label)
             assert line.get_color() == color
@@ -631,6 +780,19 @@ def test_candidate_panels_reuse_function_semantic_colors_and_component_identity(
     assert_component_styles(0)
     assert_component_styles(1)
     assert_component_styles(0)
+
+    dialog.fwhm_view_button.setChecked(True)
+    fwhm_axes = dialog.fwhm_axes_by_candidate[evidence.candidate]
+    l1_line = next(line for line in fwhm_axes.lines if line.get_label() == "L1")
+    l2_line = next(line for line in fwhm_axes.lines if line.get_label() == "L2")
+    assert l1_line.get_color() == SCIENTIFIC_LORENTZIAN_COLORS[0]
+    assert l2_line.get_color() == SCIENTIFIC_LORENTZIAN_COLORS[1]
+    assert np.asarray(l1_line.get_ydata())[:2] == pytest.approx(
+        (anchor_b.fwhm.initial_value, target_b.fwhm.initial_value)
+    )
+    assert np.asarray(l2_line.get_ydata())[:2] == pytest.approx(
+        (anchor_a.fwhm.initial_value, target_a.fwhm.initial_value)
+    )
 
     one_lorentzian = next(
         candidate
@@ -656,11 +818,69 @@ def test_candidate_panels_reuse_function_semantic_colors_and_component_identity(
         is not dialog._lorentzian_styles_by_candidate[other_branch.candidate]
     )
     assert dialog._lorentzian_styles_by_candidate[evidence.candidate] == (
-        dialog._anchor_lorentzian_styles(evidence)
+        dialog._anchor_lorentzian_styles(branch_evidence)
     )
     assert dialog._lorentzian_styles_by_candidate[other_branch.candidate] == (
         dialog._anchor_lorentzian_styles(other_branch)
     )
+    dialog.close()
+
+
+def test_two_lorentzian_candidate_families_use_independent_anchor_fitted_order(
+    auto_fit_gui_problem: AutoFitGuiProblem,
+) -> None:
+    window, _project, _sample, _workflow, _session, outcome, successful = (
+        auto_fit_gui_problem
+    )
+    dialog = AutoFitCandidateDialog(outcome, window)
+    for background, narrow_configuration_index in (
+        (BackgroundModel.NONE, 1),
+        (BackgroundModel.CONSTANT, 0),
+        (BackgroundModel.LINEAR, 1),
+    ):
+        evidence = next(
+            item
+            for item in successful
+            if item.candidate.lorentzian_count == 2
+            and item.candidate.background is background
+        )
+        fit = evidence.fit
+        assert fit is not None and fit.fitted_model is not None
+        actual_anchor_order = tuple(
+            component.identity for component in fit.fitted_model.lorentzians
+        )
+        assert dialog._lorentzian_styles_by_candidate[evidence.candidate] == {
+            identity: (f"L{index + 1}", SCIENTIFIC_LORENTZIAN_COLORS[index])
+            for index, identity in enumerate(actual_anchor_order)
+        }
+
+        submitted = tuple(
+            component.identity for component in fit.configuration.lorentzians
+        )
+        narrow_identity = submitted[narrow_configuration_index]
+        broad_identity = submitted[1 - narrow_configuration_index]
+        fitted_by_identity = {
+            component.identity: component for component in fit.fitted_model.lorentzians
+        }
+        narrow_fwhm, broad_fwhm = sorted(
+            (component.fwhm for component in fit.fitted_model.lorentzians),
+            key=lambda item: item.initial_value,
+        )
+        synthetic_fitted = replace(
+            fit.fitted_model,
+            lorentzians=(
+                replace(fitted_by_identity[narrow_identity], fwhm=narrow_fwhm),
+                replace(fitted_by_identity[broad_identity], fwhm=broad_fwhm),
+            ),
+        )
+        synthetic_anchor = replace(
+            evidence,
+            fit=replace(fit, fitted_model=synthetic_fitted),
+        )
+        assert dialog._anchor_lorentzian_styles(synthetic_anchor) == {
+            narrow_identity: ("L1", SCIENTIFIC_LORENTZIAN_COLORS[0]),
+            broad_identity: ("L2", SCIENTIFIC_LORENTZIAN_COLORS[1]),
+        }
     dialog.close()
 
 
@@ -701,6 +921,1458 @@ def test_candidate_status_coverage_and_checked_group_counts_use_cached_results(
     assert dialog.progress_label.text() == "Calculated groups: 3 / 10"
     assert dialog.set_candidate_checked(second_row, True)
     assert dialog.progress_label.text() == "Calculated groups: 4 / 20"
+    dialog.close()
+
+
+def test_executed_candidate_panels_consume_derived_api_and_reuse_cached_views(
+    application: QApplication,
+    auto_fit_gui_problem: AutoFitGuiProblem,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window, _project, _sample, workflow, session, outcome, successful = (
+        auto_fit_gui_problem
+    )
+    one_lorentzian = next(
+        item for item in successful if item.candidate.lorentzian_count == 1
+    )
+    two_lorentzian = next(
+        item for item in successful if item.candidate.lorentzian_count == 2
+    )
+    selected = (one_lorentzian, two_lorentzian)
+    branches = tuple(_candidate_branch(item, 10) for item in selected)
+    q_bins = outcome.scientific_context.selection.dataset.q_bins
+    assert q_bins is not None
+    expected = {
+        branch.candidate: derive_qens(branch.branch_result, q_bins)
+        for branch in branches
+    }
+    calls: list[tuple[MultiQBranchResult, QBins]] = []
+
+    def record_derived(
+        branch_result: MultiQBranchResult,
+        supplied_q_bins: QBins,
+    ) -> DerivedQENSResult:
+        calls.append((branch_result, supplied_q_bins))
+        return derive_qens(branch_result, supplied_q_bins)
+
+    monkeypatch.setattr(auto_fit_module, "derive_qens", record_derived)
+    dialog = AutoFitCandidateDialog(
+        outcome,
+        window,
+        project=workflow,
+        draft=session.draft,
+    )
+    _select_only(dialog, selected)
+    assert not dialog.use_candidate_button.isEnabled()
+    assert dialog.use_candidate_button.toolTip() == (
+        "Run all checked candidates across Q before applying."
+    )
+    assert not dialog.fwhm_axes_by_candidate
+    assert not dialog.eisf_axes_by_candidate
+    assert dialog.fwhm_view_button.isHidden()
+    assert dialog.eisf_view_button.isHidden()
+    dialog._executed_branches = {branch.candidate: branch for branch in branches}
+    dialog._update_candidate_rows()
+    dialog._sync_controls()
+    dialog._draw_comparison()
+
+    assert dialog.use_candidate_button.isEnabled()
+    assert dialog.use_candidate_button.toolTip() == ""
+    assert not dialog.fwhm_view_button.isChecked()
+    assert not dialog.eisf_view_button.isChecked()
+    assert not dialog.fwhm_view_button.isHidden()
+    assert not dialog.eisf_view_button.isHidden()
+    assert isinstance(dialog.fwhm_view_button, QToolButton)
+    assert isinstance(dialog.eisf_view_button, QToolButton)
+    assert not isinstance(dialog.fwhm_view_button, QCheckBox)
+    assert not isinstance(dialog.eisf_view_button, QCheckBox)
+    assert dialog.fwhm_view_button.property("viewToggle") is True
+    assert dialog.eisf_view_button.property("viewToggle") is True
+    assert len(dialog.preview_canvas.figure.axes) == 2 * len(selected)
+    assert calls == []
+    assert not dialog.fwhm_axes_by_candidate
+    assert not dialog.eisf_axes_by_candidate
+    assert "FWHM Y Scale" not in {
+        action.text() for action in dialog._build_preview_context_menu().actions()
+    }
+
+    dialog.fwhm_view_button.setChecked(True)
+    assert calls == [(branch.branch_result, q_bins) for branch in branches]
+    assert set(dialog.fwhm_axes_by_candidate) == {item.candidate for item in selected}
+    assert not dialog.eisf_axes_by_candidate
+    fwhm_only_axes = dialog.fwhm_axes_by_candidate[one_lorentzian.candidate]
+    fwhm_only_spec = fwhm_only_axes.get_subplotspec()
+    assert fwhm_only_spec is not None
+    assert fwhm_only_spec.get_gridspec().ncols == 1
+    assert fwhm_only_axes.get_title() == ""
+    assert fwhm_only_axes.get_xlabel() == "Q (Å⁻¹)"
+    assert "FWHM Y Scale" in {
+        action.text() for action in dialog._build_preview_context_menu().actions()
+    }
+
+    dialog.fwhm_view_button.setChecked(False)
+    dialog.eisf_view_button.setChecked(True)
+    assert not dialog.fwhm_axes_by_candidate
+    assert set(dialog.eisf_axes_by_candidate) == {item.candidate for item in selected}
+    assert len(calls) == 2
+    eisf_only_axes = dialog.eisf_axes_by_candidate[one_lorentzian.candidate]
+    eisf_only_spec = eisf_only_axes.get_subplotspec()
+    assert eisf_only_spec is not None
+    assert eisf_only_spec.get_gridspec().ncols == 1
+    assert eisf_only_axes.get_title() == ""
+    assert eisf_only_axes.get_xlabel() == "Q (Å⁻¹)"
+
+    dialog.fwhm_view_button.setChecked(True)
+    assert len(calls) == 2
+    paired_fwhm = dialog.fwhm_axes_by_candidate[one_lorentzian.candidate]
+    paired_eisf = dialog.eisf_axes_by_candidate[one_lorentzian.candidate]
+    paired_fwhm_spec = paired_fwhm.get_subplotspec()
+    paired_eisf_spec = paired_eisf.get_subplotspec()
+    assert paired_fwhm_spec is not None and paired_eisf_spec is not None
+    paired_grid = paired_fwhm_spec.get_gridspec()
+    assert paired_grid is paired_eisf_spec.get_gridspec()
+    assert paired_grid.nrows == 2 and paired_grid.ncols == 1
+    assert paired_grid.get_height_ratios() == (1.0, 1.25)
+    assert paired_grid.get_subplot_params(dialog.preview_canvas.figure).hspace == 0.0
+    assert paired_fwhm.get_position().y0 == pytest.approx(
+        paired_eisf.get_position().y1,
+        abs=1.0e-10,
+    )
+    assert paired_fwhm_spec.rowspan.start == 0
+    assert paired_eisf_spec.rowspan.start == 1
+    for index, evidence in enumerate(selected):
+        derived = expected[evidence.candidate]
+        fwhm_axes = dialog.fwhm_axes_by_candidate[evidence.candidate]
+        eisf_axes = dialog.eisf_axes_by_candidate[evidence.candidate]
+        styles = dialog._lorentzian_styles_by_candidate[evidence.candidate]
+        assert len(styles) == evidence.candidate.lorentzian_count
+        for identity, (label, color) in styles.items():
+            line = next(line for line in fwhm_axes.lines if line.get_label() == label)
+            authoritative = np.asarray(
+                [
+                    next(
+                        quantity
+                        for quantity in point.lorentzians
+                        if quantity.component == identity
+                    ).fwhm_mev
+                    for point in derived.points
+                ]
+            )
+            np.testing.assert_array_equal(line.get_ydata(), authoritative)
+            assert line.get_color() == color
+        eisf_line = next(line for line in eisf_axes.lines if line.get_label() == "EISF")
+        authoritative_eisf = np.asarray(
+            [point.eisf.value for point in derived.points if point.eisf is not None]
+        )
+        np.testing.assert_array_equal(eisf_line.get_ydata(), authoritative_eisf)
+        assert fwhm_axes.get_yscale() == "linear"
+        assert eisf_axes.get_yscale() == "linear"
+        assert fwhm_axes.get_title() == ""
+        assert eisf_axes.get_title() == ""
+        assert fwhm_axes.get_ylabel() == (
+            "FWHM (meV)" if index % dialog._comparison_columns == 0 else ""
+        )
+        assert eisf_axes.get_ylabel() == (
+            "EISF" if index % dialog._comparison_columns == 0 else ""
+        )
+        assert fwhm_axes.get_xlabel() == ""
+        assert eisf_axes.get_xlabel() == "Q (Å⁻¹)"
+        assert all(
+            not tick.tick1line.get_visible()
+            for tick in fwhm_axes.xaxis.get_major_ticks()
+        )
+        assert all(
+            not tick.label1.get_visible() for tick in fwhm_axes.xaxis.get_major_ticks()
+        )
+
+    before_scale = {
+        candidate: tuple(
+            np.asarray(line.get_ydata()).copy()
+            for line in axes.lines
+            if line.get_label() in {"L1", "L2"}
+        )
+        for candidate, axes in dialog.fwhm_axes_by_candidate.items()
+    }
+    assert dialog.set_fwhm_y_scale("log")
+    assert len(calls) == 2
+    assert all(
+        axes.get_yscale() == "log" for axes in dialog.fwhm_axes_by_candidate.values()
+    )
+    assert all(
+        axes.get_yscale() == "linear" for axes in dialog.eisf_axes_by_candidate.values()
+    )
+    for candidate, axes in dialog.fwhm_axes_by_candidate.items():
+        after = tuple(
+            np.asarray(line.get_ydata())
+            for line in axes.lines
+            if line.get_label() in {"L1", "L2"}
+        )
+        for old, new in zip(before_scale[candidate], after, strict=True):
+            np.testing.assert_array_equal(new, old)
+
+    zoom_axes = dialog.fwhm_axes_by_candidate[one_lorentzian.candidate]
+    initial_q_limits = zoom_axes.get_xlim()
+    initial_fwhm_limits = zoom_axes.get_ylim()
+    initial_eisf_limits = dialog.eisf_axes_by_candidate[
+        one_lorentzian.candidate
+    ].get_ylim()
+    q_cursor = float(np.mean(initial_q_limits))
+    y_cursor = float(np.exp(np.mean(np.log(zoom_axes.get_ylim()))))
+    display = zoom_axes.transData.transform((q_cursor, y_cursor))
+    dialog._on_scroll(
+        cast(
+            MouseEvent,
+            SimpleNamespace(
+                inaxes=zoom_axes,
+                x=display[0],
+                y=display[1],
+                button="up",
+            ),
+        )
+    )
+    zoomed_q_limits = zoom_axes.get_xlim()
+    assert np.ptp(zoomed_q_limits) < np.ptp(initial_q_limits)
+    assert np.ptp(zoom_axes.get_ylim()) < np.ptp(initial_fwhm_limits)
+    assert dialog.eisf_axes_by_candidate[
+        one_lorentzian.candidate
+    ].get_ylim() == pytest.approx(initial_eisf_limits)
+    assert all(
+        axes.get_xlim() == pytest.approx(zoomed_q_limits)
+        for axes in (
+            *dialog.fwhm_axes_by_candidate.values(),
+            *dialog.eisf_axes_by_candidate.values(),
+        )
+    )
+    dialog.eisf_view_button.setChecked(False)
+    assert dialog.fwhm_axes_by_candidate[
+        one_lorentzian.candidate
+    ].get_xlim() == pytest.approx(zoomed_q_limits)
+    dialog.eisf_view_button.setChecked(True)
+    assert dialog.eisf_axes_by_candidate[
+        one_lorentzian.candidate
+    ].get_xlim() == pytest.approx(zoomed_q_limits)
+    assert len(calls) == 2
+    dialog.reset_view()
+    assert np.ptp(
+        dialog.fwhm_axes_by_candidate[one_lorentzian.candidate].get_xlim()
+    ) > np.ptp(zoomed_q_limits)
+
+    assert dialog.set_current_group(3)
+    current_q = float(q_bins.q_values[3])
+    for marker in (
+        *dialog.fwhm_current_markers_by_candidate.values(),
+        *dialog.eisf_current_markers_by_candidate.values(),
+    ):
+        assert marker.get_x() + marker.get_width() / 2.0 == pytest.approx(current_q)
+        assert marker.get_gid() == "currentRepresentativeQSelection"
+        assert marker.get_fill()
+
+    second_row = tuple(outcome.recommendation.candidate_results).index(two_lorentzian)
+    retained_branch = dialog._executed_branches[two_lorentzian.candidate]
+    assert dialog.set_candidate_checked(second_row, False)
+    assert two_lorentzian.candidate not in dialog.fwhm_axes_by_candidate
+    assert dialog._executed_branches[two_lorentzian.candidate] is retained_branch
+    assert not dialog.fwhm_view_button.isHidden()
+    assert not dialog.eisf_view_button.isHidden()
+    assert dialog.set_candidate_checked(second_row, True)
+    assert two_lorentzian.candidate in dialog.fwhm_axes_by_candidate
+    assert len(calls) == 2
+    assert dialog._executed_branches[two_lorentzian.candidate] is retained_branch
+
+    unexecuted = next(item for item in successful if item not in selected)
+    unexecuted_row = tuple(outcome.recommendation.candidate_results).index(unexecuted)
+    active_before_check = dialog.focused_candidate
+    assert dialog.set_candidate_checked(unexecuted_row, True)
+    assert dialog.focused_candidate is active_before_check
+    assert not dialog.use_candidate_button.isEnabled()
+    assert dialog.use_candidate_button.toolTip() == (
+        "Run all checked candidates across Q before applying."
+    )
+    assert unexecuted.candidate not in dialog.fwhm_axes_by_candidate
+    assert unexecuted.candidate not in dialog.eisf_axes_by_candidate
+    assert dialog.set_candidate_checked(unexecuted_row, False)
+    assert dialog.use_candidate_button.isEnabled()
+
+    cached_derived = dict(dialog._derived_results)
+    dialog.fwhm_view_button.setChecked(False)
+    dialog.eisf_view_button.setChecked(False)
+    assert len(dialog.preview_canvas.figure.axes) == 2 * len(selected)
+    assert not dialog.fwhm_axes_by_candidate
+    assert not dialog.eisf_axes_by_candidate
+    assert dialog._derived_results == cached_derived
+
+    dialog.fwhm_view_button.setChecked(True)
+    dialog.eisf_view_button.setChecked(True)
+    assert len(calls) == 2
+    assert dialog._derived_results == cached_derived
+
+    dialog.resize(800, 520)
+    dialog.show()
+    application.processEvents()
+    assert dialog.comparison_scroll_area.verticalScrollBar().maximum() > 0
+    assert not dialog.preview_canvas.grab().isNull()
+    dialog._executed_branches.clear()
+    dialog._sync_controls()
+    assert dialog.fwhm_view_button.isHidden()
+    assert dialog.eisf_view_button.isHidden()
+    assert not dialog.fwhm_view_button.isChecked()
+    assert not dialog.eisf_view_button.isChecked()
+    dialog.close()
+
+
+def test_derived_panels_preserve_unavailable_gaps_and_authoritative_uncertainty(
+    auto_fit_gui_problem: AutoFitGuiProblem,
+) -> None:
+    window, _project, _sample, workflow, session, outcome, successful = (
+        auto_fit_gui_problem
+    )
+    evidence = next(item for item in successful if item.candidate.lorentzian_count == 1)
+    branch = _candidate_branch(evidence, 10, failed_group=1)
+    dialog = AutoFitCandidateDialog(
+        outcome,
+        window,
+        project=workflow,
+        draft=session.draft,
+    )
+    _select_only(dialog, (evidence,))
+    dialog._executed_branches[evidence.candidate] = branch
+    dialog._sync_controls()
+    dialog._draw_comparison()
+    dialog.fwhm_view_button.setChecked(True)
+    dialog.eisf_view_button.setChecked(True)
+
+    fwhm_axes = dialog.fwhm_axes_by_candidate[evidence.candidate]
+    eisf_axes = dialog.eisf_axes_by_candidate[evidence.candidate]
+    fwhm_line = next(line for line in fwhm_axes.lines if line.get_label() == "L1")
+    eisf_line = next(line for line in eisf_axes.lines if line.get_label() == "EISF")
+    fwhm_values = np.asarray(fwhm_line.get_ydata())
+    eisf_values = np.asarray(eisf_line.get_ydata())
+    assert np.isfinite(fwhm_values[0]) and np.isnan(fwhm_values[1])
+    assert np.isfinite(fwhm_values[2])
+    assert np.isfinite(eisf_values[0]) and np.isnan(eisf_values[1])
+    assert np.isfinite(eisf_values[2])
+    assert fwhm_values[1] != 0.0 and eisf_values[1] != 0.0
+    assert np.isnan(np.asarray(fwhm_line.get_path().vertices)[1, 1])
+    assert np.isnan(np.asarray(eisf_line.get_path().vertices)[1, 1])
+
+    q_bins = outcome.scientific_context.selection.dataset.q_bins
+    assert q_bins is not None
+    expected = derive_qens(branch.branch_result, q_bins)
+    fwhm_error_count = sum(
+        1
+        for point in expected.points
+        if point.lorentzians
+        and next(iter(point.lorentzians)).fwhm_standard_error_mev is not None
+    )
+    eisf_error_count = sum(
+        1
+        for point in expected.points
+        if point.eisf is not None and point.eisf.standard_error is not None
+    )
+
+    def errorbar_segment_count(axes: Axes) -> int:
+        count = 0
+        for container in axes.containers:
+            if not isinstance(container, ErrorbarContainer):
+                continue
+            count += sum(
+                len(collection.get_segments()) for collection in container.lines[2]
+            )
+        return count
+
+    fwhm_segments = errorbar_segment_count(fwhm_axes)
+    eisf_segments = errorbar_segment_count(eisf_axes)
+    assert fwhm_segments == fwhm_error_count
+    assert eisf_segments == eisf_error_count
+
+    assert dialog.set_current_group(1)
+    marker = dialog.fwhm_current_markers_by_candidate[evidence.candidate]
+    assert marker.get_x() + marker.get_width() / 2.0 == pytest.approx(
+        float(q_bins.q_values[1])
+    )
+    assert marker.get_fill()
+    refreshed = next(
+        line
+        for line in dialog.fwhm_axes_by_candidate[evidence.candidate].lines
+        if line.get_label() == "L1"
+    )
+    assert np.isnan(np.asarray(refreshed.get_ydata())[1])
+    dialog.close()
+
+
+def test_derived_q_selection_uses_edges_and_retains_extent_without_values(
+    auto_fit_gui_problem: AutoFitGuiProblem,
+) -> None:
+    window, _project, _sample, workflow, session, outcome, successful = (
+        auto_fit_gui_problem
+    )
+    evidence = next(item for item in successful if item.candidate.lorentzian_count == 1)
+    branch = _candidate_branch(evidence, 10)
+    source_q_bins = outcome.scientific_context.selection.dataset.q_bins
+    assert source_q_bins is not None
+    edges = np.asarray([0.3 + 0.2 * index for index in range(11)])
+    edged_q_bins = QBins(q_values=source_q_bins.q_values, edges=edges)
+    derived = derive_qens(branch.branch_result, edged_q_bins)
+    dialog = AutoFitCandidateDialog(
+        outcome,
+        window,
+        project=workflow,
+        draft=session.draft,
+    )
+    _select_only(dialog, (evidence,))
+    dialog._executed_branches[evidence.candidate] = branch
+    dialog._derived_results[evidence.candidate] = derived
+    dialog._sync_controls()
+    dialog.fwhm_view_button.setChecked(True)
+    dialog.eisf_view_button.setChecked(True)
+    for marker in (
+        dialog.fwhm_current_markers_by_candidate[evidence.candidate],
+        dialog.eisf_current_markers_by_candidate[evidence.candidate],
+    ):
+        assert marker.get_gid() == "currentQBinSelection"
+        assert marker.get_x() == pytest.approx(edges[0])
+        assert marker.get_x() + marker.get_width() == pytest.approx(edges[1])
+        assert marker.get_fill()
+    assert dialog.set_current_group(3)
+    for marker in (
+        dialog.fwhm_current_markers_by_candidate[evidence.candidate],
+        dialog.eisf_current_markers_by_candidate[evidence.candidate],
+    ):
+        assert marker.get_x() == pytest.approx(edges[3])
+        assert marker.get_x() + marker.get_width() == pytest.approx(edges[4])
+    dialog.close()
+
+    excluded_outcomes = tuple(
+        replace(outcome, derived_result_excluded=True)
+        for outcome in branch.branch_result.outcomes
+    )
+    excluded_branch = replace(branch.branch_result, outcomes=excluded_outcomes)
+    excluded_derived = derive_qens(excluded_branch, source_q_bins)
+    assert all(
+        not point.lorentzians and point.eisf is None
+        for point in excluded_derived.points
+    )
+    unavailable_dialog = AutoFitCandidateDialog(
+        outcome,
+        window,
+        project=workflow,
+        draft=session.draft,
+    )
+    _select_only(unavailable_dialog, (evidence,))
+    unavailable_dialog._executed_branches[evidence.candidate] = replace(
+        branch,
+        branch_result=excluded_branch,
+    )
+    unavailable_dialog._derived_results[evidence.candidate] = excluded_derived
+    unavailable_dialog._sync_controls()
+    unavailable_dialog.fwhm_view_button.setChecked(True)
+    unavailable_dialog.eisf_view_button.setChecked(True)
+    q_min = float(np.min(source_q_bins.q_values))
+    q_max = float(np.max(source_q_bins.q_values))
+    for axes in (
+        unavailable_dialog.fwhm_axes_by_candidate[evidence.candidate],
+        unavailable_dialog.eisf_axes_by_candidate[evidence.candidate],
+    ):
+        assert axes.get_xlim()[0] < q_min
+        assert axes.get_xlim()[1] > q_max
+    assert unavailable_dialog.eisf_axes_by_candidate[
+        evidence.candidate
+    ].get_ylim() == pytest.approx((-0.1, 1.1))
+    assert unavailable_dialog.set_current_group(4)
+    assert unavailable_dialog.fwhm_current_markers_by_candidate[evidence.candidate]
+    assert unavailable_dialog.eisf_current_markers_by_candidate[evidence.candidate]
+    unavailable_dialog.close()
+
+
+def test_comparison_ylabels_follow_responsive_leftmost_checked_column(
+    monkeypatch: pytest.MonkeyPatch,
+    auto_fit_gui_problem: AutoFitGuiProblem,
+) -> None:
+    window, _project, _sample, workflow, session, outcome, successful = (
+        auto_fit_gui_problem
+    )
+    dialog = AutoFitCandidateDialog(
+        outcome, window, project=workflow, draft=session.draft
+    )
+    selected = successful[:3]
+    _select_only(dialog, selected)
+    dialog._executed_branches.update(
+        {evidence.candidate: _candidate_branch(evidence, 10) for evidence in selected}
+    )
+    dialog._sync_controls()
+    dialog.fwhm_view_button.setChecked(True)
+    dialog.eisf_view_button.setChecked(True)
+
+    for columns in (2, 1):
+        monkeypatch.setattr(
+            dialog,
+            "_comparison_column_count",
+            lambda _count, selected_columns=columns: selected_columns,
+        )
+        dialog._draw_comparison()
+        for index, (evidence, _fit, _status) in enumerate(dialog._comparison_entries()):
+            is_leftmost = index % columns == 0
+            for axes_by_candidate, label in (
+                (dialog.spectrum_axes_by_candidate, "Intensity"),
+                (dialog.residual_axes_by_candidate, "Std. residual"),
+                (dialog.fwhm_axes_by_candidate, "FWHM (meV)"),
+                (dialog.eisf_axes_by_candidate, "EISF"),
+            ):
+                axes = axes_by_candidate[evidence.candidate]
+                assert axes.get_ylabel() == (label if is_leftmost else "")
+                assert any(tick.get_visible() for tick in axes.get_yticklabels())
+
+    _select_only(dialog, successful[1:3])
+    monkeypatch.setattr(dialog, "_comparison_column_count", lambda _count: 2)
+    dialog._draw_comparison()
+    checked = dialog._comparison_entries()
+    assert len(checked) == 2
+    assert dialog.spectrum_axes_by_candidate[checked[0][0].candidate].get_ylabel() == (
+        "Intensity"
+    )
+    assert dialog.spectrum_axes_by_candidate[checked[1][0].candidate].get_ylabel() == ""
+    dialog.close()
+
+
+def test_autofit_comparison_rendered_y_decorations_fit_supported_panel_width(
+    application: QApplication,
+    auto_fit_gui_problem: AutoFitGuiProblem,
+) -> None:
+    window, _project, _sample, workflow, session, outcome, successful = (
+        auto_fit_gui_problem
+    )
+    evidence = next(item for item in successful if item.candidate.lorentzian_count == 2)
+    dialog = AutoFitCandidateDialog(
+        outcome, window, project=workflow, draft=session.draft
+    )
+    _select_only(dialog, (evidence,))
+    dialog._executed_branches[evidence.candidate] = _candidate_branch(evidence, 10)
+    dialog._sync_controls()
+    dialog.fwhm_view_button.setChecked(True)
+    dialog.eisf_view_button.setChecked(True)
+    dialog.show()
+    application.processEvents()
+
+    for width in (320, 640, 1000):
+        dialog.preview_canvas.setFixedSize(width, 700)
+        application.processEvents()
+        dialog.preview_canvas.draw()  # type: ignore[no-untyped-call]
+        application.processEvents()
+        dialog.preview_canvas.draw()  # type: ignore[no-untyped-call]
+        figure = dialog.preview_canvas.figure
+        renderer = figure.canvas.get_renderer()  # type: ignore[attr-defined]
+        figure_bounds = figure.bbox
+        if width == 1000:
+            assert figure.subplotpars.left == pytest.approx(0.07)
+        assert figure_bounds.width == pytest.approx(
+            width * dialog.preview_canvas.device_pixel_ratio
+        )
+        spectrum = dialog.spectrum_axes_by_candidate[evidence.candidate]
+        residual = dialog.residual_axes_by_candidate[evidence.candidate]
+        fwhm = dialog.fwhm_axes_by_candidate[evidence.candidate]
+        eisf = dialog.eisf_axes_by_candidate[evidence.candidate]
+        for axes, expected_ylabel in (
+            (spectrum, "Intensity"),
+            (residual, "Std. residual"),
+            (fwhm, "FWHM (meV)"),
+            (eisf, "EISF"),
+        ):
+            assert axes.get_ylabel() == expected_ylabel
+            ylabel_bounds = axes.yaxis.label.get_window_extent(renderer)
+            assert ylabel_bounds.x0 >= figure_bounds.x0, (
+                width,
+                expected_ylabel,
+                ylabel_bounds.x0,
+            )
+            assert ylabel_bounds.x1 <= figure_bounds.x1
+            for label in axes.get_yticklabels():
+                if label.get_visible() and label.get_text():
+                    bounds = label.get_window_extent(renderer)
+                    assert bounds.x0 >= figure_bounds.x0, (
+                        width,
+                        expected_ylabel,
+                        label.get_text(),
+                        bounds.x0,
+                    )
+                    assert bounds.x1 <= figure_bounds.x1
+            assert axes.bbox.x1 <= figure_bounds.x1
+            assert figure.subplotpars.right == pytest.approx(0.985)
+            x_lower, x_upper = sorted(axes.get_xlim())
+            for tick in axes.xaxis.get_major_ticks():
+                label = tick.label1
+                if (
+                    label.get_visible()
+                    and label.get_text()
+                    and x_lower <= tick.get_loc() <= x_upper
+                ):
+                    assert label.get_window_extent(renderer).x1 <= figure_bounds.x1
+        assert spectrum.get_position().y0 == pytest.approx(
+            residual.get_position().y1, abs=1.0e-10
+        )
+        assert fwhm.get_position().y0 == pytest.approx(
+            eisf.get_position().y1, abs=1.0e-10
+        )
+    dialog.close()
+
+
+@pytest.mark.parametrize("source_plot", ["fwhm", "eisf"])
+def test_amber_q_selector_drag_snaps_groups_without_changing_views(
+    source_plot: str,
+    auto_fit_gui_problem: AutoFitGuiProblem,
+) -> None:
+    window, _project, _sample, workflow, session, outcome, successful = (
+        auto_fit_gui_problem
+    )
+    evidence = next(item for item in successful if item.candidate.lorentzian_count == 1)
+    branch = _candidate_branch(evidence, 10)
+    source_q_bins = outcome.scientific_context.selection.dataset.q_bins
+    assert source_q_bins is not None
+    edges = np.asarray([0.3 + 0.2 * index for index in range(11)])
+    edged_q_bins = QBins(q_values=source_q_bins.q_values, edges=edges)
+    derived = derive_qens(branch.branch_result, edged_q_bins)
+    dialog = AutoFitCandidateDialog(
+        outcome, window, project=workflow, draft=session.draft
+    )
+    _select_only(dialog, (evidence,))
+    dialog._executed_branches[evidence.candidate] = branch
+    dialog._derived_results[evidence.candidate] = derived
+    dialog._sync_controls()
+    dialog.fwhm_view_button.setChecked(True)
+    dialog.eisf_view_button.setChecked(True)
+    dialog.preview_canvas.draw()  # type: ignore[no-untyped-call]
+    axes_by_candidate = (
+        dialog.fwhm_axes_by_candidate
+        if source_plot == "fwhm"
+        else dialog.eisf_axes_by_candidate
+    )
+    marker = (
+        dialog.fwhm_current_markers_by_candidate[evidence.candidate]
+        if source_plot == "fwhm"
+        else dialog.eisf_current_markers_by_candidate[evidence.candidate]
+    )
+    assert marker.get_facecolor() == pytest.approx(
+        to_rgba(
+            Q_NAVIGATION_SELECTION.fill,
+            Q_NAVIGATION_SELECTION.default_fill_alpha,
+        )
+    )
+    assert marker.get_edgecolor() == pytest.approx(
+        to_rgba(Q_NAVIGATION_SELECTION.outline, 0.95)
+    )
+    assert marker.get_linestyle() == "solid"
+    assert 0.0 < float(np.asarray(marker.get_facecolor())[3]) < 0.3
+    scientific_colors = {
+        SCIENTIFIC_ELASTIC_COLOR,
+        SCIENTIFIC_LORENTZIAN_COLORS[0],
+        SCIENTIFIC_RESIDUAL_COLOR,
+        SCIENTIFIC_TOTAL_FIT_COLOR,
+    }
+    assert Q_NAVIGATION_SELECTION.fill not in scientific_colors
+    assert Q_NAVIGATION_SELECTION.outline not in scientific_colors
+
+    def pointer(q: float, *, outside: bool = False) -> MouseEvent:
+        axes = axes_by_candidate[evidence.candidate]
+        display_x, display_y = axes.get_xaxis_transform().transform((q, 0.5))
+        return cast(
+            MouseEvent,
+            SimpleNamespace(
+                button=MouseButton.LEFT,
+                inaxes=None if outside else axes,
+                xdata=q,
+                ydata=float(
+                    axes.transData.inverted().transform((display_x, display_y))[1]
+                ),
+                x=float(display_x),
+                y=float(display_y),
+                dblclick=False,
+            ),
+        )
+
+    inside = pointer(float((edges[0] + edges[1]) / 2.0))
+    dialog._on_mouse_motion(inside)
+    assert marker.get_linewidth() == Q_NAVIGATION_SELECTION.hover_linewidth
+    assert float(np.asarray(marker.get_facecolor())[3]) == (
+        Q_NAVIGATION_SELECTION.hover_fill_alpha
+    )
+    view_before = (
+        dialog.spectrum_axes_by_candidate[evidence.candidate].get_xlim(),
+        dialog.spectrum_axes_by_candidate[evidence.candidate].get_ylim(),
+        dialog.residual_axes_by_candidate[evidence.candidate].get_ylim(),
+        dialog.fwhm_axes_by_candidate[evidence.candidate].get_xlim(),
+        dialog.fwhm_axes_by_candidate[evidence.candidate].get_ylim(),
+        dialog.eisf_axes_by_candidate[evidence.candidate].get_ylim(),
+    )
+    original_spectrum = dialog.spectrum_axes_by_candidate[evidence.candidate]
+    dialog._on_button_press(inside)
+    assert dialog._q_drag_source == (evidence.candidate, source_plot)
+    assert dialog._zoom_start is None
+    assert dialog.preview_canvas.pointer_capture_active
+    assert marker.get_linewidth() == Q_NAVIGATION_SELECTION.drag_linewidth
+    assert float(np.asarray(marker.get_facecolor())[3]) == (
+        Q_NAVIGATION_SELECTION.drag_fill_alpha
+    )
+
+    dialog._on_mouse_motion(pointer(float(edges[1] - 0.01)))
+    assert dialog.current_group_index == 0
+    assert dialog.spectrum_axes_by_candidate[evidence.candidate] is original_spectrum
+    dialog._on_mouse_motion(pointer(float((edges[2] + edges[3]) / 2.0)))
+    assert dialog.current_group_index == 2
+    assert dialog.preview_title.text() == "Group 3 / 10"
+    assert (
+        dialog.spectrum_axes_by_candidate[evidence.candidate] is not original_spectrum
+    )
+    assert dialog.residual_axes_by_candidate[evidence.candidate] is not None
+    current_spectrum = dialog.spectrum_axes_by_candidate[evidence.candidate]
+    dialog._on_mouse_motion(pointer(float(edges[2] + 0.01)))
+    assert dialog.spectrum_axes_by_candidate[evidence.candidate] is current_spectrum
+    for current_marker in (
+        dialog.fwhm_current_markers_by_candidate[evidence.candidate],
+        dialog.eisf_current_markers_by_candidate[evidence.candidate],
+    ):
+        assert current_marker.get_x() == pytest.approx(edges[2])
+        assert current_marker.get_x() + current_marker.get_width() == pytest.approx(
+            edges[3]
+        )
+        assert current_marker.get_linewidth() == Q_NAVIGATION_SELECTION.drag_linewidth
+
+    first_axes = axes_by_candidate[evidence.candidate]
+    dialog._on_mouse_motion(
+        cast(
+            MouseEvent,
+            SimpleNamespace(x=float(first_axes.bbox.xmin - 100), y=inside.y),
+        )
+    )
+    assert dialog.current_group_index == 0
+    last_axes = axes_by_candidate[evidence.candidate]
+    dialog._on_mouse_motion(
+        cast(
+            MouseEvent,
+            SimpleNamespace(x=float(last_axes.bbox.xmax + 100), y=inside.y),
+        )
+    )
+    assert dialog.current_group_index == 9
+    dialog._on_button_release(pointer(float((edges[9] + edges[10]) / 2.0)))
+    assert dialog._q_drag_source is None
+    assert not dialog.preview_canvas.pointer_capture_active
+    assert dialog.preview_title.text() == "Group 10 / 10"
+    assert dialog.fwhm_current_markers_by_candidate[
+        evidence.candidate
+    ].get_linewidth() == (Q_NAVIGATION_SELECTION.default_linewidth)
+    view_after = (
+        dialog.spectrum_axes_by_candidate[evidence.candidate].get_xlim(),
+        dialog.spectrum_axes_by_candidate[evidence.candidate].get_ylim(),
+        dialog.residual_axes_by_candidate[evidence.candidate].get_ylim(),
+        dialog.fwhm_axes_by_candidate[evidence.candidate].get_xlim(),
+        dialog.fwhm_axes_by_candidate[evidence.candidate].get_ylim(),
+        dialog.eisf_axes_by_candidate[evidence.candidate].get_ylim(),
+    )
+    for after_limits, before_limits in zip(view_after, view_before, strict=True):
+        assert after_limits == pytest.approx(before_limits)
+    np.testing.assert_array_equal(edged_q_bins.q_values, source_q_bins.q_values)
+    np.testing.assert_array_equal(edged_q_bins.edges, edges)
+    dialog.close()
+
+
+def test_nonmonotonic_q_selector_drag_maps_physical_q_to_stored_group(
+    auto_fit_gui_problem: AutoFitGuiProblem,
+) -> None:
+    window, _project, _sample, workflow, session, outcome, successful = (
+        auto_fit_gui_problem
+    )
+    evidence = next(item for item in successful if item.candidate.lorentzian_count == 1)
+    nonmonotonic_q = QBins.from_q_values(
+        (0.5, 1.5, 1.0, 1.7, 1.9, 2.1, 2.3, 2.5, 2.7, 2.9)
+    )
+    assert evidence.fit is not None
+    anchor_fit = replace(
+        evidence.fit,
+        provenance=replace(evidence.fit.provenance, q_value=0.5),
+        context_binding=None,
+    )
+    excluded_branch = MultiQBranchResult(
+        0,
+        MultiQExecutionStatus.COMPLETED,
+        (
+            MultiQFitOutcome(
+                0,
+                MultiQFitStatus.SUCCESS,
+                anchor_fit,
+                derived_result_excluded=True,
+            ),
+            *(
+                MultiQFitOutcome(index, MultiQFitStatus.EXCLUDED)
+                for index in range(1, 10)
+            ),
+        ),
+    )
+    derived = derive_qens(excluded_branch, nonmonotonic_q)
+    assert all(not point.lorentzians and point.eisf is None for point in derived.points)
+    dialog = AutoFitCandidateDialog(
+        outcome, window, project=workflow, draft=session.draft
+    )
+    _select_only(dialog, (evidence,))
+    dialog._executed_branches[evidence.candidate] = AutoFitCandidateBranchResult(
+        replace(evidence, fit=anchor_fit), excluded_branch
+    )
+    dialog._derived_results[evidence.candidate] = derived
+    dialog._sync_controls()
+    dialog.fwhm_view_button.setChecked(True)
+    dialog.eisf_view_button.setChecked(True)
+    axes = dialog.fwhm_axes_by_candidate[evidence.candidate]
+    start_display = axes.get_xaxis_transform().transform((0.5, 0.5))
+    dialog._on_button_press(
+        cast(
+            MouseEvent,
+            SimpleNamespace(
+                button=MouseButton.LEFT,
+                inaxes=axes,
+                xdata=0.5,
+                ydata=1.0,
+                x=float(start_display[0]),
+                y=float(start_display[1]),
+                dblclick=False,
+            ),
+        )
+    )
+    assert dialog._q_drag_source is not None
+    q_one_display = axes.get_xaxis_transform().transform((1.0, 0.5))
+    dialog._on_mouse_motion(
+        cast(
+            MouseEvent,
+            SimpleNamespace(x=float(q_one_display[0]), y=float(q_one_display[1])),
+        )
+    )
+    assert dialog.current_group_index == 2
+    assert dialog.preview_title.text() == "Group 3 / 10"
+    current_marker = dialog.fwhm_current_markers_by_candidate[evidence.candidate]
+    assert current_marker.get_x() + current_marker.get_width() / 2.0 == pytest.approx(
+        1.0
+    )
+    q_one_five_axes = dialog.fwhm_axes_by_candidate[evidence.candidate]
+    q_one_five_display = q_one_five_axes.get_xaxis_transform().transform((1.5, 0.5))
+    dialog._on_mouse_motion(
+        cast(
+            MouseEvent,
+            SimpleNamespace(
+                x=float(q_one_five_display[0]), y=float(q_one_five_display[1])
+            ),
+        )
+    )
+    assert dialog.current_group_index == 1
+    assert dialog.preview_title.text() == "Group 2 / 10"
+    dialog._on_button_release(
+        cast(MouseEvent, SimpleNamespace(x=float(q_one_five_display[0]), y=0.0))
+    )
+    np.testing.assert_array_equal(
+        nonmonotonic_q.q_values,
+        (0.5, 1.5, 1.0, 1.7, 1.9, 2.1, 2.3, 2.5, 2.7, 2.9),
+    )
+    assert tuple(item.group_index for item in excluded_branch.outcomes) == tuple(
+        range(10)
+    )
+    dialog.close()
+
+
+def test_eisf_default_view_and_double_click_reveal_authoritative_uncertainty(
+    auto_fit_gui_problem: AutoFitGuiProblem,
+) -> None:
+    window, _project, _sample, workflow, session, outcome, successful = (
+        auto_fit_gui_problem
+    )
+    evidence = next(item for item in successful if item.candidate.lorentzian_count == 1)
+    branch = _candidate_branch(evidence, 10)
+    q_bins = outcome.scientific_context.selection.dataset.q_bins
+    assert q_bins is not None
+    derived = derive_qens(branch.branch_result, q_bins)
+    anchor = derived.point(0)
+    assert anchor.eisf is not None and anchor.eisf.value is not None
+    expanded_eisf = replace(
+        anchor.eisf,
+        standard_error=0.35,
+        uncertainty_status=StatisticalUncertaintyStatus.AVAILABLE,
+    )
+    synthetic_authoritative_result = replace(
+        derived,
+        points=(replace(anchor, eisf=expanded_eisf), *derived.points[1:]),
+    )
+    dialog = AutoFitCandidateDialog(
+        outcome,
+        window,
+        project=workflow,
+        draft=session.draft,
+    )
+    _select_only(dialog, (evidence,))
+    dialog._executed_branches[evidence.candidate] = branch
+    dialog._derived_results[evidence.candidate] = synthetic_authoritative_result
+    dialog._sync_controls()
+    dialog.eisf_view_button.setChecked(True)
+    axes = dialog.eisf_axes_by_candidate[evidence.candidate]
+    assert axes.get_ylim() == pytest.approx((-0.1, 1.1))
+    q_limits = axes.get_xlim()
+    display = axes.transData.transform((anchor.q_value, anchor.eisf.value))
+    dialog._on_button_press(
+        cast(
+            MouseEvent,
+            SimpleNamespace(
+                button=MouseButton.LEFT,
+                inaxes=axes,
+                xdata=anchor.q_value,
+                ydata=anchor.eisf.value,
+                x=display[0],
+                y=display[1],
+                dblclick=True,
+            ),
+        )
+    )
+    assert axes.get_ylim()[1] > anchor.eisf.value + 0.35
+    assert axes.get_xlim() == pytest.approx(q_limits)
+    dialog.reset_view()
+    assert dialog.eisf_axes_by_candidate[
+        evidence.candidate
+    ].get_ylim() == pytest.approx((-0.1, 1.1))
+    dialog.close()
+
+
+def test_comparison_residuals_share_authoritative_y_presentation_and_zoom(
+    auto_fit_gui_problem: AutoFitGuiProblem,
+) -> None:
+    window, _project, _sample, workflow, session, outcome, successful = (
+        auto_fit_gui_problem
+    )
+    first, second = successful[:2]
+    assert first.fit is not None and second.fit is not None
+    first_values = first.fit.standardized_residuals.copy()
+    second_values = np.linspace(-4.0, 6.0, second.fit.standardized_residuals.size)
+    second_fit = replace(second.fit, standardized_residuals=second_values)
+    dialog = AutoFitCandidateDialog(
+        outcome,
+        window,
+        project=workflow,
+        draft=session.draft,
+    )
+    dialog._candidates = tuple(
+        replace(item, fit=second_fit) if item is second else item
+        for item in dialog._candidates
+    )
+    _select_only(dialog, (first, second))
+    dialog._residual_y_limits = None
+    dialog._draw_comparison()
+    residuals = dialog.residual_axes_by_candidate
+    initial_limits = residuals[first.candidate].get_ylim()
+    assert residuals[second.candidate].get_ylim() == pytest.approx(initial_limits)
+    assert initial_limits[0] < -4.0 and initial_limits[1] > 6.0
+    np.testing.assert_array_equal(
+        next(
+            line
+            for line in residuals[first.candidate].lines
+            if line.get_label() == "Std. residual"
+        ).get_ydata(),
+        first_values,
+    )
+    np.testing.assert_array_equal(
+        next(
+            line
+            for line in residuals[second.candidate].lines
+            if line.get_label() == "Std. residual"
+        ).get_ydata(),
+        second_values,
+    )
+    touched = residuals[second.candidate]
+    x_cursor = float(np.mean(touched.get_xlim()))
+    y_cursor = float(np.mean(touched.get_ylim()))
+    display = touched.transData.transform((x_cursor, y_cursor))
+    dialog._on_scroll(
+        cast(
+            MouseEvent,
+            SimpleNamespace(inaxes=touched, x=display[0], y=display[1], button="up"),
+        )
+    )
+    zoomed_limits = touched.get_ylim()
+    assert np.ptp(zoomed_limits) < np.ptp(initial_limits)
+    assert residuals[first.candidate].get_ylim() == pytest.approx(zoomed_limits)
+    assert all(
+        axes.get_xlim() == pytest.approx(touched.get_xlim())
+        for axes in (*dialog.spectrum_axes_by_candidate.values(), *residuals.values())
+    )
+    dialog.reset_view()
+    reset_limits = dialog.residual_axes_by_candidate[first.candidate].get_ylim()
+    assert reset_limits == pytest.approx(initial_limits)
+    assert dialog.residual_axes_by_candidate[
+        second.candidate
+    ].get_ylim() == pytest.approx(reset_limits)
+    assert all(
+        not tick.tick1line.get_visible() and not tick.label1.get_visible()
+        for tick in dialog.spectrum_axes_by_candidate[
+            first.candidate
+        ].xaxis.get_major_ticks()
+    )
+    for evidence in (first, second):
+        dialog._executed_branches[evidence.candidate] = _candidate_branch(evidence, 10)
+    assert dialog.set_current_group(1)
+    navigated_limits = dialog.residual_axes_by_candidate[first.candidate].get_ylim()
+    assert dialog.residual_axes_by_candidate[
+        second.candidate
+    ].get_ylim() == pytest.approx(navigated_limits)
+    second_row = tuple(outcome.recommendation.candidate_results).index(second)
+    assert dialog.set_candidate_checked(second_row, False)
+    assert dialog.set_candidate_checked(second_row, True)
+    assert dialog.residual_axes_by_candidate[
+        first.candidate
+    ].get_ylim() == pytest.approx(
+        dialog.residual_axes_by_candidate[second.candidate].get_ylim()
+    )
+    dialog.close()
+
+
+def test_nonmonotonic_physical_q_display_preserves_missing_interior_gap(
+    auto_fit_gui_problem: AutoFitGuiProblem,
+) -> None:
+    window, _project, _sample, _workflow, _session, outcome, successful = (
+        auto_fit_gui_problem
+    )
+    evidence = next(item for item in successful if item.candidate.lorentzian_count == 1)
+    assert evidence.fit is not None
+    q_bins = QBins.from_q_values((0.5, 1.5, 1.0))
+    first_fit = replace(
+        evidence.fit,
+        provenance=replace(evidence.fit.provenance, q_value=0.5),
+        context_binding=None,
+    )
+    second_fit = replace(
+        evidence.fit,
+        provenance=replace(evidence.fit.provenance, group_index=1, q_value=1.5),
+        context_binding=None,
+    )
+    branch = MultiQBranchResult(
+        0,
+        MultiQExecutionStatus.COMPLETED,
+        (
+            MultiQFitOutcome(0, MultiQFitStatus.SUCCESS, first_fit),
+            MultiQFitOutcome(1, MultiQFitStatus.SUCCESS, second_fit),
+            MultiQFitOutcome(
+                2,
+                MultiQFitStatus.FAILED,
+                error_type="RuntimeError",
+                error_message="unavailable physical interior Q",
+            ),
+        ),
+    )
+    derived = derive_qens(branch, q_bins)
+    source_order = tuple(point.q_value for point in derived.points)
+    assert source_order == (0.5, 1.5, 1.0)
+    dialog = AutoFitCandidateDialog(outcome, window)
+    figure = dialog.preview_canvas.figure
+    figure.clear()
+    fwhm_axes, eisf_axes = figure.subplots(2, 1)
+    dialog._draw_derived_axes(evidence.candidate, derived, fwhm_axes, eisf_axes)
+    fwhm = next(line for line in fwhm_axes.lines if line.get_label() == "L1")
+    eisf = next(line for line in eisf_axes.lines if line.get_label() == "EISF")
+    for line in (fwhm, eisf):
+        np.testing.assert_array_equal(line.get_xdata(), (0.5, 1.0, 1.5))
+        assert np.isnan(np.asarray(line.get_ydata())[1])
+        assert np.isnan(np.asarray(line.get_path().vertices)[1, 1])
+        assert np.isfinite(np.asarray(line.get_ydata())[[0, 2]]).all()
+    fwhm_error_x = tuple(
+        float(segment[0, 0])
+        for container in fwhm_axes.containers
+        if isinstance(container, ErrorbarContainer)
+        for collection in container.lines[2]
+        for segment in collection.get_segments()
+    )
+    eisf_error_x = tuple(
+        float(segment[0, 0])
+        for container in eisf_axes.containers
+        if isinstance(container, ErrorbarContainer)
+        for collection in container.lines[2]
+        for segment in collection.get_segments()
+    )
+    expected_fwhm_error_q = {
+        point.q_value
+        for point in derived.points
+        if point.lorentzians
+        and point.lorentzians[0].fwhm_standard_error_mev is not None
+    }
+    expected_eisf_error_q = {
+        point.q_value
+        for point in derived.points
+        if point.eisf is not None and point.eisf.standard_error is not None
+    }
+    assert set(fwhm_error_x) == expected_fwhm_error_q
+    assert set(eisf_error_x) == expected_eisf_error_q
+    assert tuple(point.q_value for point in derived.points) == source_order
+    np.testing.assert_array_equal(q_bins.q_values, (0.5, 1.5, 1.0))
+    assert tuple(outcome.group_index for outcome in branch.outcomes) == (0, 1, 2)
+    dialog.close()
+
+
+def test_autofit_wheel_routes_axes_to_zoom_and_canvas_gutters_to_scroll(
+    application: QApplication,
+    auto_fit_gui_problem: AutoFitGuiProblem,
+) -> None:
+    window, _project, _sample, workflow, session, outcome, successful = (
+        auto_fit_gui_problem
+    )
+    evidence = next(item for item in successful if item.candidate.lorentzian_count == 1)
+    dialog = AutoFitCandidateDialog(
+        outcome,
+        window,
+        project=workflow,
+        draft=session.draft,
+    )
+    _select_only(dialog, successful[:9])
+    dialog._executed_branches[evidence.candidate] = _candidate_branch(evidence, 10)
+    dialog._sync_controls()
+    dialog.fwhm_view_button.setChecked(True)
+    dialog.eisf_view_button.setChecked(True)
+    dialog.resize(850, 530)
+    dialog.show()
+    application.processEvents()
+    dialog.preview_canvas.draw()  # type: ignore[no-untyped-call]
+    scrollbar = dialog.comparison_scroll_area.verticalScrollBar()
+    assert scrollbar.maximum() > 0
+
+    def wheel_at(display: tuple[float, float], delta: int) -> None:
+        canvas = dialog.preview_canvas
+        ratio = canvas.device_pixel_ratio
+        local = QPointF(display[0] / ratio, canvas.height() - display[1] / ratio)
+        event = QWheelEvent(
+            local,
+            QPointF(canvas.mapToGlobal(local.toPoint())),
+            QPoint(),
+            QPoint(0, delta),
+            Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier,
+            Qt.ScrollPhase.ScrollUpdate,
+            False,
+        )
+        application.sendEvent(canvas, event)
+        application.processEvents()
+
+    for axes in (
+        dialog.spectrum_axes_by_candidate[evidence.candidate],
+        dialog.residual_axes_by_candidate[evidence.candidate],
+        dialog.fwhm_axes_by_candidate[evidence.candidate],
+        dialog.eisf_axes_by_candidate[evidence.candidate],
+    ):
+        before_x = axes.get_xlim()
+        before_y = axes.get_ylim()
+        before_scroll = scrollbar.value()
+        wheel_at(
+            (
+                float(axes.bbox.x0 + axes.bbox.width / 2),
+                float(axes.bbox.y0 + axes.bbox.height / 2),
+            ),
+            120,
+        )
+        assert np.ptp(axes.get_xlim()) < np.ptp(before_x)
+        assert np.ptp(axes.get_ylim()) < np.ptp(before_y)
+        assert scrollbar.value() == before_scroll
+
+    scrollbar.setValue(scrollbar.maximum() // 2)
+    before_scroll = scrollbar.value()
+    before_x = dialog.spectrum_axes_by_candidate[evidence.candidate].get_xlim()
+    canvas_height = (
+        dialog.preview_canvas.height() * dialog.preview_canvas.device_pixel_ratio
+    )
+    wheel_at((3.0, canvas_height - 3.0), -120)
+    assert scrollbar.value() > before_scroll
+    assert dialog.spectrum_axes_by_candidate[evidence.candidate].get_xlim() == before_x
+
+    dialog.preview_canvas.begin_pointer_capture()
+    captured_scroll = scrollbar.value()
+    wheel_at((3.0, canvas_height - 3.0), -120)
+    assert scrollbar.value() == captured_scroll
+    dialog.preview_canvas.end_pointer_capture()
+    dialog.close()
+
+
+def test_comparison_rectangle_zoom_owns_outside_drag_and_clamps_to_source_axes(
+    auto_fit_gui_problem: AutoFitGuiProblem,
+) -> None:
+    window, _project, _sample, workflow, session, outcome, successful = (
+        auto_fit_gui_problem
+    )
+    evidence = next(item for item in successful if item.candidate.lorentzian_count == 1)
+    branch = _candidate_branch(evidence, 10)
+    dialog = AutoFitCandidateDialog(
+        outcome,
+        window,
+        project=workflow,
+        draft=session.draft,
+    )
+    _select_only(dialog, (evidence,))
+    dialog._executed_branches[evidence.candidate] = branch
+    dialog.fwhm_view_button.setChecked(True)
+    dialog.eisf_view_button.setChecked(True)
+    dialog.preview_canvas.draw()  # type: ignore[no-untyped-call]
+
+    def press_at(axes: Axes, data_point: tuple[float, float]) -> None:
+        display = axes.transData.transform(data_point)
+        dialog._on_button_press(
+            cast(
+                MouseEvent,
+                SimpleNamespace(
+                    button=MouseButton.LEFT,
+                    inaxes=axes,
+                    xdata=data_point[0],
+                    ydata=data_point[1],
+                    x=display[0],
+                    y=display[1],
+                    dblclick=False,
+                ),
+            )
+        )
+
+    spectrum = dialog.spectrum_axes_by_candidate[evidence.candidate]
+    initial_x = spectrum.get_xlim()
+    initial_y = spectrum.get_ylim()
+    center = (float(np.mean(initial_x)), float(np.mean(initial_y)))
+    press_at(spectrum, center)
+    assert dialog._zoom_axes is spectrum
+    assert dialog.preview_canvas.pointer_capture_active
+    upper_right = (spectrum.bbox.xmax + 80.0, spectrum.bbox.ymax + 80.0)
+    outside = cast(
+        MouseEvent,
+        SimpleNamespace(
+            button=MouseButton.LEFT,
+            inaxes=None,
+            xdata=None,
+            ydata=None,
+            x=upper_right[0],
+            y=upper_right[1],
+        ),
+    )
+    dialog._on_mouse_motion(outside)
+    assert dialog._zoom_rectangle is not None
+    assert dialog._zoom_rectangle.get_x() + dialog._zoom_rectangle.get_width() == (
+        pytest.approx(initial_x[1])
+    )
+    assert dialog._zoom_rectangle.get_y() + dialog._zoom_rectangle.get_height() == (
+        pytest.approx(initial_y[1])
+    )
+    dialog._on_button_release(outside)
+    assert not dialog.preview_canvas.pointer_capture_active
+    assert spectrum.get_xlim() == pytest.approx((center[0], initial_x[1]))
+    assert spectrum.get_ylim() == pytest.approx((center[1], initial_y[1]))
+
+    dialog.reset_view()
+    spectrum = dialog.spectrum_axes_by_candidate[evidence.candidate]
+    dialog.preview_canvas.draw()
+    initial_x = spectrum.get_xlim()
+    initial_y = spectrum.get_ylim()
+    center = (float(np.mean(initial_x)), float(np.mean(initial_y)))
+    press_at(spectrum, center)
+    lower_left = (spectrum.bbox.xmin - 80.0, spectrum.bbox.ymin - 80.0)
+    outside = cast(
+        MouseEvent,
+        SimpleNamespace(
+            button=MouseButton.LEFT,
+            inaxes=None,
+            xdata=None,
+            ydata=None,
+            x=lower_left[0],
+            y=lower_left[1],
+        ),
+    )
+    dialog._on_mouse_motion(outside)
+    dialog._on_button_release(outside)
+    assert spectrum.get_xlim() == pytest.approx((initial_x[0], center[0]))
+    assert spectrum.get_ylim() == pytest.approx((initial_y[0], center[1]))
+
+    dialog.reset_view()
+    fwhm = dialog.fwhm_axes_by_candidate[evidence.candidate]
+    initial_q = fwhm.get_xlim()
+    initial_fwhm = fwhm.get_ylim()
+    center = (float(np.mean(initial_q)), float(np.mean(initial_fwhm)))
+    press_at(fwhm, center)
+    outside = cast(
+        MouseEvent,
+        SimpleNamespace(
+            button=MouseButton.LEFT,
+            inaxes=dialog.eisf_axes_by_candidate[evidence.candidate],
+            xdata=None,
+            ydata=None,
+            x=fwhm.bbox.xmax + 50.0,
+            y=fwhm.bbox.ymax + 50.0,
+        ),
+    )
+    dialog._on_mouse_motion(outside)
+    dialog._on_button_release(outside)
+    assert fwhm.get_xlim() == pytest.approx((center[0], initial_q[1]))
+    assert fwhm.get_ylim() == pytest.approx((center[1], initial_fwhm[1]))
+    assert dialog.eisf_axes_by_candidate[
+        evidence.candidate
+    ].get_xlim() == pytest.approx(fwhm.get_xlim())
+
+    dialog.reset_view()
+    eisf = dialog.eisf_axes_by_candidate[evidence.candidate]
+    initial_q = eisf.get_xlim()
+    initial_eisf = eisf.get_ylim()
+    center = (float(np.mean(initial_q)), float(np.mean(initial_eisf)))
+    press_at(eisf, center)
+    outside = cast(
+        MouseEvent,
+        SimpleNamespace(
+            button=MouseButton.LEFT,
+            inaxes=None,
+            xdata=None,
+            ydata=None,
+            x=eisf.bbox.xmin - 50.0,
+            y=eisf.bbox.ymin - 50.0,
+        ),
+    )
+    dialog._on_mouse_motion(outside)
+    dialog._on_button_release(outside)
+    assert eisf.get_xlim() == pytest.approx((initial_q[0], center[0]))
+    assert eisf.get_ylim() == pytest.approx((initial_eisf[0], center[1]))
+    assert dialog.fwhm_axes_by_candidate[
+        evidence.candidate
+    ].get_xlim() == pytest.approx(eisf.get_xlim())
+
+    dialog.reset_view()
+    eisf = dialog.eisf_axes_by_candidate[evidence.candidate]
+    before_cancel = (eisf.get_xlim(), eisf.get_ylim())
+    center = (float(np.mean(before_cancel[0])), float(np.mean(before_cancel[1])))
+    press_at(eisf, center)
+    dialog._cancel_zoom()
+    assert not dialog.preview_canvas.pointer_capture_active
+    assert eisf.get_xlim() == before_cancel[0]
+    assert eisf.get_ylim() == before_cancel[1]
+
+    dialog._on_button_press(
+        cast(
+            MouseEvent,
+            SimpleNamespace(
+                button=MouseButton.LEFT,
+                inaxes=None,
+                xdata=None,
+                ydata=None,
+                x=0.0,
+                y=0.0,
+                dblclick=False,
+            ),
+        )
+    )
+    assert dialog._zoom_start is None
+    assert not dialog.preview_canvas.pointer_capture_active
+    dialog.close()
+
+
+def test_live_selected_progress_deduplicates_terminal_slots_and_checked_aggregate(
+    auto_fit_gui_problem: AutoFitGuiProblem,
+) -> None:
+    window, _project, _sample, workflow, session, outcome, successful = (
+        auto_fit_gui_problem
+    )
+    first, second = successful[:2]
+    dialog = AutoFitCandidateDialog(
+        outcome,
+        window,
+        project=workflow,
+        draft=session.draft,
+    )
+    _select_only(dialog, (first, second))
+    dialog._running = True
+    dialog._run_candidates = (first.candidate, second.candidate)
+    dialog._run_generation = 7
+    dialog._active_run_generation = 7
+
+    assert dialog.progress_label.text() == "Calculated groups: 2 / 20"
+    anchor = _selected_progress_event(first, 0, MultiQFitStatus.SUCCESS)
+    dialog._execution_progress(7, anchor)
+    assert dialog.progress_label.text() == "Calculated groups: 2 / 20"
+
+    for expected, event in (
+        (3, _selected_progress_event(first, 1, MultiQFitStatus.SUCCESS)),
+        (4, _selected_progress_event(first, 2, MultiQFitStatus.FAILED)),
+        (5, _selected_progress_event(first, 3, MultiQFitStatus.BLOCKED)),
+        (6, _selected_progress_event(first, 4, MultiQFitStatus.EXCLUDED)),
+        (7, _selected_progress_event(second, 1, MultiQFitStatus.SUCCESS)),
+    ):
+        dialog._execution_progress(7, event)
+        assert dialog.progress_label.text() == f"Calculated groups: {expected} / 20"
+
+    dialog._execution_progress(7, anchor)
+    assert dialog.progress_label.text() == "Calculated groups: 7 / 20"
+    dialog._execution_progress(
+        6,
+        _selected_progress_event(first, 5, MultiQFitStatus.SUCCESS),
+    )
+    assert dialog.progress_label.text() == "Calculated groups: 7 / 20"
+
+    second_row = tuple(outcome.recommendation.candidate_results).index(second)
+    assert dialog.set_candidate_checked(second_row, False)
+    assert dialog.progress_label.text() == "Calculated groups: 5 / 10"
+    assert dialog.set_candidate_checked(second_row, True)
+    assert dialog.progress_label.text() == "Calculated groups: 7 / 20"
+
+    dialog._executed_branches[second.candidate] = _candidate_branch(
+        second,
+        10,
+        status=MultiQExecutionStatus.CANCELLED,
+        processed_groups=3,
+    )
+    dialog._update_calculated_groups()
+    assert dialog.progress_label.text() == "Calculated groups: 8 / 20"
+    dialog._execution_progress(
+        7,
+        _selected_progress_event(second, 2, MultiQFitStatus.SUCCESS),
+    )
+    assert dialog.progress_label.text() == "Calculated groups: 8 / 20"
+
+    dialog._running = False
+    dialog._active_run_generation = None
+    dialog._live_processed_groups.clear()
+    dialog.close()
+
+
+def test_terminal_branch_reconciliation_replaces_live_progress_and_ignores_late_event(
+    auto_fit_gui_problem: AutoFitGuiProblem,
+) -> None:
+    window, _project, _sample, workflow, session, outcome, successful = (
+        auto_fit_gui_problem
+    )
+    first = successful[0]
+    dialog = AutoFitCandidateDialog(
+        outcome,
+        window,
+        project=workflow,
+        draft=session.draft,
+    )
+    _select_only(dialog, (first,))
+    dialog._running = True
+    dialog._run_candidates = (first.candidate,)
+    dialog._run_generation = 3
+    dialog._active_run_generation = 3
+    for group_index in range(1, 5):
+        dialog._execution_progress(
+            3,
+            _selected_progress_event(first, group_index, MultiQFitStatus.SUCCESS),
+        )
+    assert dialog.progress_label.text() == "Calculated groups: 5 / 10"
+
+    partial = _candidate_branch(
+        first,
+        10,
+        status=MultiQExecutionStatus.CANCELLED,
+        processed_groups=2,
+    )
+    result = SelectedAutoFitMultiQResult(
+        MultiQExecutionStatus.CANCELLED,
+        (first.candidate,),
+        (partial,),
+    )
+    dialog._execution_completed(result)
+    assert dialog.progress_label.text() == "Calculated groups: 2 / 10"
+    assert not dialog._live_processed_groups
+
+    dialog._execution_progress(
+        3,
+        _selected_progress_event(first, 5, MultiQFitStatus.SUCCESS),
+    )
+    assert dialog.progress_label.text() == "Calculated groups: 2 / 10"
+    dialog._execution_thread_finished()
+    assert dialog.progress_label.text() == "Calculated groups: 2 / 10"
     dialog.close()
 
 
@@ -804,8 +2476,11 @@ def test_selected_candidates_run_in_background_cache_and_navigate_together(
         candidates: tuple[StandardModelCandidate, ...],
         *,
         cancel_requested: Callable[[], bool] | None = None,
+        progress_callback: Callable[[SelectedAutoFitProgressEvent], object]
+        | None = None,
     ) -> SelectedAutoFitMultiQResult:
         del cancel_requested
+        assert progress_callback is not None
         calls.append(tuple(candidates))
         evidence = {
             item.candidate: item for item in _outcome.recommendation.candidate_results
@@ -934,23 +2609,32 @@ def test_selected_candidate_cancel_uses_core_contract_and_keeps_prefix(
         candidates: tuple[StandardModelCandidate, ...],
         *,
         cancel_requested: Callable[[], bool] | None = None,
+        progress_callback: Callable[[SelectedAutoFitProgressEvent], object]
+        | None = None,
     ) -> SelectedAutoFitMultiQResult:
         assert cancel_requested is not None
+        assert progress_callback is not None
+        evidence = next(
+            item
+            for item in _outcome.recommendation.candidate_results
+            if item.candidate == candidates[0]
+        )
+        progress_callback(
+            _selected_progress_event(evidence, 0, MultiQFitStatus.SUCCESS)
+        )
+        progress_callback(_selected_progress_event(evidence, 1, MultiQFitStatus.FAILED))
         worker_started.set()
         deadline = time.monotonic() + 2.0
         while not cancel_requested() and time.monotonic() < deadline:
             time.sleep(0.005)
         if cancel_requested():
             cancel_seen.set()
-        evidence = next(
-            item
-            for item in _outcome.recommendation.candidate_results
-            if item.candidate == candidates[0]
-        )
         partial = _candidate_branch(
             evidence,
             10,
             status=MultiQExecutionStatus.CANCELLED,
+            failed_group=1,
+            processed_groups=2,
         )
         return SelectedAutoFitMultiQResult(
             MultiQExecutionStatus.CANCELLED,
@@ -972,6 +2656,10 @@ def test_selected_candidate_cancel_uses_core_contract_and_keeps_prefix(
     _select_only(dialog, selected)
     assert dialog.run_selected_across_q()
     _wait_until(application, worker_started.is_set)
+    _wait_until(
+        application,
+        lambda: dialog.progress_label.text() == "Calculated groups: 3 / 20",
+    )
     ui_tick: list[bool] = []
     QTimer.singleShot(0, lambda: ui_tick.append(True))
     _wait_until(application, lambda: bool(ui_tick))
@@ -984,7 +2672,7 @@ def test_selected_candidate_cancel_uses_core_contract_and_keeps_prefix(
     assert selected[1].candidate not in {
         item.candidate for item in dialog.executed_branches
     }
-    assert dialog.progress_label.text() == "Calculated groups: 2 / 20"
+    assert dialog.progress_label.text() == "Calculated groups: 3 / 20"
     assert "cancelled" in dialog.selection_status_label.text().lower()
     partial_row = tuple(outcome.recommendation.candidate_results).index(selected[0])
     assert (
@@ -1584,7 +3272,7 @@ def test_autofit_dialog_preview_and_explicit_adoption_are_group_local(
         *window.findChildren(QToolButton),
     ]
     control_text = {control.text() for control in controls}
-    assert not {"MultiFit", "Fit All Groups", "FWHM(Q)", "EISF(Q)"} & control_text
+    assert not {"MultiFit", "Fit All Groups"} & control_text
     assert window.manual_fit_button.text() == "Fitting Parameters"
     assert window.manual_fit_action.text() == "Fitting Parameters…"
     assert window.auto_fit_button.text() == "AutoFit…"

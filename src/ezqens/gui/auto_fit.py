@@ -6,7 +6,8 @@ from threading import Event
 
 import numpy as np
 from matplotlib.axes import Axes
-from matplotlib.backend_bases import MouseButton, MouseEvent
+from matplotlib.backend_bases import DrawEvent, MouseButton, MouseEvent
+from matplotlib.colors import to_rgba
 from matplotlib.patches import Rectangle
 from PySide6.QtCore import (
     QObject,
@@ -18,8 +19,16 @@ from PySide6.QtCore import (
     Signal,
     Slot,
 )
-from PySide6.QtGui import QActionGroup, QCloseEvent, QFont, QMouseEvent, QResizeEvent
+from PySide6.QtGui import (
+    QActionGroup,
+    QCloseEvent,
+    QFont,
+    QMouseEvent,
+    QResizeEvent,
+    QWheelEvent,
+)
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QDialog,
     QFrame,
@@ -34,11 +43,14 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSplitter,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
 from ezqens.batch import MultiQExecutionStatus, MultiQFitStatus
+from ezqens.derived import DerivedQENSResult, DerivedValueStatus, derive_qens
+from ezqens.domain import QBins
 from ezqens.fitting import (
     BackgroundModel,
     CandidateFitResult,
@@ -57,14 +69,17 @@ from ezqens.gui.scientific_canvas import (
     SCIENTIFIC_TOTAL_FIT_COLOR,
     SCIENTIFIC_UNCERTAINTY_COLOR,
     ScientificCanvas,
+    clamped_axes_data_point,
     log_display_values,
     symlog_linthresh,
     zoom_limits,
 )
+from ezqens.gui.theme import Q_NAVIGATION_SELECTION
 from ezqens.workflow import (
     AutoFitCandidateBranchResult,
     ManualFitDraft,
     SelectedAutoFitMultiQResult,
+    SelectedAutoFitProgressEvent,
     SingleQAutoFitOutcome,
     WorkflowProject,
     continue_selected_auto_fit_candidates,
@@ -73,7 +88,10 @@ from ezqens.workflow import (
 _ZOOM_DRAG_THRESHOLD_PX = 5.0
 _MIN_COMPARISON_PANEL_WIDTH = 320
 _MIN_COMPARISON_PANEL_HEIGHT = 300
+_MIN_SINGLE_DERIVED_COMPARISON_PANEL_HEIGHT = 400
+_MIN_DOUBLE_DERIVED_COMPARISON_PANEL_HEIGHT = 500
 _MAX_COMPARISON_COLUMNS = 3
+_COMPARISON_BASE_LEFT_MARGIN = 0.07
 
 type _ComparisonEntry = tuple[CandidateFitResult, FitResult | None, str]
 
@@ -225,6 +243,7 @@ class _ComparisonScrollArea(QScrollArea):
 class _SelectedCandidatesWorker(QObject):
     """Run one public selected-candidate continuation away from the UI thread."""
 
+    progress = Signal(int, object)
     completed = Signal(object)
     failed = Signal(object)
 
@@ -235,6 +254,7 @@ class _SelectedCandidatesWorker(QObject):
         outcome: SingleQAutoFitOutcome,
         candidates: tuple[StandardModelCandidate, ...],
         cancel_event: Event,
+        run_generation: int,
     ) -> None:
         super().__init__()
         self._project = project
@@ -242,6 +262,10 @@ class _SelectedCandidatesWorker(QObject):
         self._outcome = outcome
         self._candidates = candidates
         self._cancel_event = cancel_event
+        self._run_generation = run_generation
+
+    def _publish_progress(self, event: SelectedAutoFitProgressEvent) -> None:
+        self.progress.emit(self._run_generation, event)
 
     @Slot()
     def run(self) -> None:
@@ -252,6 +276,7 @@ class _SelectedCandidatesWorker(QObject):
                 self._outcome,
                 self._candidates,
                 cancel_requested=self._cancel_event.is_set,
+                progress_callback=self._publish_progress,
             )
         except Exception as error:  # noqa: BLE001 - transported to the GUI thread
             self.failed.emit(error)
@@ -293,16 +318,34 @@ class AutoFitCandidateDialog(QDialog):
         ] = {}
         self.current_group_index = outcome.group_index
         self.y_scale = "linear"
+        self.fwhm_y_scale = "linear"
+        self.fwhm_visible = False
+        self.eisf_visible = False
         self.spectrum_axes: Axes | None = None
         self.residual_axes: Axes | None = None
         self.spectrum_axes_by_candidate: dict[StandardModelCandidate, Axes] = {}
         self.residual_axes_by_candidate: dict[StandardModelCandidate, Axes] = {}
+        self.fwhm_axes_by_candidate: dict[StandardModelCandidate, Axes] = {}
+        self.eisf_axes_by_candidate: dict[StandardModelCandidate, Axes] = {}
+        self.fwhm_current_markers_by_candidate: dict[
+            StandardModelCandidate, Rectangle
+        ] = {}
+        self.eisf_current_markers_by_candidate: dict[
+            StandardModelCandidate, Rectangle
+        ] = {}
+        self._derived_results: dict[StandardModelCandidate, DerivedQENSResult] = {}
         self._x_limits: tuple[float, float] | None = None
         self._y_limits: tuple[float, float] | None = None
+        self._residual_y_limits: tuple[float, float] | None = None
+        self._derived_q_limits: tuple[float, float] | None = None
+        self._fwhm_y_limits: tuple[float, float] | None = None
+        self._eisf_y_limits: tuple[float, float] | None = None
         self._zoom_start: tuple[float, float] | None = None
         self._zoom_start_display: tuple[float, float] | None = None
         self._zoom_axes: Axes | None = None
         self._zoom_rectangle: Rectangle | None = None
+        self._q_drag_source: tuple[StandardModelCandidate, str] | None = None
+        self._q_hover_marker: Rectangle | None = None
         self._comparison_columns = 1
         self._drawing_comparison = False
         self._running = False
@@ -312,6 +355,9 @@ class AutoFitCandidateDialog(QDialog):
         self._run_candidates: tuple[StandardModelCandidate, ...] = ()
         self._run_result: SelectedAutoFitMultiQResult | None = None
         self._run_error: Exception | None = None
+        self._run_generation = 0
+        self._active_run_generation: int | None = None
+        self._live_processed_groups: dict[StandardModelCandidate, set[int]] = {}
 
         title = QLabel("AutoFit Candidates")
         title.setObjectName("ezqensDialogTitle")
@@ -394,7 +440,7 @@ class AutoFitCandidateDialog(QDialog):
         self.candidate_note_label.setProperty("secondary", True)
         self.candidate_note_label.setWordWrap(True)
 
-        self.run_selected_button = QPushButton("Run selected across Q")
+        self.run_selected_button = QPushButton("Fit to all Q")
         self.run_selected_button.setObjectName("autoFitRunSelectedButton")
         self.run_selected_button.clicked.connect(self.run_selected_across_q)
         self.selection_status_label = QLabel()
@@ -411,12 +457,10 @@ class AutoFitCandidateDialog(QDialog):
         self.progress_label.setObjectName("autoFitProgressLabel")
         self.progress_label.setProperty("secondary", True)
         self.progress_label.hide()
-        run_row = QHBoxLayout()
-        run_row.setContentsMargins(0, 0, 0, 0)
-        run_row.setSpacing(7)
-        run_row.addWidget(self.run_selected_button)
-        run_row.addWidget(self.progress_bar)
-        run_row.addStretch(1)
+        self.run_row = QHBoxLayout()
+        self.run_row.setContentsMargins(0, 0, 0, 0)
+        self.run_row.setSpacing(7)
+        self.run_row.addWidget(self.run_selected_button)
 
         left = QWidget()
         left_layout = QVBoxLayout(left)
@@ -426,13 +470,16 @@ class AutoFitCandidateDialog(QDialog):
         left_layout.addWidget(summary)
         left_layout.addWidget(self.candidate_list, 1)
         left_layout.addWidget(self.candidate_note_label)
-        left_layout.addLayout(run_row)
+        left_layout.addLayout(self.run_row)
         left_layout.addWidget(self.progress_label)
         left_layout.addWidget(self.selection_status_label)
 
         self.preview_title = QLabel()
         self.preview_title.setObjectName("autoFitPreviewTitle")
         self.preview_title.setProperty("secondary", True)
+        self.preview_selection_label = QLabel()
+        self.preview_selection_label.setObjectName("autoFitPreviewSelection")
+        self.preview_selection_label.setProperty("secondary", True)
         self.previous_group_button = QPushButton("‹")
         self.previous_group_button.setObjectName("autoFitPreviousGroupButton")
         self.previous_group_button.setToolTip("Previous Q group")
@@ -445,12 +492,34 @@ class AutoFitCandidateDialog(QDialog):
         self.next_group_button.clicked.connect(
             lambda: self.set_current_group(self.current_group_index + 1)
         )
-        preview_header = QHBoxLayout()
+        self.fwhm_view_button = QToolButton()
+        self.fwhm_view_button.setObjectName("autoFitFwhmViewButton")
+        self.fwhm_view_button.setProperty("viewToggle", True)
+        self.fwhm_view_button.setText("FWHM")
+        self.fwhm_view_button.setCheckable(True)
+        self.fwhm_view_button.setToolTip("Show FWHM across Q for compared results")
+        self.fwhm_view_button.toggled.connect(self.set_fwhm_visible)
+        self.eisf_view_button = QToolButton()
+        self.eisf_view_button.setObjectName("autoFitEisfViewButton")
+        self.eisf_view_button.setProperty("viewToggle", True)
+        self.eisf_view_button.setText("EISF")
+        self.eisf_view_button.setCheckable(True)
+        self.eisf_view_button.setToolTip("Show EISF across Q for compared results")
+        self.eisf_view_button.toggled.connect(self.set_eisf_visible)
+        self.run_row.addWidget(self.fwhm_view_button)
+        self.run_row.addWidget(self.eisf_view_button)
+        self.run_row.addWidget(self.progress_bar)
+        self.run_row.addStretch(1)
+        self.preview_header = QWidget()
+        self.preview_header.setObjectName("autoFitPreviewHeader")
+        preview_header = QHBoxLayout(self.preview_header)
         preview_header.setContentsMargins(0, 0, 0, 0)
         preview_header.setSpacing(6)
-        preview_header.addWidget(self.preview_title, 1)
         preview_header.addWidget(self.previous_group_button)
         preview_header.addWidget(self.next_group_button)
+        preview_header.addWidget(self.preview_title)
+        preview_header.addWidget(self.preview_selection_label)
+        preview_header.addStretch(1)
 
         self.preview_canvas = ScientificCanvas()
         self.preview_canvas.setObjectName("autoFitPreviewCanvas")
@@ -462,6 +531,7 @@ class AutoFitCandidateDialog(QDialog):
         self.preview_canvas.mpl_connect("button_press_event", self._on_button_press)
         self.preview_canvas.mpl_connect("motion_notify_event", self._on_mouse_motion)
         self.preview_canvas.mpl_connect("button_release_event", self._on_button_release)
+        self.preview_canvas.mpl_connect("draw_event", self._fit_comparison_left_margin)
         self.comparison_scroll_area = _ComparisonScrollArea()
         self.comparison_scroll_area.setObjectName("autoFitComparisonScrollArea")
         self.comparison_scroll_area.setFrameShape(QFrame.Shape.NoFrame)
@@ -474,7 +544,7 @@ class AutoFitCandidateDialog(QDialog):
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(6)
-        right_layout.addLayout(preview_header)
+        right_layout.addWidget(self.preview_header)
         right_layout.addWidget(self.comparison_scroll_area, 1)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -579,6 +649,7 @@ class AutoFitCandidateDialog(QDialog):
             self.request_cancel()
             event.ignore()
             return
+        self._end_q_selection_drag()
         super().closeEvent(event)
 
     def _initial_row(self) -> int:
@@ -655,6 +726,7 @@ class AutoFitCandidateDialog(QDialog):
             self._candidate_rows[row].set_checked(False)
             return
         self._capture_view_state()
+        self._residual_y_limits = None
         self._update_candidate_rows()
         self._sync_controls()
         self._draw_comparison()
@@ -723,10 +795,19 @@ class AutoFitCandidateDialog(QDialog):
             self.use_candidate_button.setText(
                 "Save selected results" if len(checked) > 1 else "Apply"
             )
-            self.use_candidate_button.setEnabled(
+            finalization_ready = (
                 bool(checked)
                 and not self._running
                 and all(item.candidate in self._executed_branches for item in checked)
+            )
+            self.use_candidate_button.setEnabled(finalization_ready)
+            self.use_candidate_button.setToolTip(
+                "Run all checked candidates across Q before applying."
+                if checked
+                and any(
+                    item.candidate not in self._executed_branches for item in checked
+                )
+                else ""
             )
         executed_checked = sum(
             item.candidate in self._executed_branches for item in checked
@@ -740,6 +821,7 @@ class AutoFitCandidateDialog(QDialog):
             self.selection_status_label.setText("Select candidates to compare")
         self._update_calculated_groups()
         self._update_active_candidate_note()
+        self._sync_derived_view_controls()
 
         navigable = bool(executed_checked) and not self._running
         group_count = self._group_count()
@@ -750,20 +832,33 @@ class AutoFitCandidateDialog(QDialog):
             navigable and self.current_group_index + 1 < group_count
         )
 
+    def _sync_derived_view_controls(self) -> None:
+        available = bool(self._executed_branches)
+        if not available:
+            self.fwhm_visible = False
+            self.eisf_visible = False
+            for button in (self.fwhm_view_button, self.eisf_view_button):
+                blocker = QSignalBlocker(button)
+                button.setChecked(False)
+                del blocker
+        self.fwhm_view_button.setVisible(available)
+        self.eisf_view_button.setVisible(available)
+
     def _calculated_group_counts(self) -> tuple[int, int]:
         group_count = self._group_count()
         calculated = 0
         for candidate in self.checked_candidates:
+            processed = set(self._live_processed_groups.get(candidate.candidate, ()))
             cached = self._executed_branches.get(candidate.candidate)
-            if cached is None:
-                calculated += 1
-            elif cached.branch_result.status is MultiQExecutionStatus.COMPLETED:
-                calculated += group_count
-            else:
-                calculated += sum(
-                    outcome.status is not MultiQFitStatus.NOT_RUN
+            if cached is not None:
+                processed.update(
+                    outcome.group_index
                     for outcome in cached.branch_result.outcomes
+                    if outcome.status is not MultiQFitStatus.NOT_RUN
                 )
+            else:
+                processed.add(self.outcome.group_index)
+            calculated += len(processed)
         return calculated, len(self.checked_candidates) * group_count
 
     def _update_calculated_groups(self) -> None:
@@ -821,6 +916,59 @@ class AutoFitCandidateDialog(QDialog):
         self._draw_comparison()
         return True
 
+    def set_fwhm_y_scale(self, scale: str) -> bool:
+        """Change only the derived FWHM presentation scale."""
+
+        if scale not in {"linear", "log"}:
+            raise ValueError("FWHM y scale must be 'linear' or 'log'")
+        if scale == self.fwhm_y_scale:
+            return False
+        self._capture_view_state()
+        self.fwhm_y_scale = scale
+        self._fwhm_y_limits = None
+        self._draw_comparison()
+        return True
+
+    @Slot(bool)
+    def set_fwhm_visible(self, visible: bool) -> bool:
+        """Show or hide the global FWHM comparison row without fitting."""
+
+        if visible and not self._executed_branches:
+            blocker = QSignalBlocker(self.fwhm_view_button)
+            self.fwhm_view_button.setChecked(False)
+            del blocker
+            return False
+        if visible == self.fwhm_visible:
+            return False
+        self._capture_view_state()
+        self.fwhm_visible = visible
+        if self.fwhm_view_button.isChecked() != visible:
+            blocker = QSignalBlocker(self.fwhm_view_button)
+            self.fwhm_view_button.setChecked(visible)
+            del blocker
+        self._draw_comparison()
+        return True
+
+    @Slot(bool)
+    def set_eisf_visible(self, visible: bool) -> bool:
+        """Show or hide the global EISF comparison row without fitting."""
+
+        if visible and not self._executed_branches:
+            blocker = QSignalBlocker(self.eisf_view_button)
+            self.eisf_view_button.setChecked(False)
+            del blocker
+            return False
+        if visible == self.eisf_visible:
+            return False
+        self._capture_view_state()
+        self.eisf_visible = visible
+        if self.eisf_view_button.isChecked() != visible:
+            blocker = QSignalBlocker(self.eisf_view_button)
+            self.eisf_view_button.setChecked(visible)
+            del blocker
+        self._draw_comparison()
+        return True
+
     def set_current_group(self, group_index: int) -> bool:
         """Move every checked executed branch to one shared Q group."""
 
@@ -839,6 +987,10 @@ class AutoFitCandidateDialog(QDialog):
 
         self._x_limits = None
         self._y_limits = None
+        self._residual_y_limits = None
+        self._derived_q_limits = None
+        self._fwhm_y_limits = None
+        self._eisf_y_limits = None
         self._cancel_zoom(redraw=False)
         self._draw_comparison()
 
@@ -860,6 +1012,19 @@ class AutoFitCandidateDialog(QDialog):
                 lambda _checked, value=scale: self.set_y_scale(value)
             )
             scale_group.addAction(action)
+        if self.fwhm_visible:
+            fwhm_scale_menu = menu.addMenu("FWHM Y Scale")
+            assert fwhm_scale_menu is not None
+            fwhm_scale_group = QActionGroup(fwhm_scale_menu)
+            fwhm_scale_group.setExclusive(True)
+            for label, scale in (("Linear", "linear"), ("Log", "log")):
+                action = fwhm_scale_menu.addAction(label)
+                action.setCheckable(True)
+                action.setChecked(self.fwhm_y_scale == scale)
+                action.triggered.connect(
+                    lambda _checked, value=scale: self.set_fwhm_y_scale(value)
+                )
+                fwhm_scale_group.addAction(action)
         menu.addSeparator()
         reset_action = menu.addAction("Reset View")
         reset_action.triggered.connect(self.reset_view)
@@ -900,9 +1065,9 @@ class AutoFitCandidateDialog(QDialog):
         active = focused.candidate if focused is not None else None
         selected_count = len(self.checked_candidates)
         self.preview_title.setText(
-            f"Group {self.current_group_index + 1} / {self._group_count()} · "
-            f"{selected_count} selected"
+            f"Group {self.current_group_index + 1} / {self._group_count()}"
         )
+        self.preview_selection_label.setText(f"{selected_count} selected")
         self._draw_panels(compared, active_candidate=active)
 
     def _draw_candidate(self, candidate: CandidateFitResult | None) -> None:
@@ -911,6 +1076,7 @@ class AutoFitCandidateDialog(QDialog):
         self.preview_title.setText(
             "No candidate selected" if candidate is None else candidate.candidate.name
         )
+        self.preview_selection_label.clear()
         compared: tuple[_ComparisonEntry, ...] = (
             (
                 (
@@ -938,15 +1104,27 @@ class AutoFitCandidateDialog(QDialog):
         self._drawing_comparison = True
         figure = self.preview_canvas.figure
         self._cancel_zoom(redraw=False)
+        self._q_hover_marker = None
         figure.clear()
+        figure.set_layout_engine(None)
+        figure.subplots_adjust(
+            left=_COMPARISON_BASE_LEFT_MARGIN,
+            right=0.985,
+            bottom=0.08,
+            top=0.94,
+        )
         self.spectrum_axes = None
         self.residual_axes = None
         self.spectrum_axes_by_candidate.clear()
         self.residual_axes_by_candidate.clear()
+        self.fwhm_axes_by_candidate.clear()
+        self.eisf_axes_by_candidate.clear()
+        self.fwhm_current_markers_by_candidate.clear()
+        self.eisf_current_markers_by_candidate.clear()
         figure.set_facecolor(SCIENTIFIC_BACKGROUND)
         if not compared:
             self._comparison_columns = 1
-            self._set_comparison_canvas_minimum(1, 1)
+            self._set_comparison_canvas_minimum(1, 1, derived_row_count=0)
             axes = figure.add_subplot(111)
             axes.set_facecolor(SCIENTIFIC_BACKGROUND)
             axes.text(
@@ -966,7 +1144,24 @@ class AutoFitCandidateDialog(QDialog):
         columns = self._comparison_column_count(len(compared))
         self._comparison_columns = columns
         rows = (len(compared) + columns - 1) // columns
-        self._set_comparison_canvas_minimum(columns, rows)
+        derived_by_candidate = (
+            {
+                candidate.candidate: derived
+                for candidate, _fit, _status in compared
+                if (derived := self._derived_result(candidate.candidate)) is not None
+            }
+            if self.fwhm_visible or self.eisf_visible
+            else {}
+        )
+        self._set_comparison_canvas_minimum(
+            columns,
+            rows,
+            derived_row_count=(
+                int(self.fwhm_visible) + int(self.eisf_visible)
+                if derived_by_candidate
+                else 0
+            ),
+        )
         outer_grid = figure.add_gridspec(rows, columns, hspace=0.2, wspace=0.16)
         energy, intensity, uncertainty = self._measurement_for_group(
             self.current_group_index
@@ -985,13 +1180,56 @@ class AutoFitCandidateDialog(QDialog):
             shared_linthresh = symlog_linthresh(np.concatenate(scale_values))
 
         for index, (candidate, fit, status) in enumerate(compared):
-            panel_grid = outer_grid[index // columns, index % columns].subgridspec(
-                2, 1, height_ratios=(4.0, 1.0), hspace=0.06
-            )
-            spectrum_axes = figure.add_subplot(panel_grid[0])
-            residual_axes = figure.add_subplot(panel_grid[1], sharex=spectrum_axes)
+            leftmost_column = index % columns == 0
+            derived = derived_by_candidate.get(candidate.candidate)
+            if derived is None:
+                panel_grid = outer_grid[index // columns, index % columns].subgridspec(
+                    2, 1, height_ratios=(4.0, 1.0), hspace=0.0
+                )
+                spectrum_slot = panel_grid[0]
+                residual_slot = panel_grid[1]
+                derived_slot = None
+            else:
+                derived_row_count = int(self.fwhm_visible) + int(self.eisf_visible)
+                panel_grid = outer_grid[index // columns, index % columns].subgridspec(
+                    2,
+                    1,
+                    height_ratios=(5.0, 1.55 * derived_row_count),
+                    hspace=0.14,
+                )
+                upper_grid = panel_grid[0].subgridspec(
+                    2,
+                    1,
+                    height_ratios=(4.0, 1.0),
+                    hspace=0.0,
+                )
+                spectrum_slot = upper_grid[0]
+                residual_slot = upper_grid[1]
+                derived_slot = panel_grid[1]
+            spectrum_axes = figure.add_subplot(spectrum_slot)
+            residual_axes = figure.add_subplot(residual_slot, sharex=spectrum_axes)
+            fwhm_axes: Axes | None = None
+            eisf_axes: Axes | None = None
+            if derived is not None and derived_slot is not None:
+                if self.fwhm_visible and self.eisf_visible:
+                    derived_grid = derived_slot.subgridspec(
+                        2,
+                        1,
+                        height_ratios=(1.0, 1.25),
+                        hspace=0.0,
+                    )
+                    fwhm_axes = figure.add_subplot(derived_grid[0])
+                    eisf_axes = figure.add_subplot(derived_grid[1])
+                elif self.fwhm_visible:
+                    fwhm_axes = figure.add_subplot(derived_slot)
+                elif self.eisf_visible:
+                    eisf_axes = figure.add_subplot(derived_slot)
             is_active = candidate.candidate == active_candidate
-            for axes in (spectrum_axes, residual_axes):
+            for axes in tuple(
+                axes
+                for axes in (spectrum_axes, residual_axes, fwhm_axes, eisf_axes)
+                if axes is not None
+            ):
                 axes.set_facecolor(SCIENTIFIC_BACKGROUND)
                 axes.tick_params(colors=SCIENTIFIC_MEASURED_COLOR)
                 for spine in axes.spines.values():
@@ -1094,9 +1332,14 @@ class AutoFitCandidateDialog(QDialog):
                     color="#676764",
                     fontsize=8,
                 )
-            spectrum_axes.set_ylabel("Intensity")
+            spectrum_axes.set_ylabel("Intensity" if leftmost_column else "")
             spectrum_axes.grid(True, color="#e8e8e8", linewidth=0.6)
-            spectrum_axes.tick_params(axis="x", labelbottom=False)
+            spectrum_axes.tick_params(
+                axis="x",
+                which="both",
+                bottom=False,
+                labelbottom=False,
+            )
             if spectrum_axes.lines or spectrum_axes.containers:
                 spectrum_axes.legend(loc="best", fontsize=7.0)
             if self.y_scale == "log" and not self._has_positive_spectrum_value(fit):
@@ -1113,9 +1356,19 @@ class AutoFitCandidateDialog(QDialog):
             residual_axes.axhline(
                 0.0,
                 color=SCIENTIFIC_UNCERTAINTY_COLOR,
-                linewidth=0.7,
-                alpha=0.7,
+                linewidth=0.8,
+                alpha=0.75,
+                label="_residual_zero_reference",
             )
+            for guide in (-1.0, 1.0):
+                residual_axes.axhline(
+                    guide,
+                    color=SCIENTIFIC_UNCERTAINTY_COLOR,
+                    linewidth=0.6,
+                    linestyle="--",
+                    alpha=0.48,
+                    label=f"_residual_{guide:+g}_reference",
+                )
             energy_unit = (
                 fit.provenance.energy_unit
                 if fit is not None
@@ -1124,10 +1377,18 @@ class AutoFitCandidateDialog(QDialog):
                 ].energy_unit
             )
             residual_axes.set_xlabel(f"Energy ({energy_unit})")
-            residual_axes.set_ylabel("Std. residual")
+            residual_axes.set_ylabel("Std. residual" if leftmost_column else "")
             residual_axes.grid(True, color="#ededed", linewidth=0.5)
             self.spectrum_axes_by_candidate[candidate.candidate] = spectrum_axes
             self.residual_axes_by_candidate[candidate.candidate] = residual_axes
+            if derived is not None:
+                self._draw_derived_axes(
+                    candidate.candidate,
+                    derived,
+                    fwhm_axes,
+                    eisf_axes,
+                    show_ylabels=leftmost_column,
+                )
 
         self.spectrum_axes = (
             self.spectrum_axes_by_candidate.get(active_candidate)
@@ -1140,8 +1401,222 @@ class AutoFitCandidateDialog(QDialog):
             else None
         ) or next(iter(self.residual_axes_by_candidate.values()), None)
         self._apply_or_establish_shared_limits()
+        self._apply_or_establish_derived_limits()
         self.preview_canvas.draw_idle()  # type: ignore[no-untyped-call]
         self._drawing_comparison = False
+
+    def _derived_result(
+        self,
+        candidate: StandardModelCandidate,
+    ) -> DerivedQENSResult | None:
+        branch = self._executed_branches.get(candidate)
+        if branch is None:
+            return None
+        cached = self._derived_results.get(candidate)
+        if cached is not None and cached.source_branch is branch.branch_result:
+            return cached
+        q_bins = self.outcome.scientific_context.selection.dataset.q_bins
+        if q_bins is None:
+            raise RuntimeError("AutoFit derived comparison requires assigned Q bins")
+        derived = derive_qens(branch.branch_result, q_bins)
+        self._derived_results[candidate] = derived
+        return derived
+
+    def _draw_derived_axes(
+        self,
+        candidate: StandardModelCandidate,
+        derived: DerivedQENSResult,
+        fwhm_axes: Axes | None,
+        eisf_axes: Axes | None,
+        *,
+        show_ylabels: bool = True,
+    ) -> None:
+        q_values = np.asarray(derived.q_bins.q_values, dtype=np.float64)
+        display_order = np.argsort(q_values, kind="stable")
+        display_q_values = q_values[display_order]
+        styles = self._lorentzian_styles_by_candidate.get(candidate, {})
+        if fwhm_axes is not None and not styles:
+            fwhm_axes.text(
+                0.5,
+                0.5,
+                "No Lorentzian FWHM available",
+                transform=fwhm_axes.transAxes,
+                ha="center",
+                va="center",
+                color="#676764",
+                fontsize=8,
+            )
+        for identity, (label, color) in styles.items():
+            if fwhm_axes is None:
+                break
+            values = np.full(q_values.shape, np.nan, dtype=np.float64)
+            errors = np.full(q_values.shape, np.nan, dtype=np.float64)
+            for point in derived.points:
+                quantity = next(
+                    (item for item in point.lorentzians if item.component == identity),
+                    None,
+                )
+                if (
+                    quantity is None
+                    or quantity.validity is not DerivedValueStatus.AVAILABLE
+                ):
+                    continue
+                values[point.group_index] = quantity.fwhm_mev
+                if quantity.fwhm_standard_error_mev is not None:
+                    errors[point.group_index] = quantity.fwhm_standard_error_mev
+            display_values = values[display_order]
+            display_errors = errors[display_order]
+            fwhm_axes.plot(
+                display_q_values,
+                display_values,
+                color=color,
+                marker="o",
+                markersize=3.0,
+                linewidth=1.0,
+                label=label,
+            )
+            uncertainty_available = np.isfinite(display_values) & np.isfinite(
+                display_errors
+            )
+            if np.any(uncertainty_available):
+                fwhm_axes.errorbar(
+                    display_q_values[uncertainty_available],
+                    display_values[uncertainty_available],
+                    yerr=display_errors[uncertainty_available],
+                    fmt="none",
+                    ecolor=color,
+                    elinewidth=0.75,
+                    capsize=1.5,
+                )
+
+        if eisf_axes is not None:
+            eisf_values = np.full(q_values.shape, np.nan, dtype=np.float64)
+            eisf_errors = np.full(q_values.shape, np.nan, dtype=np.float64)
+            for point in derived.points:
+                eisf = point.eisf
+                if (
+                    eisf is None
+                    or eisf.validity is not DerivedValueStatus.AVAILABLE
+                    or eisf.value is None
+                ):
+                    continue
+                eisf_values[point.group_index] = eisf.value
+                if eisf.standard_error is not None:
+                    eisf_errors[point.group_index] = eisf.standard_error
+            display_eisf_values = eisf_values[display_order]
+            display_eisf_errors = eisf_errors[display_order]
+            eisf_axes.plot(
+                display_q_values,
+                display_eisf_values,
+                color=SCIENTIFIC_ELASTIC_COLOR,
+                marker="o",
+                markersize=3.0,
+                linewidth=1.0,
+                label="EISF",
+            )
+            eisf_uncertainty_available = np.isfinite(display_eisf_values) & np.isfinite(
+                display_eisf_errors
+            )
+            if np.any(eisf_uncertainty_available):
+                eisf_axes.errorbar(
+                    display_q_values[eisf_uncertainty_available],
+                    display_eisf_values[eisf_uncertainty_available],
+                    yerr=display_eisf_errors[eisf_uncertainty_available],
+                    fmt="none",
+                    ecolor=SCIENTIFIC_ELASTIC_COLOR,
+                    elinewidth=0.75,
+                    capsize=1.5,
+                )
+
+        if fwhm_axes is not None:
+            self._establish_derived_q_extent(fwhm_axes, derived)
+            self.fwhm_current_markers_by_candidate[candidate] = self._q_selection_box(
+                fwhm_axes,
+                derived,
+            )
+            fwhm_axes.set_ylabel("FWHM (meV)" if show_ylabels else "")
+            if self.fwhm_y_scale == "log":
+                fwhm_axes.set_yscale("log", nonpositive="mask")
+            else:
+                fwhm_axes.set_yscale("linear")
+            if eisf_axes is None:
+                fwhm_axes.set_xlabel("Q (Å⁻¹)")
+            else:
+                fwhm_axes.tick_params(
+                    axis="x",
+                    which="both",
+                    bottom=False,
+                    labelbottom=False,
+                )
+            fwhm_axes.grid(True, color="#ededed", linewidth=0.5)
+            if any(
+                not str(line.get_label()).startswith("_") for line in fwhm_axes.lines
+            ):
+                fwhm_axes.legend(loc="best", fontsize=7.0)
+            self.fwhm_axes_by_candidate[candidate] = fwhm_axes
+        if eisf_axes is not None:
+            self._establish_derived_q_extent(eisf_axes, derived)
+            self.eisf_current_markers_by_candidate[candidate] = self._q_selection_box(
+                eisf_axes,
+                derived,
+            )
+            eisf_axes.set_xlabel("Q (Å⁻¹)")
+            eisf_axes.set_ylabel("EISF" if show_ylabels else "")
+            eisf_axes.grid(True, color="#ededed", linewidth=0.5)
+            self.eisf_axes_by_candidate[candidate] = eisf_axes
+
+    @staticmethod
+    def _establish_derived_q_extent(axes: Axes, derived: DerivedQENSResult) -> None:
+        geometry = (
+            derived.q_bins.edges
+            if derived.q_bins.edges is not None
+            else derived.q_bins.q_values
+        )
+        axes.update_datalim(
+            np.column_stack((geometry, np.zeros_like(geometry))),
+            updatex=True,
+            updatey=False,
+        )
+        axes.autoscale_view(scalex=True, scaley=False)
+
+    def _q_selection_box(self, axes: Axes, derived: DerivedQENSResult) -> Rectangle:
+        edges = derived.q_bins.edges
+        if edges is not None:
+            left = float(edges[self.current_group_index])
+            right = float(edges[self.current_group_index + 1])
+            geometry_name = "currentQBinSelection"
+        else:
+            current_q = derived.point(self.current_group_index).q_value
+            display_half_width = (axes.get_xlim()[1] - axes.get_xlim()[0]) * 0.012
+            left = current_q - display_half_width
+            right = current_q + display_half_width
+            geometry_name = "currentRepresentativeQSelection"
+        box = Rectangle(
+            (left, 0.0),
+            right - left,
+            1.0,
+            transform=axes.get_xaxis_transform(),
+            fill=True,
+            zorder=6,
+            clip_on=False,
+            label="_current_q_selection",
+        )
+        box.set_gid(geometry_name)
+        self._style_q_selection(box, "drag" if self._q_drag_source else "default")
+        axes.add_patch(box)
+        return box
+
+    @staticmethod
+    def _style_q_selection(marker: Rectangle, state: str) -> None:
+        colors = Q_NAVIGATION_SELECTION
+        fill_alpha, linewidth = {
+            "default": (colors.default_fill_alpha, colors.default_linewidth),
+            "hover": (colors.hover_fill_alpha, colors.hover_linewidth),
+            "drag": (colors.drag_fill_alpha, colors.drag_linewidth),
+        }[state]
+        marker.set_facecolor(to_rgba(colors.fill, fill_alpha))
+        marker.set_edgecolor(to_rgba(colors.outline, 0.95))
+        marker.set_linewidth(linewidth)
 
     def _comparison_column_count(self, candidate_count: int) -> int:
         available_width = max(
@@ -1151,10 +1626,22 @@ class AutoFitCandidateDialog(QDialog):
         width_columns = max(1, available_width // _MIN_COMPARISON_PANEL_WIDTH)
         return min(candidate_count, width_columns, _MAX_COMPARISON_COLUMNS)
 
-    def _set_comparison_canvas_minimum(self, columns: int, rows: int) -> None:
+    def _set_comparison_canvas_minimum(
+        self,
+        columns: int,
+        rows: int,
+        *,
+        derived_row_count: int,
+    ) -> None:
+        if derived_row_count == 2:
+            panel_height = _MIN_DOUBLE_DERIVED_COMPARISON_PANEL_HEIGHT
+        elif derived_row_count == 1:
+            panel_height = _MIN_SINGLE_DERIVED_COMPARISON_PANEL_HEIGHT
+        else:
+            panel_height = _MIN_COMPARISON_PANEL_HEIGHT
         self.preview_canvas.setMinimumSize(
             columns * _MIN_COMPARISON_PANEL_WIDTH,
-            rows * _MIN_COMPARISON_PANEL_HEIGHT,
+            rows * panel_height,
         )
 
     @Slot()
@@ -1170,6 +1657,43 @@ class AutoFitCandidateDialog(QDialog):
         self._capture_view_state()
         self._draw_comparison()
 
+    def _fit_comparison_left_margin(self, event: DrawEvent) -> None:
+        """Keep rendered Y decorations in the figure at narrow panel widths."""
+
+        figure = self.preview_canvas.figure
+        if not figure.axes:
+            return
+        renderer = event.renderer
+        leftmost_axes_x = min(axes.bbox.xmin for axes in figure.axes)
+        decoration_x: list[float] = []
+        for axes in figure.axes:
+            if axes.get_ylabel():
+                decoration_x.append(
+                    float(axes.yaxis.label.get_window_extent(renderer).xmin)
+                )
+            for label in axes.get_yticklabels():
+                if label.get_visible() and label.get_text():
+                    decoration_x.append(float(label.get_window_extent(renderer).xmin))
+            offset_label = axes.yaxis.get_offset_text()
+            if offset_label.get_visible() and offset_label.get_text():
+                decoration_x.append(
+                    float(offset_label.get_window_extent(renderer).xmin)
+                )
+        if not decoration_x:
+            return
+        clearance = float(leftmost_axes_x - min(decoration_x))
+        figure_width = float(figure.bbox.width)
+        if figure_width <= 0.0:
+            return
+        target_left = max(
+            _COMPARISON_BASE_LEFT_MARGIN,
+            (clearance + 4.0 * self.preview_canvas.device_pixel_ratio) / figure_width,
+        )
+        if abs(target_left - figure.subplotpars.left) * figure_width <= 1.0:
+            return
+        figure.subplots_adjust(left=target_left)
+        self.preview_canvas.draw_idle()  # type: ignore[no-untyped-call]
+
     @staticmethod
     def _anchor_lorentzian_styles(
         candidate: CandidateFitResult,
@@ -1177,6 +1701,8 @@ class AutoFitCandidateDialog(QDialog):
         fit = candidate.fit
         if fit is None:
             return {}
+        fitted_model = fit.fitted_model
+        assert fitted_model is not None
         return {
             component.identity: (
                 f"L{index + 1}",
@@ -1184,7 +1710,7 @@ class AutoFitCandidateDialog(QDialog):
                     min(index, len(SCIENTIFIC_LORENTZIAN_COLORS) - 1)
                 ],
             )
-            for index, component in enumerate(fit.configuration.lorentzians)
+            for index, component in enumerate(fitted_model.lorentzians)
         }
 
     def _component_style(
@@ -1224,6 +1750,46 @@ class AutoFitCandidateDialog(QDialog):
                 axes.set_ylim(self._y_limits)
         for axes in residual_axes:
             axes.set_xlim(self._x_limits)
+        if self._residual_y_limits is None and residual_axes:
+            residual_limits = tuple(axes.get_ylim() for axes in residual_axes)
+            self._residual_y_limits = (
+                min(float(limits[0]) for limits in residual_limits),
+                max(float(limits[1]) for limits in residual_limits),
+            )
+        if self._residual_y_limits is not None:
+            for axes in residual_axes:
+                axes.set_ylim(self._residual_y_limits)
+
+    def _apply_or_establish_derived_limits(self) -> None:
+        fwhm_axes = tuple(self.fwhm_axes_by_candidate.values())
+        eisf_axes = tuple(self.eisf_axes_by_candidate.values())
+        all_axes = (*fwhm_axes, *eisf_axes)
+        if not all_axes:
+            return
+        if self._derived_q_limits is None:
+            q_limits = tuple(axes.get_xlim() for axes in all_axes)
+            self._derived_q_limits = (
+                min(float(limits[0]) for limits in q_limits),
+                max(float(limits[1]) for limits in q_limits),
+            )
+        if self._fwhm_y_limits is None and fwhm_axes:
+            y_limits = tuple(axes.get_ylim() for axes in fwhm_axes)
+            self._fwhm_y_limits = (
+                min(float(limits[0]) for limits in y_limits),
+                max(float(limits[1]) for limits in y_limits),
+            )
+        if self._eisf_y_limits is None and eisf_axes:
+            self._eisf_y_limits = (-0.1, 1.1)
+        for axes in all_axes:
+            axes.set_xlim(self._derived_q_limits)
+        for axes in fwhm_axes:
+            if self._fwhm_y_limits is not None and (
+                self.fwhm_y_scale != "log" or min(self._fwhm_y_limits) > 0.0
+            ):
+                axes.set_ylim(self._fwhm_y_limits)
+        if self._eisf_y_limits is not None:
+            for axes in eisf_axes:
+                axes.set_ylim(self._eisf_y_limits)
 
     def _measurement_for_group(
         self, group_index: int
@@ -1262,6 +1828,9 @@ class AutoFitCandidateDialog(QDialog):
         self._run_candidates = pending
         self._run_result = None
         self._run_error = None
+        self._run_generation += 1
+        self._active_run_generation = self._run_generation
+        self._live_processed_groups.clear()
         self._cancel_event = Event()
         self.progress_label.show()
         self.progress_bar.show()
@@ -1275,9 +1844,11 @@ class AutoFitCandidateDialog(QDialog):
             self.outcome,
             pending,
             self._cancel_event,
+            self._run_generation,
         )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
+        worker.progress.connect(self._execution_progress)
         worker.completed.connect(self._execution_completed)
         worker.failed.connect(self._execution_failed)
         worker.completed.connect(thread.quit)
@@ -1300,16 +1871,38 @@ class AutoFitCandidateDialog(QDialog):
         self.cancel_button.setEnabled(False)
         return True
 
+    @Slot(int, object)
+    def _execution_progress(self, generation: int, event: object) -> None:
+        if (
+            generation != self._active_run_generation
+            or not self._running
+            or self._run_result is not None
+            or self._run_error is not None
+            or not isinstance(event, SelectedAutoFitProgressEvent)
+            or event.candidate not in self._run_candidates
+            or event.outcome.status is MultiQFitStatus.NOT_RUN
+            or not 0 <= event.outcome.group_index < self._group_count()
+        ):
+            return
+        self._live_processed_groups.setdefault(event.candidate, set()).add(
+            event.outcome.group_index
+        )
+        self._update_calculated_groups()
+
     @Slot(object)
     def _execution_completed(self, result: object) -> None:
         if not isinstance(result, SelectedAutoFitMultiQResult):
             self._run_error = TypeError(
                 "selected-candidate worker returned an unexpected result"
             )
+            self._live_processed_groups.clear()
+            self._update_calculated_groups()
             return
         self._run_result = result
         for branch in result.branches:
             self._executed_branches[branch.candidate] = branch
+            self._derived_results.pop(branch.candidate, None)
+        self._live_processed_groups.clear()
         self._update_calculated_groups()
         self.selection_status_label.setText(
             "Run cancelled; completed and partial branches were retained."
@@ -1322,6 +1915,8 @@ class AutoFitCandidateDialog(QDialog):
         self._run_error = (
             error if isinstance(error, Exception) else RuntimeError(str(error))
         )
+        self._live_processed_groups.clear()
+        self._update_calculated_groups()
         self.selection_status_label.setText(f"Run failed: {self._run_error}")
 
     @Slot()
@@ -1330,6 +1925,8 @@ class AutoFitCandidateDialog(QDialog):
         self._worker = None
         self._worker_thread = None
         self._cancel_event = None
+        self._active_run_generation = None
+        self._live_processed_groups.clear()
         self.progress_bar.hide()
         self.cancel_button.setText("Cancel")
         self.cancel_button.setEnabled(True)
@@ -1377,12 +1974,28 @@ class AutoFitCandidateDialog(QDialog):
         self.accept()
 
     def _capture_view_state(self) -> None:
-        if self.spectrum_axes is None:
-            return
-        x_limits = self.spectrum_axes.get_xlim()
-        y_limits = self.spectrum_axes.get_ylim()
-        self._x_limits = (float(x_limits[0]), float(x_limits[1]))
-        self._y_limits = (float(y_limits[0]), float(y_limits[1]))
+        if self.spectrum_axes is not None:
+            x_limits = self.spectrum_axes.get_xlim()
+            y_limits = self.spectrum_axes.get_ylim()
+            self._x_limits = (float(x_limits[0]), float(x_limits[1]))
+            self._y_limits = (float(y_limits[0]), float(y_limits[1]))
+        residual_axes = next(iter(self.residual_axes_by_candidate.values()), None)
+        if residual_axes is not None:
+            residual_y_limits = residual_axes.get_ylim()
+            self._residual_y_limits = (
+                float(residual_y_limits[0]),
+                float(residual_y_limits[1]),
+            )
+        fwhm_axes = next(iter(self.fwhm_axes_by_candidate.values()), None)
+        eisf_axes = next(iter(self.eisf_axes_by_candidate.values()), None)
+        if fwhm_axes is not None:
+            q_limits = fwhm_axes.get_xlim()
+            y_limits = fwhm_axes.get_ylim()
+            self._derived_q_limits = (float(q_limits[0]), float(q_limits[1]))
+            self._fwhm_y_limits = (float(y_limits[0]), float(y_limits[1]))
+        if eisf_axes is not None:
+            y_limits = eisf_axes.get_ylim()
+            self._eisf_y_limits = (float(y_limits[0]), float(y_limits[1]))
 
     def _on_scroll(self, event: MouseEvent) -> None:
         if event.x is None or event.y is None:
@@ -1390,39 +2003,110 @@ class AutoFitCandidateDialog(QDialog):
         touched = event.inaxes
         spectrum_axes = tuple(self.spectrum_axes_by_candidate.values())
         residual_axes = tuple(self.residual_axes_by_candidate.values())
-        if touched not in (*spectrum_axes, *residual_axes):
+        fwhm_axes = tuple(self.fwhm_axes_by_candidate.values())
+        eisf_axes = tuple(self.eisf_axes_by_candidate.values())
+        if touched not in (*spectrum_axes, *residual_axes, *fwhm_axes, *eisf_axes):
+            self._scroll_comparison_area(event)
             return
         assert touched is not None
         x_cursor, y_cursor = touched.transData.inverted().transform((event.x, event.y))
         scale = 0.8 if event.button == "up" else 1.25
-        current_x_limits = self._x_limits or touched.get_xlim()
-        self._x_limits = zoom_limits(current_x_limits, float(x_cursor), scale)
+        if touched in (*spectrum_axes, *residual_axes):
+            current_x_limits = self._x_limits or touched.get_xlim()
+            self._x_limits = zoom_limits(current_x_limits, float(x_cursor), scale)
+        else:
+            current_x_limits = self._derived_q_limits or touched.get_xlim()
+            self._derived_q_limits = zoom_limits(
+                current_x_limits,
+                float(x_cursor),
+                scale,
+            )
         if touched in spectrum_axes:
             current_y_limits = self._y_limits or touched.get_ylim()
             self._y_limits = zoom_limits(current_y_limits, float(y_cursor), scale)
+        elif touched in residual_axes:
+            current_y_limits = self._residual_y_limits or touched.get_ylim()
+            self._residual_y_limits = zoom_limits(
+                current_y_limits,
+                float(y_cursor),
+                scale,
+            )
+        elif touched in fwhm_axes:
+            current_y_limits = self._fwhm_y_limits or touched.get_ylim()
+            self._fwhm_y_limits = zoom_limits(
+                current_y_limits,
+                float(y_cursor),
+                scale,
+            )
+        elif touched in eisf_axes:
+            current_y_limits = self._eisf_y_limits or touched.get_ylim()
+            self._eisf_y_limits = zoom_limits(
+                current_y_limits,
+                float(y_cursor),
+                scale,
+            )
         self._apply_or_establish_shared_limits()
+        self._apply_or_establish_derived_limits()
         self.preview_canvas.draw_idle()  # type: ignore[no-untyped-call]
+
+    def _scroll_comparison_area(self, event: MouseEvent) -> None:
+        if self.preview_canvas.pointer_capture_active:
+            return
+        gui_event = getattr(event, "guiEvent", None)
+        if not isinstance(gui_event, QWheelEvent):
+            return
+        pixel_delta = gui_event.pixelDelta().y()
+        scrollbar = self.comparison_scroll_area.verticalScrollBar()
+        if pixel_delta:
+            scroll_delta = pixel_delta
+        else:
+            angle_delta = gui_event.angleDelta().y()
+            if not angle_delta:
+                return
+            scroll_delta = round(
+                angle_delta
+                / 120.0
+                * QApplication.wheelScrollLines()
+                * scrollbar.singleStep()
+            )
+        scrollbar.setValue(scrollbar.value() - scroll_delta)
+        gui_event.accept()
 
     def _on_button_press(self, event: MouseEvent) -> None:
         touched = event.inaxes
-        if (
-            event.button is not MouseButton.LEFT
-            or touched not in self.spectrum_axes_by_candidate.values()
-            or event.xdata is None
-            or event.ydata is None
-        ):
+        draggable_axes = (
+            *self.spectrum_axes_by_candidate.values(),
+            *self.residual_axes_by_candidate.values(),
+            *self.fwhm_axes_by_candidate.values(),
+            *self.eisf_axes_by_candidate.values(),
+        )
+        if event.button is not MouseButton.LEFT or touched not in draggable_axes:
             return
         if getattr(event, "dblclick", False):
-            self.reset_view()
+            if touched in self.eisf_axes_by_candidate.values():
+                self._autoscale_eisf_y()
+            else:
+                self.reset_view()
             return
-        display_point = self._event_display_point(event)
+        selector = self._q_selector_at(event)
+        if selector is not None:
+            self._cancel_zoom(redraw=False)
+            self._q_drag_source = selector
+            self._q_hover_marker = None
+            self._style_all_q_selections("drag")
+            self.preview_canvas.begin_pointer_capture()
+            self.preview_canvas.draw_idle()  # type: ignore[no-untyped-call]
+            return
+        if event.xdata is None or event.ydata is None:
+            return
+        assert touched is not None
+        display_point = self._event_display_point(event, touched)
         if display_point is None:
             return
         start = (float(event.xdata), float(event.ydata))
         self._cancel_zoom(redraw=False)
         self._zoom_start = start
         self._zoom_start_display = display_point
-        assert touched is not None
         self._zoom_axes = touched
         self._zoom_rectangle = Rectangle(
             start,
@@ -1435,19 +2119,137 @@ class AutoFitCandidateDialog(QDialog):
             zorder=7,
         )
         touched.add_patch(self._zoom_rectangle)
+        self.preview_canvas.begin_pointer_capture()
+        self.preview_canvas.draw_idle()  # type: ignore[no-untyped-call]
+
+    def _autoscale_eisf_y(self) -> None:
+        """Reveal all plotted EISF values and uncertainty extents, leaving Q fixed."""
+
+        limits: list[tuple[float, float]] = []
+        for axes in self.eisf_axes_by_candidate.values():
+            if not np.all(np.isfinite(axes.dataLim.intervaly)):
+                continue
+            axes.autoscale(enable=True, axis="y")
+            axes.autoscale_view(scalex=False, scaley=True)
+            lower, upper = axes.get_ylim()
+            limits.append((float(lower), float(upper)))
+        if not limits:
+            return
+        self._eisf_y_limits = (
+            min(lower for lower, _upper in limits),
+            max(upper for _lower, upper in limits),
+        )
+        self._apply_or_establish_derived_limits()
+        self.preview_canvas.draw_idle()  # type: ignore[no-untyped-call]
+
+    def _q_selector_at(
+        self, event: MouseEvent
+    ) -> tuple[StandardModelCandidate, str] | None:
+        event_x = getattr(event, "x", None)
+        event_y = getattr(event, "y", None)
+        if event_x is None or event_y is None:
+            return None
+        touched = getattr(event, "inaxes", None)
+        for plot, axes_by_candidate, markers in (
+            (
+                "fwhm",
+                self.fwhm_axes_by_candidate,
+                self.fwhm_current_markers_by_candidate,
+            ),
+            (
+                "eisf",
+                self.eisf_axes_by_candidate,
+                self.eisf_current_markers_by_candidate,
+            ),
+        ):
+            for candidate, axes in axes_by_candidate.items():
+                marker = markers[candidate]
+                if axes is touched and marker.contains_point((event_x, event_y)):
+                    return candidate, plot
+        return None
+
+    def _style_all_q_selections(self, state: str) -> None:
+        for marker in (
+            *self.fwhm_current_markers_by_candidate.values(),
+            *self.eisf_current_markers_by_candidate.values(),
+        ):
+            self._style_q_selection(marker, state)
+
+    def _update_q_selection_hover(self, event: MouseEvent) -> None:
+        selector = self._q_selector_at(event)
+        hovered: Rectangle | None = None
+        if selector is not None:
+            candidate, plot = selector
+            markers = (
+                self.fwhm_current_markers_by_candidate
+                if plot == "fwhm"
+                else self.eisf_current_markers_by_candidate
+            )
+            hovered = markers[candidate]
+        if hovered is self._q_hover_marker:
+            return
+        if self._q_hover_marker is not None and self._q_hover_marker.axes is not None:
+            self._style_q_selection(self._q_hover_marker, "default")
+        self._q_hover_marker = hovered
+        if hovered is not None:
+            self._style_q_selection(hovered, "hover")
+        self.preview_canvas.draw_idle()  # type: ignore[no-untyped-call]
+
+    @staticmethod
+    def _group_at_q_coordinate(q_bins: QBins, q_coordinate: float) -> int:
+        if q_bins.edges is not None:
+            group = int(np.searchsorted(q_bins.edges, q_coordinate, side="right")) - 1
+        else:
+            group = int(np.argmin(np.abs(q_bins.q_values - q_coordinate)))
+        return max(0, min(group, q_bins.q_values.size - 1))
+
+    def _move_q_selection(self, event: MouseEvent) -> None:
+        source = self._q_drag_source
+        if source is None or event.x is None:
+            return
+        candidate, plot = source
+        axes_by_candidate = (
+            self.fwhm_axes_by_candidate
+            if plot == "fwhm"
+            else self.eisf_axes_by_candidate
+        )
+        axes = axes_by_candidate.get(candidate)
+        derived = self._derived_result(candidate)
+        if axes is None or derived is None:
+            return
+        display_x = float(np.clip(event.x, axes.bbox.xmin, axes.bbox.xmax))
+        display_y = float(axes.bbox.ymin + axes.bbox.height / 2.0)
+        q_coordinate = float(
+            axes.get_xaxis_transform().inverted().transform((display_x, display_y))[0]
+        )
+        group = self._group_at_q_coordinate(derived.q_bins, q_coordinate)
+        if group != self.current_group_index:
+            self.set_current_group(group)
+
+    def _end_q_selection_drag(self) -> None:
+        if self._q_drag_source is None:
+            return
+        self._q_drag_source = None
+        self.preview_canvas.end_pointer_capture()
+        self._style_all_q_selections("default")
         self.preview_canvas.draw_idle()  # type: ignore[no-untyped-call]
 
     def _on_mouse_motion(self, event: MouseEvent) -> None:
-        if (
-            self._zoom_start is None
-            or self._zoom_rectangle is None
-            or event.inaxes is not self._zoom_axes
-            or event.xdata is None
-            or event.ydata is None
-        ):
+        if self._q_drag_source is not None:
+            self._move_q_selection(event)
+            return
+        self._update_q_selection_hover(event)
+        axes = self._zoom_axes
+        if self._zoom_start is None or self._zoom_rectangle is None or axes is None:
+            return
+        display_point = self._event_display_point(event, axes)
+        if display_point is None:
             return
         start_x, start_y = self._zoom_start
-        end_x, end_y = float(event.xdata), float(event.ydata)
+        (end_x, end_y), _clamped_display = clamped_axes_data_point(
+            axes,
+            display_point,
+        )
         self._zoom_rectangle.set_bounds(
             min(start_x, end_x),
             min(start_y, end_y),
@@ -1457,19 +2259,23 @@ class AutoFitCandidateDialog(QDialog):
         self.preview_canvas.draw_idle()  # type: ignore[no-untyped-call]
 
     def _on_button_release(self, event: MouseEvent) -> None:
+        if self._q_drag_source is not None:
+            self._move_q_selection(event)
+            self._end_q_selection_drag()
+            return
         start = self._zoom_start
         start_display = self._zoom_start_display
+        zoom_axes = self._zoom_axes
         if start is None or start_display is None:
             return
-        if (
-            event.inaxes is not self._zoom_axes
-            or event.xdata is None
-            or event.ydata is None
-        ):
+        if zoom_axes is None:
             self._cancel_zoom()
             return
-        end = (float(event.xdata), float(event.ydata))
-        end_display = self._event_display_point(event)
+        display_point = self._event_display_point(event, zoom_axes)
+        if display_point is None:
+            self._cancel_zoom()
+            return
+        end, end_display = clamped_axes_data_point(zoom_axes, display_point)
         self._cancel_zoom(redraw=False)
         if (
             end_display is None
@@ -1486,17 +2292,34 @@ class AutoFitCandidateDialog(QDialog):
         if x_limits[0] == x_limits[1] or y_limits[0] == y_limits[1]:
             self.preview_canvas.draw_idle()  # type: ignore[no-untyped-call]
             return
-        self._x_limits = x_limits
-        self._y_limits = y_limits
+        if zoom_axes in self.spectrum_axes_by_candidate.values():
+            self._x_limits = x_limits
+            self._y_limits = y_limits
+        elif zoom_axes in self.residual_axes_by_candidate.values():
+            self._x_limits = x_limits
+            self._residual_y_limits = y_limits
+        elif zoom_axes in self.fwhm_axes_by_candidate.values():
+            self._derived_q_limits = x_limits
+            self._fwhm_y_limits = y_limits
+        elif zoom_axes in self.eisf_axes_by_candidate.values():
+            self._derived_q_limits = x_limits
+            self._eisf_y_limits = y_limits
         self._apply_or_establish_shared_limits()
+        self._apply_or_establish_derived_limits()
         self.preview_canvas.draw_idle()  # type: ignore[no-untyped-call]
 
-    def _event_display_point(self, event: MouseEvent) -> tuple[float, float] | None:
-        if event.x is not None and event.y is not None:
-            return float(event.x), float(event.y)
-        if self._zoom_axes is None or event.xdata is None or event.ydata is None:
+    def _event_display_point(
+        self,
+        event: MouseEvent,
+        axes: Axes,
+    ) -> tuple[float, float] | None:
+        event_x = getattr(event, "x", None)
+        event_y = getattr(event, "y", None)
+        if event_x is not None and event_y is not None:
+            return float(event_x), float(event_y)
+        if event.xdata is None or event.ydata is None:
             return None
-        point = self._zoom_axes.transData.transform((event.xdata, event.ydata))
+        point = axes.transData.transform((event.xdata, event.ydata))
         return float(point[0]), float(point[1])
 
     def _cancel_zoom(self, *, redraw: bool = True) -> None:
@@ -1505,6 +2328,8 @@ class AutoFitCandidateDialog(QDialog):
         self._zoom_start = None
         self._zoom_start_display = None
         self._zoom_axes = None
+        if self._q_drag_source is None:
+            self.preview_canvas.end_pointer_capture()
         if rectangle is not None and rectangle.axes is not None:
             rectangle.remove()
             if redraw:

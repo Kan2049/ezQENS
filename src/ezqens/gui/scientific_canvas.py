@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+from matplotlib.axes import Axes
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 
@@ -45,6 +46,18 @@ def zoom_limits(
     )
 
 
+def clamped_axes_data_point(
+    axes: Axes,
+    display_point: tuple[float, float],
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    """Clamp a display-space drag point to *axes* and return data/display pairs."""
+
+    display_x = float(np.clip(display_point[0], axes.bbox.xmin, axes.bbox.xmax))
+    display_y = float(np.clip(display_point[1], axes.bbox.ymin, axes.bbox.ymax))
+    data_x, data_y = axes.transData.inverted().transform((display_x, display_y))
+    return (float(data_x), float(data_y)), (display_x, display_y)
+
+
 def create_empty_figure() -> Figure:
     """Create an empty scientific figure without placeholder analysis data."""
     return Figure(facecolor=SCIENTIFIC_BACKGROUND, layout="constrained")
@@ -55,6 +68,27 @@ class ScientificCanvas(FigureCanvasQTAgg):
 
     def __init__(self) -> None:
         super().__init__(create_empty_figure())  # type: ignore[no-untyped-call]
+        self._pointer_capture_active = False
         self.setObjectName("scientificCanvas")
         self.setMinimumSize(320, 240)
         self.figure.set_facecolor(SCIENTIFIC_BACKGROUND)
+
+    @property
+    def pointer_capture_active(self) -> bool:
+        """Whether a canvas-owned pointer gesture is currently active."""
+
+        return self._pointer_capture_active
+
+    def begin_pointer_capture(self) -> None:
+        """Own pointer delivery until the current scientific gesture ends."""
+
+        self._pointer_capture_active = True
+        if self.isVisible() and self.mouseGrabber() is not self:
+            self.grabMouse()
+
+    def end_pointer_capture(self) -> None:
+        """Release pointer ownership after completion or cancellation."""
+
+        self._pointer_capture_active = False
+        if self.mouseGrabber() is self:
+            self.releaseMouse()

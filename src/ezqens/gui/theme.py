@@ -41,6 +41,23 @@ TYPOGRAPHY = TypographyTokens()
 
 
 @dataclass(frozen=True)
+class QNavigationSelectionTokens:
+    """Presentation colors for the plot's non-scientific Q navigation selector."""
+
+    fill: str = "#efd879"
+    outline: str = "#b88929"
+    default_fill_alpha: float = 0.14
+    hover_fill_alpha: float = 0.21
+    drag_fill_alpha: float = 0.28
+    default_linewidth: float = 1.2
+    hover_linewidth: float = 1.6
+    drag_linewidth: float = 1.9
+
+
+Q_NAVIGATION_SELECTION = QNavigationSelectionTokens()
+
+
+@dataclass(frozen=True)
 class LayoutTokens:
     """Small set of static production dimensions for application chrome."""
 
@@ -554,6 +571,23 @@ QMenu::separator {{
 #autoFitCandidateReducedChiSquare,
 #autoFitCandidateRecommendation {{
     font-size: {TYPOGRAPHY.secondary_size}px;
+}}
+#autoFitDialog QToolButton[viewToggle="true"] {{
+    background: transparent;
+    border-color: {tokens.border_subtle};
+    border-radius: {tokens.control_radius + 2}px;
+    padding-left: {layout.control_horizontal_padding - 2}px;
+    padding-right: {layout.control_horizontal_padding - 2}px;
+}}
+#autoFitDialog QToolButton[viewToggle="true"]:hover {{
+    background: {tokens.surface_hover};
+    border-color: {tokens.border_subtle};
+}}
+#autoFitDialog QToolButton[viewToggle="true"]:checked {{
+    background: {tokens.surface_selected};
+    border-color: {tokens.border_focus};
+    border-style: inset;
+    font-weight: 600;
 }}
 #autoFitUseCandidateButton {{
     background: {tokens.surface_selected};
