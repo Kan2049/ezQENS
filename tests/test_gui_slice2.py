@@ -248,7 +248,6 @@ def test_imported_dave_metadata_populates_the_existing_gui_workflow(
 
     window.open_dataset(project, state)
     view = window.dataset_view
-    assert view.current_q_label.text().startswith("Q = 0.575")
     assert view.overview_q_axis is not None
     assert view.spectrum_axes is not None
     assert view.spectrum_axes.get_title(loc="left").startswith("Q = 0.575")
@@ -1044,7 +1043,8 @@ def test_q_application_updates_viewer_but_does_not_implicitly_save_method(
     assert window.dataset_view.q_editor.apply()
     assert window._open_dataset is not None
     assert window._open_dataset.dataset.q_bins is not None
-    assert window.dataset_view.current_q_label.text() == "Q = 0.42 Å⁻¹"
+    assert window.dataset_view.spectrum_axes is not None
+    assert window.dataset_view.spectrum_axes.get_title(loc="left") == "Q = 0.42 Å⁻¹"
     assert project.q_methods == []
     window.close()
 

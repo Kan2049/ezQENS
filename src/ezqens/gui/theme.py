@@ -68,6 +68,7 @@ class LayoutTokens:
     row_spacing: int = 5
     section_spacing: int = 8
     toolbar_spacing: int = 4
+    scientific_workspace_min_width: int = 520
 
 
 DEFAULT_LAYOUT_TOKENS = LayoutTokens()
@@ -346,6 +347,10 @@ QToolButton[controlKind="split"]::menu-arrow {{
 #inspectorButton:checked {{
     background: {tokens.surface_selected};
     border-color: transparent;
+}}
+#overviewToggleButton:checked {{
+    background: {tokens.surface_selected};
+    border-color: {tokens.border_focus};
 }}
 #centralManualFitButton, #centralAutoFitButton {{
     border-color: transparent;

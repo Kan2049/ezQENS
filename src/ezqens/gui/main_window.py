@@ -355,6 +355,9 @@ class MainWindow(QMainWindow):
         self.resize(1200, 760)
         self.setMinimumSize(760, 520)
         self._inspector_expansion_width = 0
+        self._inspector_preopen_width: int | None = None
+        self._inspector_preopen_minimum_width: int | None = None
+        self._inspector_forced_minimum_width: int | None = None
         self._appearance_controller = application_appearance_controller(
             _active_application(),
         )
@@ -494,6 +497,8 @@ class MainWindow(QMainWindow):
             return
 
         if visible:
+            self._inspector_preopen_width = self.width()
+            self._inspector_preopen_minimum_width = self.minimumWidth()
             canvas_width = self.scientific_canvas.width()
             desired_width = max(
                 self.inspector.minimumWidth(),
@@ -501,6 +506,7 @@ class MainWindow(QMainWindow):
             )
             self._inspector_expansion_width = self._expand_for_inspector()
             self.inspector.show()
+            self._enforce_inspector_minimum_width()
             self.splitter.setSizes(
                 [
                     max(self.workspace.width(), 200),
@@ -514,8 +520,31 @@ class MainWindow(QMainWindow):
                 self.inspector.width(),
             )
             self.inspector.hide()
-            self._reverse_inspector_expansion()
+            restore_width = self._inspector_preopen_width
+            restore_minimum = self._inspector_preopen_minimum_width or 760
+            current_minimum = self.minimumWidth()
+            if current_minimum != self._inspector_forced_minimum_width:
+                restore_minimum = max(restore_minimum, current_minimum)
+            self.setMinimumWidth(restore_minimum)
+            self._inspector_expansion_width = 0
+            if restore_width is not None:
+                self.resize(max(restore_width, self.minimumWidth()), self.height())
+            self._inspector_preopen_width = None
+            self._inspector_preopen_minimum_width = None
+            self._inspector_forced_minimum_width = None
         self._sync_inspector_controls(visible)
+
+    def _enforce_inspector_minimum_width(self) -> None:
+        """Grow the shell before its sidebar can overlap the scientific area."""
+
+        required = (
+            self.workspace.minimumWidth()
+            + self.central_workspace.minimumWidth()
+            + self.inspector.minimumWidth()
+            + 2 * self.splitter.handleWidth()
+        )
+        self._inspector_forced_minimum_width = required
+        self.setMinimumWidth(required)
 
     def _create_actions(self) -> None:
         self.new_project_action = QAction("New Project", self)
@@ -631,7 +660,9 @@ class MainWindow(QMainWindow):
     def _build_central_workspace(self) -> QWidget:
         central_workspace = QWidget()
         central_workspace.setObjectName("centralScientificWorkspace")
-        central_workspace.setMinimumWidth(320)
+        central_workspace.setMinimumWidth(
+            DEFAULT_LAYOUT_TOKENS.scientific_workspace_min_width,
+        )
         central_header = QFrame()
         central_header.setObjectName("centralHeader")
         central_header.setFixedHeight(38)
@@ -639,18 +670,6 @@ class MainWindow(QMainWindow):
         self.project_context_label = QLabel()
         self.project_context_label.setObjectName("projectContextLabel")
         self.project_context_label.setVisible(False)
-
-        self.manual_fit_button = QToolButton()
-        self.manual_fit_button.setObjectName("centralManualFitButton")
-        self.manual_fit_button.setText("Fitting Parameters")
-        self.manual_fit_button.setCheckable(True)
-        self.manual_fit_button.setEnabled(False)
-        self.manual_fit_button.setToolTip(
-            "Open Fitting Parameters for the currently open Sample",
-        )
-        self.manual_fit_button.clicked.connect(
-            lambda _checked=False: self.show_manual_fit(),
-        )
 
         self.auto_fit_button = QToolButton()
         self.auto_fit_button.setObjectName("centralAutoFitButton")
@@ -666,7 +685,10 @@ class MainWindow(QMainWindow):
         self.inspector_button = QToolButton()
         self.inspector_button.setObjectName("inspectorButton")
         self.inspector_button.setCheckable(True)
-        self.inspector_button.setFixedSize(26, 26)
+        self.inspector_button.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonTextBesideIcon,
+        )
+        self.inspector_button.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
         self.inspector_button.toggled.connect(self.set_inspector_visible)
 
         header_layout = QHBoxLayout(central_header)
@@ -675,7 +697,6 @@ class MainWindow(QMainWindow):
         header_layout.addWidget(self.project_context_label)
         header_layout.addStretch(1)
         header_layout.addWidget(self.auto_fit_button)
-        header_layout.addWidget(self.manual_fit_button)
         header_layout.addWidget(self.inspector_button)
         self._central_header_layout = header_layout
 
@@ -991,17 +1012,6 @@ class MainWindow(QMainWindow):
             self.resize(self.width() + expansion_width, self.height())
         return expansion_width
 
-    def _reverse_inspector_expansion(self) -> None:
-        if not self._inspector_expansion_width or self.isMaximized():
-            self._inspector_expansion_width = 0
-            return
-        restored_width = max(
-            self.minimumWidth(),
-            self.width() - self._inspector_expansion_width,
-        )
-        self.resize(restored_width, self.height())
-        self._inspector_expansion_width = 0
-
     def _remember_inspector_width(self, _position: int, _index: int) -> None:
         """Retain the user's splitter width across ordinary visibility changes."""
 
@@ -1096,7 +1106,13 @@ class MainWindow(QMainWindow):
             self._appearance_controller.current_scheme,
         ).text_secondary
         self.inspector_button.setIcon(load_icon(icon_name, icon_color))
-        tooltip = "Hide Inspector" if visible else "Show Inspector"
+        self.inspector_button.setText("" if visible else "More info")
+        self.inspector_button.setFixedWidth(
+            DEFAULT_LAYOUT_TOKENS.control_height
+            if visible
+            else self.inspector_button.sizeHint().width()
+        )
+        tooltip = "Hide more info" if visible else "Show more info"
         self.inspector_button.setToolTip(tooltip)
         self.inspector_button.setAccessibleName(tooltip)
         del button_blocker
@@ -1801,6 +1817,8 @@ class MainWindow(QMainWindow):
             self.manual_fit_editor.hide()
             self._manual_inspector_minimum_width = INSPECTOR_BASE_MINIMUM_WIDTH
             self.inspector.setMinimumWidth(INSPECTOR_BASE_MINIMUM_WIDTH)
+            if not self.inspector.isHidden():
+                self._enforce_inspector_minimum_width()
             self._set_manual_inspector_mode(False)
             self._sync_manual_fit_entry()
             self._refresh_inspector_context()
@@ -2437,6 +2455,8 @@ class MainWindow(QMainWindow):
             required,
         )
         self.inspector.setMinimumWidth(self._manual_inspector_minimum_width)
+        if not self.inspector.isHidden():
+            self._enforce_inspector_minimum_width()
 
     def _emphasize_manual_parameter(self, reference: ParameterReference) -> None:
         if self._manual_draft is None:
@@ -3079,14 +3099,13 @@ class MainWindow(QMainWindow):
         return True, "Evaluate AutoFit candidates for the current Sample Group"
 
     def _sync_manual_fit_entry(self) -> None:
-        """Keep menu and central task entry bound only to the open dataset."""
+        """Keep Manual Fit menu and AutoFit action bound to the open dataset."""
 
         available = False
-        tooltip = "Open a reduced dataset to use Fitting Parameters"
         auto_available = False
         auto_tooltip = "Open a prepared Sample to use AutoFit"
         if self._open_project is not None and self._open_dataset is not None:
-            available, tooltip = self._manual_fit_capability(
+            available, _detail = self._manual_fit_capability(
                 self._open_project,
                 self._open_dataset,
             )
@@ -3100,19 +3119,8 @@ class MainWindow(QMainWindow):
             self._open_dataset is not None
             and self._open_dataset.dataset.role is SpectrumRole.SAMPLE
         )
-        if not hasattr(self, "manual_fit_button"):
-            return
-        self.manual_fit_button.setEnabled(available)
-        self.manual_fit_button.setToolTip(tooltip)
         self.auto_fit_button.setEnabled(auto_available)
         self.auto_fit_button.setToolTip(auto_tooltip)
-        self.manual_fit_button.setChecked(
-            self._manual_draft is not None
-            and self._open_project is not None
-            and self._open_dataset is not None
-            and self._manual_owner
-            == (self._open_project, self._open_dataset.workflow_dataset_id),
-        )
 
     def _set_mask_tool(self, tool: str, enabled: bool) -> None:
         if self._mask_draft is None:
@@ -3563,10 +3571,7 @@ class MainWindow(QMainWindow):
         self.mask_redo_button.setIconSize(
             QSize(tokens.control_icon_size, tokens.control_icon_size),
         )
-        self.inspector_button.setFixedSize(
-            tokens.control_height,
-            tokens.control_height,
-        )
+        self.inspector_button.setFixedHeight(tokens.control_height)
         self.inspector_button.setIconSize(
             QSize(tokens.control_icon_size, tokens.control_icon_size),
         )

@@ -8,7 +8,7 @@ from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
     QHeaderView,
+    QLabel,
     QMenu,
     QToolButton,
 )
@@ -45,6 +46,7 @@ from ezqens.gui.main_window import ImportBatchResult, _supported_reduced_data_fi
 from ezqens.gui.scientific_canvas import SCIENTIFIC_BACKGROUND
 from ezqens.gui.theme import (
     DARK_TOKENS,
+    DEFAULT_LAYOUT_TOKENS,
     LIGHT_TOKENS,
     Appearance,
     DesignTokens,
@@ -76,6 +78,30 @@ def _import_two_group_dataset(
     project = window.workspace.new_project()
     dataset = window.import_data(FIXTURES / "wide_multiple_pairs.txt", project=project)
     return project, dataset
+
+
+def _synthetic_q_dataset(group_count: int) -> ReducedDataset:
+    energy = np.array([-1.0, 0.0, 1.0])
+    dataset = ReducedDataset(
+        role=SpectrumRole.SAMPLE,
+        spectra=tuple(
+            Spectrum(
+                role=SpectrumRole.SAMPLE,
+                group_index=index,
+                group_label=f"Group {index + 1}",
+                energy=energy,
+                intensity=np.array([1.0, 2.0 + index, 1.0]),
+                uncertainty=np.full(3, 0.1),
+                energy_unit="meV",
+                intensity_unit="arb. unit",
+                uncertainty_unit="arb. unit",
+            )
+            for index in range(group_count)
+        ),
+    )
+    return dataset.assign_q_bins(
+        QBins.from_q_values(0.3 + 0.08 * np.arange(group_count)),
+    )
 
 
 def _highlight_x_bounds(window: MainWindow) -> tuple[float, float]:
@@ -272,7 +298,9 @@ def test_overview_visibility_preserves_current_group_and_expands_spectrum(
     assert view.navigator_axes is not None
     assert view.group_spinbox.value() == 2
     assert view.group_spinbox.geometry().top() == navigation_top
-    assert view.overview_toggle_button.text() == "Show Overview"
+    assert view.overview_toggle_button.text() == "S(Q,E) heatmap"
+    assert not view.overview_toggle_button.isChecked()
+    assert view.overview_toggle_button.toolTip() == "Show S(Q,E) heatmap"
     application.processEvents()
     assert view.overview_canvas.height() < expanded_overview_height
     assert view.canvas.height() > expanded_spectrum_height
@@ -282,7 +310,368 @@ def test_overview_visibility_preserves_current_group_and_expands_spectrum(
     assert view.overview_axes is not None
     assert view.current_group_index == 1
     assert _highlight_x_bounds(window) == view.overview_x_cell_bounds[1]
-    assert view.overview_toggle_button.text() == "Hide Overview"
+    assert view.overview_toggle_button.text() == "S(Q,E) heatmap"
+    assert view.overview_toggle_button.isChecked()
+    assert view.overview_toggle_button.toolTip() == "Hide S(Q,E) heatmap"
+    window.close()
+
+
+def test_heatmap_and_navigator_share_one_band_with_right_side_controls(
+    application: QApplication,
+) -> None:
+    window = MainWindow()
+    project, imported = _import_two_group_dataset(window)
+    assigned = imported.dataset.assign_q_bins(QBins.from_q_values([0.42, 1.18]))
+    state = window.workspace.add_dataset(project, assigned)
+    assert window.open_dataset(project, state)
+    window.resize(1200, 760)
+    window.show()
+    application.processEvents()
+    view = window.dataset_view
+
+    assert view.findChild(QLabel, "currentQLabel") is None
+    assert view.overview_canvas.parentWidget() is view.controls_container
+    assert view.controls_container.height() == view.overview_canvas.height()
+    assert view.overview_axes is not None
+    assert view.overview_q_axis is not None
+    assert cast(Any, view.overview_q_axis).get_xlabel() == ""
+    unit_labels = [
+        label for label in view.overview_axes.texts if label.get_text() == "Å⁻¹"
+    ]
+    assert len(unit_labels) == 1
+    assert unit_labels[0].get_position()[0] == 1.0
+    assert view.spectrum_axes is not None
+    assert view.spectrum_axes.get_title(loc="left") == "Q = 0.42 Å⁻¹"
+    assert view.controls_container.height() < (
+        view.overview_canvas.height()
+        + DEFAULT_LAYOUT_TOKENS.control_height
+        + view.content_layout.spacing()
+    )
+
+    right_controls = (
+        view.metadata_status_label,
+        view.overview_toggle_button,
+        view.previous_button,
+        view.group_spinbox,
+        view.next_button,
+    )
+    expanded_positions = {
+        control: control.mapTo(view, QPoint(0, 0)) for control in right_controls
+    }
+    assert all(
+        view.overview_canvas.mapTo(view, QPoint(0, 0)).x()
+        < control.mapTo(view, QPoint(0, 0)).x()
+        for control in right_controls
+    )
+    assert all(
+        0 <= control.mapTo(view, QPoint(0, 0)).y() < view.controls_container.height()
+        for control in right_controls
+    )
+    assert (
+        expanded_positions[view.metadata_status_label].y()
+        < expanded_positions[view.previous_button].y()
+    )
+    assert (
+        expanded_positions[view.overview_toggle_button].y()
+        < expanded_positions[view.previous_button].y()
+    )
+    assert (
+        view.overview_toggle_button.mapTo(
+            view, QPoint(view.overview_toggle_button.width(), 0)
+        ).x()
+        == view.right_control_block.mapTo(
+            view, QPoint(view.right_control_block.width(), 0)
+        ).x()
+    )
+
+    view.set_overview_visible(False)
+    application.processEvents()
+    assert view.navigator_axes is not None
+    assert view.controls_container.height() == view.overview_canvas.height()
+    collapsed_positions = {
+        control: control.mapTo(view, QPoint(0, 0)) for control in right_controls
+    }
+    assert all(
+        abs(
+            collapsed_positions[control].y()
+            - collapsed_positions[view.overview_toggle_button].y()
+        )
+        <= 5
+        for control in right_controls
+    )
+    assert (
+        collapsed_positions[view.overview_toggle_button].x()
+        == expanded_positions[view.overview_toggle_button].x()
+    )
+    assert (
+        view.overview_toggle_button.mapTo(
+            view,
+            QPoint(view.overview_toggle_button.width(), 0),
+        ).x()
+        == view.right_control_block.mapTo(
+            view,
+            QPoint(view.right_control_block.width(), 0),
+        ).x()
+    )
+    view.next_button.click()
+    assert view.current_group_index == 1
+    assert view.group_spinbox.value() == 2
+    assert view.spectrum_axes is not None
+    assert view.spectrum_axes.get_title(loc="left") == "Q = 1.18 Å⁻¹"
+    window.close()
+
+
+def test_q_visualization_uses_remaining_width_and_reflows_with_sidebar(
+    application: QApplication,
+) -> None:
+    window = MainWindow()
+    project, dataset = _import_two_group_dataset(window)
+    assert window.open_dataset(project, dataset)
+    window.show()
+    view = window.dataset_view
+
+    def assert_natural_width_allocation() -> None:
+        gap = view.right_control_block.geometry().left() - (
+            view.overview_canvas.geometry().right() + 1
+        )
+        assert gap == view._controls_layout.spacing()
+        assert (
+            view.overview_canvas.width() + gap + view.right_control_block.width()
+            == view.controls_container.width()
+        )
+        assert (
+            view.right_control_block.width()
+            == view.right_control_block.sizeHint().width()
+        )
+
+    window.resize(900, 760)
+    application.processEvents()
+    narrow_width = view.overview_canvas.width()
+    assert 160 <= narrow_width
+    assert_natural_width_allocation()
+    assert window.central_workspace.width() >= (
+        DEFAULT_LAYOUT_TOKENS.scientific_workspace_min_width
+    )
+
+    window.resize(1200, 760)
+    application.processEvents()
+    middle_width = view.overview_canvas.width()
+    assert narrow_width < middle_width
+    assert_natural_width_allocation()
+    window.set_inspector_visible(True)
+    application.processEvents()
+    assert view.overview_canvas.width() < middle_width
+    assert_natural_width_allocation()
+    assert window.central_workspace.width() >= (
+        DEFAULT_LAYOUT_TOKENS.scientific_workspace_min_width
+    )
+    window.set_inspector_visible(False)
+    application.processEvents()
+    assert view.overview_canvas.width() == middle_width
+
+    window.resize(1700, 760)
+    application.processEvents()
+    wide_width = view.overview_canvas.width()
+    assert wide_width > middle_width
+    assert wide_width > 960
+    assert_natural_width_allocation()
+
+    view.set_overview_visible(False)
+    application.processEvents()
+    wide_rail_width = view.overview_canvas.width()
+    assert_natural_width_allocation()
+    window.resize(1200, 760)
+    application.processEvents()
+    assert view.overview_canvas.width() < wide_rail_width
+    assert_natural_width_allocation()
+    window.close()
+
+
+def test_collapsed_navigator_is_a_short_rail_with_authoritative_group_controls(
+    application: QApplication,
+) -> None:
+    window = MainWindow()
+    project, imported = _import_two_group_dataset(window)
+    assigned = imported.dataset.assign_q_bins(QBins.from_q_values([0.42, 1.18]))
+    state = window.workspace.add_dataset(project, assigned)
+    assert window.open_dataset(project, state)
+    window.show()
+    application.processEvents()
+    view = window.dataset_view
+    expanded_height = view.overview_canvas.height()
+    spectrum_height = view.canvas.height()
+
+    view.overview_toggle_button.click()
+    application.processEvents()
+    assert not view.overview_visible
+    assert view.navigator_axes is not None
+    assert view.overview_canvas.height() <= 3 * view.fontMetrics().height()
+    assert view.overview_canvas.height() < expanded_height / 2
+    assert view.canvas.height() > spectrum_height
+    assert view.spectrum_axes is not None
+    assert view.spectrum_axes.get_title(loc="left") == "Q = 0.42 Å⁻¹"
+    view.next_button.click()
+    assert view.current_group_index == 1
+    assert view.group_spinbox.value() == 2
+    assert view.spectrum_axes is not None
+    assert view.spectrum_axes.get_title(loc="left") == "Q = 1.18 Å⁻¹"
+    view.previous_button.click()
+    assert view.current_group_index == 0
+    assert view.navigator_axes is not None
+    window.close()
+
+
+def test_group_and_q_label_pairs_reflow_without_overlap_or_losing_navigation(
+    application: QApplication,
+) -> None:
+    window = MainWindow()
+    project = window.workspace.new_project()
+    source = _synthetic_q_dataset(48)
+    state = window.workspace.add_dataset(project, source)
+    assert window.open_dataset(project, state)
+    window.show()
+    view = window.dataset_view
+    view.set_current_group(21)
+    assert view.current_group_index == 21
+
+    def draw_labels() -> tuple[int, ...]:
+        view.overview_canvas.draw()  # type: ignore[no-untyped-call]
+        application.processEvents()
+        view.overview_canvas.draw()  # type: ignore[no-untyped-call]
+        assert view.overview_axes is not None
+        assert view.overview_q_axis is not None
+        q_axis = cast(Any, view.overview_q_axis)
+        group_positions = view.overview_axes.get_xticks()
+        q_positions = q_axis.get_xticks()
+        np.testing.assert_array_equal(group_positions, q_positions)
+        figure = view.overview_canvas.figure
+        renderer = figure.canvas.get_renderer()  # type: ignore[attr-defined]
+        group_artists = view.overview_axes.get_xticklabels()
+        q_artists = q_axis.get_xticklabels()
+        for artists in (group_artists, q_artists):
+            bounds = sorted(
+                (
+                    artist.get_window_extent(renderer)
+                    for artist in artists
+                    if artist.get_visible() and artist.get_text()
+                ),
+                key=lambda bound: bound.x0,
+            )
+            assert all(
+                left.x1 <= right.x0
+                for left, right in zip(bounds, bounds[1:], strict=False)
+            )
+            assert all(
+                figure.bbox.xmin <= bound.x0 and bound.x1 <= figure.bbox.xmax
+                for bound in bounds
+            )
+        unit_artist = next(
+            artist for artist in view.overview_axes.texts if artist.get_text() == "Å⁻¹"
+        )
+        unit_bounds = unit_artist.get_window_extent(renderer)
+        assert figure.bbox.xmin <= unit_bounds.x0
+        assert unit_bounds.x1 <= figure.bbox.xmax
+        visible_q_bounds = [
+            artist.get_window_extent(renderer)
+            for artist in q_artists
+            if artist.get_visible() and artist.get_text()
+        ]
+        assert all(bound.x1 < unit_bounds.x0 for bound in visible_q_bounds)
+        return view._overview_label_indices
+
+    window.resize(1600, 760)
+    application.processEvents()
+    wide = draw_labels()
+    assert {0, 47}.issubset(wide)
+    for group_index in (0, 9, 21, 36, 47):
+        view.set_current_group(group_index)
+        assert draw_labels() == wide
+    window.resize(900, 760)
+    application.processEvents()
+    narrow = draw_labels()
+    assert len(narrow) < len(wide)
+    assert {0, 47}.issubset(narrow)
+    window.resize(1200, 760)
+    application.processEvents()
+    before_sidebar = draw_labels()
+    window.set_inspector_visible(True)
+    application.processEvents()
+    with_sidebar = draw_labels()
+    assert len(with_sidebar) < len(before_sidebar)
+    assert {0, 47}.issubset(with_sidebar)
+    window.set_inspector_visible(False)
+    application.processEvents()
+    assert len(draw_labels()) == len(before_sidebar)
+
+    view.set_overview_visible(False)
+    window.resize(900, 760)
+    application.processEvents()
+    view.overview_canvas.draw()  # type: ignore[no-untyped-call]
+    application.processEvents()
+    view.overview_canvas.draw()  # type: ignore[no-untyped-call]
+    assert view.navigator_axes is not None
+    assert 280 <= view.overview_canvas.width() <= 340
+    assert len(view._navigator_label_indices) < 48
+    collapsed_labels = view._navigator_label_indices
+    assert {0, 47}.issubset(collapsed_labels)
+    assert len(np.asarray(view.navigator_axes.collections[0].get_offsets())) == 48
+    collapsed_renderer = view.overview_canvas.figure.canvas.get_renderer()  # type: ignore[attr-defined]
+    collapsed_unit = next(
+        artist for artist in view.navigator_axes.texts if artist.get_text() == "Å⁻¹"
+    )
+    collapsed_unit_bounds = collapsed_unit.get_window_extent(collapsed_renderer)
+    collapsed_figure_bounds = view.overview_canvas.figure.bbox
+    assert collapsed_figure_bounds.xmin <= collapsed_unit_bounds.x0
+    assert collapsed_unit_bounds.x1 <= collapsed_figure_bounds.xmax
+    collapsed_group_bounds = [
+        artist.get_window_extent(collapsed_renderer)
+        for artist in view.navigator_axes.get_xticklabels()
+        if artist.get_visible() and artist.get_text()
+    ]
+    collapsed_q_bounds = [
+        artist.get_window_extent(collapsed_renderer)
+        for artist in view._navigator_q_label_artists
+        if artist.get_visible() and artist.get_text()
+    ]
+    assert len(collapsed_group_bounds) == len(collapsed_q_bounds)
+    assert all(
+        collapsed_figure_bounds.xmin <= bound.x0
+        and bound.x1 <= collapsed_figure_bounds.xmax
+        for bound in (*collapsed_group_bounds, *collapsed_q_bounds)
+    )
+    assert all(bound.x1 < collapsed_unit_bounds.x0 for bound in collapsed_q_bounds)
+    for group_number in (1.0, 12.0, 27.0, 48.0):
+        view.select_group_from_navigator(group_number)
+        assert view._navigator_label_indices == collapsed_labels
+    assert view.current_group_index == 47
+
+    compact_width = view.overview_canvas.width()
+    window.resize(1600, 760)
+    application.processEvents()
+    view.overview_canvas.draw()  # type: ignore[no-untyped-call]
+    assert view.overview_canvas.width() > compact_width
+    wide_collapsed_renderer = view.overview_canvas.figure.canvas.get_renderer()  # type: ignore[attr-defined]
+    wide_unit_bounds = collapsed_unit.get_window_extent(wide_collapsed_renderer)
+    assert all(
+        artist.get_window_extent(wide_collapsed_renderer).x1 < wide_unit_bounds.x0
+        for artist in view._navigator_q_label_artists
+        if artist.get_visible() and artist.get_text()
+    )
+
+    current = _synthetic_q_dataset(12)
+    view.replace_dataset(
+        current,
+        overview_source=source,
+        allow_group_count_change=True,
+    )
+    view.set_current_group(5)
+    assert view.group_spinbox.maximum() == 12
+    assert max(view._navigator_label_indices) < 12
+    assert {0, 11}.issubset(view._navigator_label_indices)
+    assert "Preserved source · 48 groups" in view.overview_provenance_label.text()
+    assert "Current Q grouping · 12 bins" in view.overview_provenance_label.text()
+    view.select_group_from_navigator(12.0)
+    assert view.current_group_index == 11
     window.close()
 
 
@@ -320,6 +709,7 @@ def test_collapsed_navigator_click_and_drag_use_same_discrete_group_state(
     )
     view._on_button_press(press)
     view._on_mouse_motion(drag)
+    view._on_button_release(cast(MouseEvent, SimpleNamespace()))
 
     assert view.current_group_index == 1
     assert view.group_spinbox.value() == 2
@@ -350,7 +740,8 @@ def test_collapsed_navigator_uses_real_q_centers_as_labels(
     labels = {text.get_text() for text in view.navigator_axes.texts}
     assert {"0.42", "1.18", "Å⁻¹"}.issubset(labels)
     view.select_group_from_navigator(2.0)
-    assert view.current_q_label.text() == "Q = 1.18 Å⁻¹"
+    assert view.spectrum_axes is not None
+    assert view.spectrum_axes.get_title(loc="left") == "Q = 1.18 Å⁻¹"
     window.close()
 
 
@@ -388,6 +779,117 @@ def test_dragging_overview_snaps_to_discrete_groups_and_updates_spectrum(
         view.spectrum_axes.lines[0].get_ydata(),
         dataset.dataset.spectra[1].intensity,
     )
+    window.close()
+
+
+@pytest.mark.parametrize("overview_visible", [True, False])
+def test_q_navigation_drag_owns_pointer_sequence_outside_axes(
+    application: QApplication,
+    overview_visible: bool,
+) -> None:
+    window = MainWindow()
+    project = window.workspace.new_project()
+    dataset = _synthetic_q_dataset(12)
+    state = window.workspace.add_dataset(project, dataset)
+    assert window.open_dataset(project, state)
+    view = window.dataset_view
+    view.set_overview_visible(overview_visible)
+    view.overview_canvas.draw()  # type: ignore[no-untyped-call]
+    axes = view.overview_axes if overview_visible else view.navigator_axes
+    assert axes is not None
+    label_indices = (
+        view._overview_label_indices
+        if overview_visible
+        else view._navigator_label_indices
+    )
+    coordinates = (
+        dataset.q_bins.q_values
+        if overview_visible and dataset.q_bins is not None
+        else np.arange(1, 13, dtype=np.float64)
+    )
+
+    def event_at(
+        coordinate: float,
+        *,
+        inaxes: Any = axes,
+        xdata: float | None = None,
+        button: MouseButton | None = None,
+    ) -> MouseEvent:
+        display_x, display_y = axes.transData.transform((coordinate, 0.0))
+        return cast(
+            MouseEvent,
+            SimpleNamespace(
+                button=button,
+                inaxes=inaxes,
+                xdata=coordinate if xdata is None else xdata,
+                x=float(display_x),
+                y=float(display_y),
+            ),
+        )
+
+    press = event_at(float(coordinates[4]), button=MouseButton.LEFT)
+    view._on_button_press(press)
+    assert view._navigation_drag_active
+    assert view.overview_canvas.pointer_capture_active
+    assert view.current_group_index == 4
+
+    view._on_mouse_motion(event_at(float(coordinates[7])))
+    assert view.current_group_index == 7
+    view._on_mouse_motion(
+        cast(
+            MouseEvent,
+            SimpleNamespace(
+                inaxes=None,
+                xdata=None,
+                x=float(axes.bbox.xmax + 100.0),
+                y=float(axes.bbox.ymax + 100.0),
+            ),
+        ),
+    )
+    assert view.current_group_index == 11
+    view._on_mouse_motion(event_at(float(coordinates[8])))
+    assert view.current_group_index == 8
+    view._on_mouse_motion(
+        cast(
+            MouseEvent,
+            SimpleNamespace(
+                inaxes=None,
+                xdata=None,
+                x=float(axes.bbox.xmin - 100.0),
+                y=float(axes.bbox.ymin - 100.0),
+            ),
+        ),
+    )
+    assert view.current_group_index == 0
+    view._on_mouse_motion(event_at(float(coordinates[6])))
+    assert view.current_group_index == 6
+    assert view.group_spinbox.value() == 7
+    assert view.spectrum_axes is not None
+    np.testing.assert_array_equal(
+        view.spectrum_axes.lines[0].get_ydata(),
+        dataset.spectra[6].intensity,
+    )
+    assert (
+        view._overview_label_indices
+        if overview_visible
+        else view._navigator_label_indices
+    ) == label_indices
+
+    outside_release = cast(
+        MouseEvent,
+        SimpleNamespace(inaxes=None, xdata=None, x=-100.0, y=-100.0),
+    )
+    view._on_button_release(outside_release)
+    assert not view._navigation_drag_active
+    assert view._navigation_drag_axes is None
+    assert not view.overview_canvas.pointer_capture_active
+    view._on_mouse_motion(event_at(float(coordinates[2])))
+    assert view.current_group_index == 6
+
+    view._on_button_press(event_at(float(coordinates[1]), button=MouseButton.LEFT))
+    assert view.current_group_index == 1
+    view._on_button_release(outside_release)
+    assert not view._navigation_drag_active
     window.close()
 
 
@@ -553,11 +1055,13 @@ def test_q_assigned_dataset_uses_real_representatives_and_keeps_group_identity(
     assert view.overview_axes.get_ylabel() == "Energy"
     assert view.overview_q_axis is not None
     assert view.group_spinbox.value() == 1
-    assert view.current_q_label.text() == "Q = 0.42 Å⁻¹"
+    assert view.spectrum_axes is not None
+    assert view.spectrum_axes.get_title(loc="left") == "Q = 0.42 Å⁻¹"
     view.select_group_from_overview(1.18)
     assert view.current_group_index == 1
     assert view.group_spinbox.value() == 2
-    assert view.current_q_label.text() == "Q = 1.18 Å⁻¹"
+    assert view.spectrum_axes is not None
+    assert view.spectrum_axes.get_title(loc="left") == "Q = 1.18 Å⁻¹"
     assert _highlight_x_bounds(window) == view.overview_x_cell_bounds[1]
     window.close()
 
@@ -615,9 +1119,11 @@ def test_overview_drag_uses_rendered_q_bin_bounds(
     )
     view._on_button_press(press)
     view._on_mouse_motion(drag)
+    view._on_button_release(cast(MouseEvent, SimpleNamespace()))
 
     assert view.current_group_index == 1
-    assert view.current_q_label.text() == "Q = 0.92 Å⁻¹"
+    assert view.spectrum_axes is not None
+    assert view.spectrum_axes.get_title(loc="left") == "Q = 0.92 Å⁻¹"
     window.close()
 
 
@@ -793,6 +1299,9 @@ def test_dense_group_navigation_reuses_overview_and_updates_group_presentation(
     assert highlight is not None
     overview_axes.set_xlim(0.5, 20.5)
     overview_limits = overview_axes.get_xlim()
+    overview_labels = tuple(
+        label.get_text() for label in overview_axes.get_xticklabels()
+    )
 
     view.set_current_group(217)
 
@@ -802,7 +1311,9 @@ def test_dense_group_navigation_reuses_overview_and_updates_group_presentation(
     assert _highlight_x_bounds(window) == view.overview_x_cell_bounds[217]
     assert overview_axes.get_xlim() == pytest.approx(overview_limits)
     assert view.group_spinbox.value() == 218
-    assert "218" in {label.get_text() for label in overview_axes.get_xticklabels()}
+    assert tuple(label.get_text() for label in overview_axes.get_xticklabels()) == (
+        overview_labels
+    )
     assert view.spectrum_axes is not None
     np.testing.assert_array_equal(
         view.spectrum_axes.lines[0].get_ydata(),

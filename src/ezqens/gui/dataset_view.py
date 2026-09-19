@@ -6,9 +6,10 @@ from typing import Any
 
 import numpy as np
 from matplotlib.axes import Axes
-from matplotlib.backend_bases import KeyEvent, MouseButton, MouseEvent
+from matplotlib.backend_bases import DrawEvent, KeyEvent, MouseButton, MouseEvent
 from matplotlib.collections import PathCollection, QuadMesh
 from matplotlib.colors import ListedColormap, LogNorm, Normalize
+from matplotlib.font_manager import FontProperties
 from matplotlib.lines import Line2D
 from matplotlib.patches import Rectangle
 from matplotlib.text import Text
@@ -23,6 +24,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMenu,
+    QSizePolicy,
     QSpinBox,
     QToolButton,
     QVBoxLayout,
@@ -41,6 +43,7 @@ from ezqens.gui.q_editor import QAssignmentEditor
 from ezqens.gui.scientific_canvas import (
     SCIENTIFIC_BACKGROUND,
     ScientificCanvas,
+    clamped_axes_data_point,
     log_display_values,
     symlog_linthresh,
     zoom_limits,
@@ -98,6 +101,11 @@ class ReducedDatasetView(QWidget):
         self.overview_canvas = ScientificCanvas()
         self.overview_canvas.setObjectName("overviewScientificCanvas")
         self.overview_canvas.setMinimumHeight(48)
+        self.overview_canvas.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Preferred,
+        )
+        self.overview_canvas.setMinimumWidth(160)
         self.canvas = ScientificCanvas()
         self.q_editor = QAssignmentEditor()
         self.dataset: ReducedDataset | None = None
@@ -136,6 +144,11 @@ class ReducedDatasetView(QWidget):
         self.navigator_active_highlight: PathCollection | None = None
         self._overview_q_label_artists: tuple[Text, ...] = ()
         self._navigator_q_label_artists: tuple[Text, ...] = ()
+        self._overview_label_indices: tuple[int, ...] = ()
+        self._navigator_label_indices: tuple[int, ...] = ()
+        self._overview_scale_base_xlim: tuple[float, float] | None = None
+        self._navigator_scale_base_xlim: tuple[float, float] | None = None
+        self._q_scale_layout_width: float | None = None
         self.spectrum_q_title: Text | None = None
         self.spectrum_log_empty_message: Text | None = None
         self._spectrum_x_limits: tuple[float, float] | None = None
@@ -145,6 +158,7 @@ class ReducedDatasetView(QWidget):
         self._spectrum_zoom_rectangle: Rectangle | None = None
         self.overview_visible = True
         self._navigation_drag_active = False
+        self._navigation_drag_axes: Axes | None = None
         self.y_scale = "linear"
         self.heatmap_scale = "linear"
         self.y_range_locked = True
@@ -175,12 +189,6 @@ class ReducedDatasetView(QWidget):
         self.group_spinbox.setFixedWidth(58)
         self.group_spinbox.valueChanged.connect(self._group_number_changed)
 
-        self.current_q_label = QLabel()
-        self.current_q_label.setObjectName("currentQLabel")
-        self.current_q_label.setProperty("secondary", True)
-        self.current_q_label.setToolTip("Double-click: edit Q assignment")
-        self.current_q_label.hide()
-
         self.next_button = QToolButton()
         self.next_button.setObjectName("nextGroupButton")
         self.next_button.setText("›")
@@ -190,39 +198,50 @@ class ReducedDatasetView(QWidget):
         self.metadata_status_label = QLabel()
         self.metadata_status_label.setObjectName("datasetMetadataStatus")
         self.metadata_status_label.setProperty("muted", True)
+        self.metadata_status_label.setWordWrap(True)
+        self.metadata_status_label.setMaximumWidth(150)
+        self.metadata_status_label.setSizePolicy(
+            QSizePolicy.Policy.Preferred,
+            QSizePolicy.Policy.Fixed,
+        )
 
         self.overview_toggle_button = QToolButton()
         self.overview_toggle_button.setObjectName("overviewToggleButton")
-        self.overview_toggle_button.setToolTip("Show or hide the intensity overview")
+        self.overview_toggle_button.setCheckable(True)
         self.overview_toggle_button.clicked.connect(self._toggle_overview)
 
-        navigation = QHBoxLayout()
+        self.controls_container = QWidget(self)
+        self.controls_container.setObjectName("datasetControls")
+        self.navigation_widget = QWidget(self.controls_container)
+        self.navigation_widget.setObjectName("groupNavigationControls")
+        self.navigation_widget.setFixedHeight(DEFAULT_LAYOUT_TOKENS.control_height)
+        navigation = QHBoxLayout(self.navigation_widget)
         navigation.setContentsMargins(0, 0, 0, 0)
         navigation.setSpacing(5)
         navigation.addWidget(self.previous_button)
         navigation.addWidget(self.group_navigation_label)
         navigation.addWidget(self.group_spinbox)
         navigation.addWidget(self.next_button)
-        navigation.addWidget(self.current_q_label)
-
-        actions = QHBoxLayout()
+        self.right_control_block = QWidget(self.controls_container)
+        self.right_control_block.setObjectName("overviewRightControls")
+        self.right_control_block.setSizePolicy(
+            QSizePolicy.Policy.Fixed,
+            QSizePolicy.Policy.Preferred,
+        )
+        actions = QGridLayout(self.right_control_block)
         actions.setContentsMargins(0, 0, 0, 0)
-        actions.setSpacing(5)
-        actions.addWidget(self.metadata_status_label)
-        actions.addWidget(self.overview_toggle_button)
-
-        self.controls_container = QWidget(self)
-        self.controls_container.setObjectName("datasetControls")
-        controls = QGridLayout(self.controls_container)
+        actions.setHorizontalSpacing(5)
+        actions.setVerticalSpacing(4)
+        controls = QHBoxLayout(self.controls_container)
         controls.setContentsMargins(0, 0, 0, 0)
-        controls.setSpacing(5)
-        controls.setColumnStretch(0, 1)
-        controls.setColumnStretch(2, 1)
-        controls.addLayout(navigation, 0, 1)
-        controls.addLayout(actions, 0, 2, Qt.AlignmentFlag.AlignRight)
+        controls.setSpacing(8)
+        controls.addWidget(self.overview_canvas, 1)
+        controls.addWidget(self.right_control_block)
+        controls.setAlignment(self.right_control_block, Qt.AlignmentFlag.AlignTop)
         self._navigation_layout = navigation
         self._actions_layout = actions
         self._controls_layout = controls
+        self._configure_overview_control_layout()
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -233,7 +252,6 @@ class ReducedDatasetView(QWidget):
         self.overview_provenance_label.setWordWrap(True)
         self.overview_provenance_label.hide()
         layout.addWidget(self.overview_provenance_label)
-        layout.addWidget(self.overview_canvas)
         layout.addWidget(self.q_editor)
         self.manual_interaction_instruction = QLabel()
         self.manual_interaction_instruction.setObjectName(
@@ -272,7 +290,6 @@ class ReducedDatasetView(QWidget):
             self.group_navigation_label,
             self.group_spinbox,
             self.next_button,
-            self.current_q_label,
         ):
             widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
             widget.customContextMenuRequested.connect(
@@ -292,6 +309,10 @@ class ReducedDatasetView(QWidget):
             self._on_button_release,
         )
         self.overview_canvas.mpl_connect("scroll_event", self._on_scroll)
+        self.overview_canvas.mpl_connect(
+            "draw_event",
+            self._refresh_labels_after_canvas_resize,
+        )
         self.canvas.mpl_connect("button_press_event", self._on_spectrum_button_press)
         self.canvas.mpl_connect("button_press_event", self._on_spectrum_q_press)
         self.canvas.mpl_connect(
@@ -336,6 +357,7 @@ class ReducedDatasetView(QWidget):
         if heatmap_scale not in {"linear", "log"}:
             raise ValueError("heatmap scale must be 'linear' or 'log'")
 
+        self._end_navigation_drag()
         self.cancel_manual_component_interaction()
         self.dataset = dataset
         self.overview_source_dataset = overview_source
@@ -421,6 +443,7 @@ class ReducedDatasetView(QWidget):
     def clear_dataset(self) -> None:
         """Clear the scientific view when its Workspace object is removed."""
 
+        self._end_navigation_drag()
         self.cancel_manual_component_interaction()
         self._cancel_spectrum_zoom(redraw=False)
         self.dataset = None
@@ -569,7 +592,6 @@ class ReducedDatasetView(QWidget):
         self.manual_interaction_instruction.show()
         for widget in (
             self.controls_container,
-            self.overview_canvas,
             self.q_editor,
         ):
             effect = QGraphicsOpacityEffect(widget)
@@ -615,7 +637,6 @@ class ReducedDatasetView(QWidget):
         self.manual_interaction_instruction.hide()
         for widget in (
             self.controls_container,
-            self.overview_canvas,
             self.q_editor,
         ):
             effect = widget.graphicsEffect()
@@ -733,6 +754,21 @@ class ReducedDatasetView(QWidget):
         overview_figure.clear()
         self._overview_q_label_artists = ()
         self._navigator_q_label_artists = ()
+        self._overview_label_indices = ()
+        self._navigator_label_indices = ()
+        self._overview_scale_base_xlim = None
+        self._navigator_scale_base_xlim = None
+        self._q_scale_layout_width = None
+        overview_figure.set_layout_engine(
+            "constrained" if self.overview_visible else None,
+        )
+        if not self.overview_visible:
+            overview_figure.subplots_adjust(
+                left=0.07,
+                right=0.98,
+                bottom=0.28,
+                top=0.76,
+            )
         overview_figure.set_facecolor(self._overview_surface)
         if self.overview_visible:
             self.overview_axes = overview_figure.add_subplot(111)
@@ -763,14 +799,14 @@ class ReducedDatasetView(QWidget):
         """Redraw Group-dependent artists without rebuilding the overview."""
 
         dataset = self._require_dataset()
-        self._update_overview_group_presentation(dataset)
+        self._update_overview_group_presentation()
         self._draw_spectrum_figure(dataset)
         self._update_navigation_state(dataset)
         self.overview_canvas.draw_idle()  # type: ignore[no-untyped-call]
         self.canvas.draw_idle()  # type: ignore[no-untyped-call]
 
-    def _update_overview_group_presentation(self, dataset: ReducedDataset) -> None:
-        """Move the active overview marker and refresh its sparse labels."""
+    def _update_overview_group_presentation(self) -> None:
+        """Move only the active overview marker for a Group-only change."""
 
         if self.overview_visible:
             if self.overview_active_highlight is None or self.overview_axes is None:
@@ -778,13 +814,11 @@ class ReducedDatasetView(QWidget):
             lower, upper = self.overview_x_cell_bounds[self.current_group_index]
             self.overview_active_highlight.set_x(lower)
             self.overview_active_highlight.set_width(upper - lower)
-            self._update_expanded_overview_labels(dataset, self.overview_axes)
             return
         if self.navigator_active_highlight is None or self.navigator_axes is None:
             return
         coordinate = float(self.current_group_index + 1)
         self.navigator_active_highlight.set_offsets(np.asarray([[coordinate, 0.0]]))
-        self._update_navigator_labels(dataset, self.navigator_axes)
 
     def _draw_spectrum_figure(self, dataset: ReducedDataset) -> None:
         """Rebuild only the white Spectrum/result figure role."""
@@ -852,8 +886,49 @@ class ReducedDatasetView(QWidget):
     def _update_overview_canvas_height(self) -> None:
         """Reserve compact, DPI-aware space for the overview figure role."""
 
-        line_count = 9 if self.overview_visible else 4
-        self.overview_canvas.setFixedHeight(self.fontMetrics().height() * line_count)
+        self._configure_overview_control_layout()
+        height = self.fontMetrics().height()
+        band_height = (
+            height * 8 if self.overview_visible else max(38, round(height * 2.5))
+        )
+        self.overview_canvas.setFixedHeight(band_height)
+        self.controls_container.setFixedHeight(band_height)
+
+    def _configure_overview_control_layout(self) -> None:
+        """Arrange one shared control block for expanded and compact overview modes."""
+
+        for widget in (
+            self.metadata_status_label,
+            self.overview_toggle_button,
+            self.navigation_widget,
+        ):
+            self._actions_layout.removeWidget(widget)
+        if self.overview_visible:
+            self._actions_layout.addWidget(
+                self.metadata_status_label,
+                0,
+                0,
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+            )
+            self._actions_layout.addWidget(self.overview_toggle_button, 0, 1)
+            self._actions_layout.addWidget(
+                self.navigation_widget,
+                1,
+                0,
+                1,
+                2,
+                Qt.AlignmentFlag.AlignRight,
+            )
+        else:
+            self._actions_layout.addWidget(
+                self.metadata_status_label,
+                0,
+                0,
+                Qt.AlignmentFlag.AlignVCenter,
+            )
+            self._actions_layout.addWidget(self.navigation_widget, 0, 1)
+            self._actions_layout.addWidget(self.overview_toggle_button, 0, 2)
+        self._actions_layout.invalidate()
 
     def _draw_spectrum(self, dataset: ReducedDataset, axes: Axes) -> None:
         spectrum = dataset.spectra[self.current_group_index]
@@ -1121,9 +1196,20 @@ class ReducedDatasetView(QWidget):
         for spine in axes.spines.values():
             spine.set_color(self._overview_border)
         editable_q_values = self._editable_q_center_values(navigation_dataset)
+        self._overview_scale_base_xlim = axes.get_xlim()
         if editable_q_values is not None:
             q_axis = axes.secondary_xaxis("bottom")
-            q_axis.set_xlabel(f"Q ({Q_DISPLAY_UNIT})", color=self._overview_text)
+            q_axis.set_xlabel("")
+            axes.text(
+                1.0,
+                -0.19,
+                Q_DISPLAY_UNIT,
+                ha="right",
+                va="top",
+                fontsize=7,
+                color=self._overview_text,
+                transform=q_axis.transAxes,
+            )
             q_axis.tick_params(
                 labelcolor=self._overview_text,
                 color=self._overview_border,
@@ -1134,6 +1220,12 @@ class ReducedDatasetView(QWidget):
         else:
             self.overview_q_axis = None
             self._overview_q_label_artists = ()
+        self._reserve_q_scale_space(
+            navigation_dataset,
+            axes,
+            self._overview_x_coordinates(navigation_dataset),
+            fontsize=8,
+        )
         self._update_expanded_overview_labels(navigation_dataset, axes)
 
     def _update_expanded_overview_labels(
@@ -1141,14 +1233,11 @@ class ReducedDatasetView(QWidget):
         dataset: ReducedDataset,
         axes: Axes,
     ) -> None:
-        """Update width-aware Group/Q labels without rebuilding heatmap artists."""
+        """Update paired Group/Q labels without rebuilding heatmap artists."""
 
         coordinates = self._overview_x_coordinates(dataset)
-        label_indices = _discrete_label_indices(
-            len(dataset.spectra),
-            self.current_group_index,
-            axes,
-        )
+        label_indices = self._label_indices_for_axes(dataset, axes, coordinates)
+        self._overview_label_indices = label_indices
         x_limits = axes.get_xlim()
         axes.set_xticks(coordinates[list(label_indices)])
         axes.set_xticklabels(
@@ -1199,6 +1288,7 @@ class ReducedDatasetView(QWidget):
             zorder=3,
         )
         axes.set_xlim(0.5, len(dataset.spectra) + 0.5)
+        self._navigator_scale_base_xlim = axes.get_xlim()
         editable_q_values = self._editable_q_center_values(dataset)
         axes.set_ylim(-0.34 if editable_q_values is not None else -0.18, 0.18)
         axes.set_yticks([])
@@ -1223,6 +1313,12 @@ class ReducedDatasetView(QWidget):
                 color=self._overview_text,
                 transform=axes.transAxes,
             )
+        self._reserve_q_scale_space(
+            dataset,
+            axes,
+            coordinates,
+            fontsize=7,
+        )
         self._update_navigator_labels(dataset, axes)
 
     def _update_navigator_labels(
@@ -1233,11 +1329,8 @@ class ReducedDatasetView(QWidget):
         """Update current-aware sparse navigator labels in place."""
 
         coordinates = np.arange(1, len(dataset.spectra) + 1, dtype=np.float64)
-        label_indices = _discrete_label_indices(
-            len(dataset.spectra),
-            self.current_group_index,
-            axes,
-        )
+        label_indices = self._label_indices_for_axes(dataset, axes, coordinates)
+        self._navigator_label_indices = label_indices
         axes.set_xticks(coordinates[list(label_indices)])
         axes.set_xticklabels([str(index + 1) for index in label_indices], fontsize=7)
         for artist in self._navigator_q_label_artists:
@@ -1261,6 +1354,199 @@ class ReducedDatasetView(QWidget):
             for index in label_indices
         )
 
+    def _label_indices_for_axes(
+        self,
+        dataset: ReducedDataset,
+        axes: Axes,
+        coordinates: np.ndarray,
+    ) -> tuple[int, ...]:
+        """Choose Group/Q pairs using their available display width."""
+
+        q_values = self._editable_q_center_values(dataset)
+        ratio = self.overview_canvas.device_pixel_ratio
+        fontsize = 8 if axes is self.overview_axes else 7
+        widths = self._navigation_label_widths(
+            dataset,
+            fontsize=fontsize,
+        )
+        positions = np.asarray(
+            [
+                axes.get_xaxis_transform().transform((float(value), 0.5))[0]
+                for value in coordinates
+            ],
+            dtype=np.float64,
+        )
+        edge_clearance = 3.0 * ratio
+        right_bound = axes.bbox.xmax - edge_clearance
+        if q_values is not None:
+            right_bound -= self._rendered_text_width(Q_DISPLAY_UNIT, fontsize=7)
+            right_bound -= 8.0 * ratio
+        return _discrete_label_indices(
+            positions,
+            widths,
+            display_bounds=(axes.bbox.xmin + edge_clearance, right_bound),
+            gap=8.0 * ratio,
+        )
+
+    def _navigation_label_widths(
+        self,
+        dataset: ReducedDataset,
+        *,
+        fontsize: int,
+    ) -> np.ndarray:
+        """Return rendered widths for each semantic Group/Q label pair."""
+
+        q_values = self._editable_q_center_values(dataset)
+        return np.asarray(
+            [
+                max(
+                    self._rendered_text_width(str(index + 1), fontsize=fontsize),
+                    self._rendered_text_width(
+                        ""
+                        if q_values is None or q_values[index] is None
+                        else f"{q_values[index]:.4g}",
+                        fontsize=fontsize,
+                    ),
+                )
+                for index in range(len(dataset.spectra))
+            ],
+            dtype=np.float64,
+        )
+
+    def _rendered_text_width(self, text: str, *, fontsize: int) -> float:
+        """Measure Matplotlib text in the same display coordinate system as axes."""
+
+        renderer: Any = self.overview_canvas.figure.canvas.get_renderer()  # type: ignore[attr-defined]
+        width, _height, _descent = renderer.get_text_width_height_descent(
+            text,
+            FontProperties(size=fontsize),
+            ismath=False,
+        )
+        return float(width)
+
+    def _reserve_q_scale_space(
+        self,
+        dataset: ReducedDataset,
+        axes: Axes,
+        coordinates: np.ndarray,
+        *,
+        fontsize: int,
+    ) -> None:
+        """Reserve rendered edge space for endpoint pairs and the right-end unit."""
+
+        if not len(coordinates):
+            return
+        base_limits = (
+            self._overview_scale_base_xlim
+            if axes is self.overview_axes
+            else self._navigator_scale_base_xlim
+        )
+        if base_limits is not None:
+            axes.set_xlim(base_limits)
+        ratio = self.overview_canvas.device_pixel_ratio
+        widths = self._navigation_label_widths(dataset, fontsize=fontsize)
+        has_q_scale = self._editable_q_center_values(dataset) is not None
+        unit_width = (
+            self._rendered_text_width(Q_DISPLAY_UNIT, fontsize=7)
+            if has_q_scale
+            else 0.0
+        )
+        unit_clearance = 8.0 * ratio if has_q_scale else 0.0
+        rendered_slack = 1.0 * ratio
+        left_target = axes.bbox.xmin + 3.0 * ratio + widths[0] / 2.0 + rendered_slack
+        right_target = (
+            axes.bbox.xmax
+            - 3.0 * ratio
+            - unit_width
+            - unit_clearance
+            - widths[-1] / 2.0
+            - rendered_slack
+        )
+        for _iteration in range(12):
+            first_x = axes.transData.transform((float(coordinates[0]), 0.0))[0]
+            last_x = axes.transData.transform((float(coordinates[-1]), 0.0))[0]
+            left_missing = max(0.0, left_target - first_x)
+            right_missing = max(0.0, last_x - right_target)
+            if max(left_missing, right_missing) < 0.01:
+                break
+            lower, upper = axes.get_xlim()
+            data_per_pixel = abs(upper - lower) / max(float(axes.bbox.width), 1.0)
+            axes.set_xlim(
+                lower - left_missing * data_per_pixel,
+                upper + right_missing * data_per_pixel,
+            )
+        self._q_scale_layout_width = float(axes.bbox.width)
+
+    def _refresh_labels_after_canvas_resize(self, _event: DrawEvent) -> None:
+        """Reflow sparse labels after Qt has resized the Matplotlib canvas."""
+
+        dataset = self.dataset
+        if dataset is None:
+            return
+        if self.overview_visible and self.overview_axes is not None:
+            layout_changed = self._refresh_q_scale_space_for_width(
+                dataset,
+                self.overview_axes,
+                self._overview_x_coordinates(dataset),
+                fontsize=8,
+            )
+            indices = self._label_indices_for_axes(
+                dataset,
+                self.overview_axes,
+                self._overview_x_coordinates(dataset),
+            )
+            if layout_changed or indices != self._overview_label_indices:
+                self._update_expanded_overview_labels(dataset, self.overview_axes)
+                self.overview_canvas.draw_idle()  # type: ignore[no-untyped-call]
+        elif self.navigator_axes is not None:
+            coordinates = np.arange(
+                1,
+                len(dataset.spectra) + 1,
+                dtype=np.float64,
+            )
+            layout_changed = self._refresh_q_scale_space_for_width(
+                dataset,
+                self.navigator_axes,
+                coordinates,
+                fontsize=7,
+            )
+            indices = self._label_indices_for_axes(
+                dataset,
+                self.navigator_axes,
+                coordinates,
+            )
+            if layout_changed or indices != self._navigator_label_indices:
+                self._update_navigator_labels(dataset, self.navigator_axes)
+                self.overview_canvas.draw_idle()  # type: ignore[no-untyped-call]
+
+    def _refresh_q_scale_space_for_width(
+        self,
+        dataset: ReducedDataset,
+        axes: Axes,
+        coordinates: np.ndarray,
+        *,
+        fontsize: int,
+    ) -> bool:
+        """Re-reserve scale edges only when layout changes the rendered width."""
+
+        if not len(coordinates):
+            return False
+        width = float(axes.bbox.width)
+        if self._q_scale_layout_width is not None and np.isclose(
+            width,
+            self._q_scale_layout_width,
+            rtol=0.0,
+            atol=0.25,
+        ):
+            return False
+        self._reserve_q_scale_space(
+            dataset,
+            axes,
+            coordinates,
+            fontsize=fontsize,
+        )
+        return True
+
     def _update_navigation_state(self, dataset: ReducedDataset) -> None:
         self.previous_button.setEnabled(self.current_group_index > 0)
         self.next_button.setEnabled(self.current_group_index + 1 < len(dataset.spectra))
@@ -1268,12 +1554,6 @@ class ReducedDatasetView(QWidget):
         self.group_spinbox.setValue(self.current_group_index + 1)
         del blocker
         self.group_spinbox.setToolTip("Click: select Group")
-        if dataset.q_bins is None:
-            self.current_q_label.hide()
-        else:
-            q_value = dataset.q_bins.q_values[self.current_group_index]
-            self.current_q_label.setText(f"Q = {q_value:.6g} {Q_DISPLAY_UNIT}")
-            self.current_q_label.setVisible(True)
         self._update_overview_toggle()
 
     def _update_metadata_status(self) -> None:
@@ -1344,6 +1624,8 @@ class ReducedDatasetView(QWidget):
             and event.xdata is not None
         ):
             self._navigation_drag_active = True
+            self._navigation_drag_axes = event.inaxes
+            self.overview_canvas.begin_pointer_capture()
             self._select_group_from_navigation_axes(event.inaxes, float(event.xdata))
 
     def _on_spectrum_units_press(self, event: MouseEvent) -> None:
@@ -1427,15 +1709,22 @@ class ReducedDatasetView(QWidget):
             self._draw()
 
     def _on_mouse_motion(self, event: MouseEvent) -> None:
-        if (
-            self._navigation_drag_active
-            and event.inaxes in (self.overview_axes, self.navigator_axes)
-            and event.xdata is not None
-        ):
-            self._select_group_from_navigation_axes(event.inaxes, float(event.xdata))
+        axes = self._navigation_drag_axes
+        if not self._navigation_drag_active or axes is None:
+            return
+        coordinate = _navigation_coordinate_from_event(event, axes)
+        if coordinate is not None:
+            self._select_group_from_navigation_axes(axes, coordinate)
 
     def _on_button_release(self, _event: MouseEvent) -> None:
+        self._end_navigation_drag()
+
+    def _end_navigation_drag(self) -> None:
+        """Release overview-owned pointer state after any completed drag."""
+
         self._navigation_drag_active = False
+        self._navigation_drag_axes = None
+        self.overview_canvas.end_pointer_capture()
 
     def _on_spectrum_button_press(self, event: MouseEvent) -> None:
         if self._manual_component_kind is not None:
@@ -1610,6 +1899,7 @@ class ReducedDatasetView(QWidget):
         )
         assert self.spectrum_axes is not None
         self.spectrum_axes.add_patch(self._spectrum_zoom_rectangle)
+        self.canvas.begin_pointer_capture()
         self.canvas.draw_idle()  # type: ignore[no-untyped-call]
 
     def _event_hits_spectrum_label(self, event: MouseEvent) -> bool:
@@ -1626,16 +1916,21 @@ class ReducedDatasetView(QWidget):
     def _handle_spectrum_zoom_motion(self, event: MouseEvent) -> None:
         """Update the visible idle zoom rectangle while the pointer is held."""
 
+        axes = self.spectrum_axes
         if (
             self._spectrum_zoom_start is None
             or self._spectrum_zoom_rectangle is None
-            or event.inaxes is not self.spectrum_axes
-            or event.xdata is None
-            or event.ydata is None
+            or axes is None
         ):
             return
+        display_point = self._spectrum_event_display_point(event)
+        if display_point is None:
+            return
         start_x, start_y = self._spectrum_zoom_start
-        end_x, end_y = float(event.xdata), float(event.ydata)
+        (end_x, end_y), _clamped_display = clamped_axes_data_point(
+            axes,
+            display_point,
+        )
         self._spectrum_zoom_rectangle.set_bounds(
             min(start_x, end_x),
             min(start_y, end_y),
@@ -1651,15 +1946,15 @@ class ReducedDatasetView(QWidget):
         start_display = self._spectrum_zoom_start_display
         if start is None or start_display is None:
             return
-        if (
-            event.inaxes is not self.spectrum_axes
-            or event.xdata is None
-            or event.ydata is None
-        ):
+        axes = self.spectrum_axes
+        if axes is None:
             self._cancel_spectrum_zoom()
             return
-        end = (float(event.xdata), float(event.ydata))
-        end_display = self._spectrum_event_display_point(event)
+        display_point = self._spectrum_event_display_point(event)
+        if display_point is None:
+            self._cancel_spectrum_zoom()
+            return
+        end, end_display = clamped_axes_data_point(axes, display_point)
         self._cancel_spectrum_zoom(redraw=False)
         if (
             end_display is None
@@ -1675,9 +1970,6 @@ class ReducedDatasetView(QWidget):
         y_limits = (min(start[1], end[1]), max(start[1], end[1]))
         if x_limits[0] == x_limits[1] or y_limits[0] == y_limits[1]:
             self.canvas.draw_idle()  # type: ignore[no-untyped-call]
-            return
-        axes = self.spectrum_axes
-        if axes is None:
             return
         axes.set_xlim(x_limits)
         axes.set_ylim(y_limits)
@@ -1705,6 +1997,7 @@ class ReducedDatasetView(QWidget):
         self._spectrum_zoom_rectangle = None
         self._spectrum_zoom_start = None
         self._spectrum_zoom_start_display = None
+        self.canvas.end_pointer_capture()
         if rectangle is not None and rectangle.axes is not None:
             rectangle.remove()
             if redraw:
@@ -1948,8 +2241,11 @@ class ReducedDatasetView(QWidget):
 
     def _update_overview_toggle(self) -> None:
         action = "Hide" if self.overview_visible else "Show"
-        self.overview_toggle_button.setText(f"{action} Overview")
-        self.overview_toggle_button.setToolTip(f"{action} intensity overview")
+        self.overview_toggle_button.setText("S(Q,E) heatmap")
+        self.overview_toggle_button.setToolTip(f"{action} S(Q,E) heatmap")
+        blocker = QSignalBlocker(self.overview_toggle_button)
+        self.overview_toggle_button.setChecked(self.overview_visible)
+        del blocker
 
     def _select_group_from_navigation_axes(
         self,
@@ -2198,25 +2494,70 @@ def _overview_group_index_at_coordinate(
     return int(np.argmin(np.abs(representatives - coordinate)))
 
 
-def _discrete_label_indices(
-    group_count: int,
-    current_group_index: int,
+def _navigation_coordinate_from_event(
+    event: MouseEvent,
     axes: Axes,
-) -> tuple[int, ...]:
-    """Thin labels only when the rendered Group labels would overlap."""
+) -> float | None:
+    """Resolve an owned horizontal drag, clamped to the navigation axes."""
 
-    widest_label = max(
-        len(str(group_count)) * 8.0 * 0.62 * axes.figure.dpi / 72.0,
-        1.0,
-    )
-    maximum_labels = max(2, int(axes.bbox.width // (widest_label + 8.0)))
-    if group_count <= maximum_labels:
-        return tuple(range(group_count))
-    step = max(1, int(np.ceil((group_count - 1) / (maximum_labels - 1))))
-    indices = set(range(0, group_count, step))
-    indices.add(group_count - 1)
-    indices.add(current_group_index)
-    return tuple(sorted(indices))
+    display_event_x = getattr(event, "x", None)
+    if display_event_x is not None:
+        display_x = float(np.clip(display_event_x, axes.bbox.xmin, axes.bbox.xmax))
+        data_x = axes.transData.inverted().transform((display_x, axes.bbox.ymin))[0]
+        return float(data_x)
+    if event.inaxes is axes and event.xdata is not None:
+        return float(event.xdata)
+    return None
+
+
+def _discrete_label_indices(
+    display_positions: np.ndarray,
+    label_widths: np.ndarray,
+    *,
+    display_bounds: tuple[float, float],
+    gap: float,
+) -> tuple[int, ...]:
+    """Choose stable, approximately even scale labels that do not overlap."""
+
+    group_count = len(display_positions)
+    if not group_count:
+        return ()
+    if group_count == 1:
+        half_width = label_widths[0] / 2.0
+        return (
+            (0,)
+            if display_bounds[0] <= display_positions[0] - half_width
+            and display_positions[0] + half_width <= display_bounds[1]
+            else ()
+        )
+    for label_count in range(group_count, 1, -1):
+        indices = tuple(
+            int(index)
+            for index in np.rint(
+                np.linspace(0, group_count - 1, label_count),
+            ).astype(np.int64)
+        )
+        ordered = sorted(indices, key=lambda index: display_positions[index])
+        inside_bounds = all(
+            display_bounds[0] <= display_positions[index] - label_widths[index] / 2.0
+            and display_positions[index] + label_widths[index] / 2.0
+            <= display_bounds[1]
+            for index in indices
+        )
+        separated = all(
+            abs(display_positions[right] - display_positions[left])
+            >= (label_widths[left] + label_widths[right]) / 2.0 + gap
+            for left, right in zip(ordered, ordered[1:], strict=False)
+        )
+        if inside_bounds and separated:
+            return indices
+    first_half_width = label_widths[0] / 2.0
+    if (
+        display_bounds[0] <= display_positions[0] - first_half_width
+        and display_positions[0] + first_half_width <= display_bounds[1]
+    ):
+        return (0,)
+    return ()
 
 
 def _individual_cell_bounds(

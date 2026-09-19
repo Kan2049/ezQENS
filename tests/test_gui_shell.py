@@ -18,6 +18,7 @@ from PySide6.QtWidgets import QApplication, QDialog, QLabel, QPushButton
 from ezqens.gui import MainWindow, create_application
 from ezqens.gui.dialogs import DialogChoice, choose_dialog
 from ezqens.gui.main_window import (
+    INSPECTOR_BASE_MINIMUM_WIDTH,
     INSPECTOR_PREFERRED_WIDTH,
     inspector_outward_expansion_width,
 )
@@ -122,12 +123,85 @@ def test_inspector_starts_hidden_and_can_be_shown(
     application.processEvents()
     assert window.inspector.isVisible()
     assert window.toggle_inspector_action.isChecked()
-    assert window.inspector_button.toolTip() == "Hide Inspector"
+    assert window.inspector_button.toolTip() == "Hide more info"
 
     window.set_inspector_visible(False)
     application.processEvents()
     assert window.inspector.isHidden()
-    assert window.inspector_button.toolTip() == "Show Inspector"
+    assert window.inspector_button.toolTip() == "Show more info"
+    window.close()
+
+
+def test_more_info_is_one_responsive_sidebar_control(
+    application: QApplication,
+) -> None:
+    window = MainWindow()
+    window.show()
+    application.processEvents()
+    button = window.inspector_button
+    assert button.text() == "More info"
+    assert button.layoutDirection() is Qt.LayoutDirection.RightToLeft
+    assert not button.icon().isNull()
+    assert button.toolTip() == "Show more info"
+    assert button.width() > DEFAULT_LAYOUT_TOKENS.control_height
+    assert not window.findChildren(type(button), "centralManualFitButton")
+    closed_width = button.width()
+
+    button.click()
+    application.processEvents()
+    assert window.inspector.isVisible()
+    assert button.isChecked()
+    assert button.text() == ""
+    assert button.width() == DEFAULT_LAYOUT_TOKENS.control_height
+    assert button.width() < closed_width
+    assert not button.icon().isNull()
+    assert button.toolTip() == "Hide more info"
+    assert window.inspector_context_label is not None
+
+    button.click()
+    application.processEvents()
+    assert window.inspector.isHidden()
+    assert not button.isChecked()
+    assert button.text() == "More info"
+    assert button.width() == closed_width
+    assert button.toolTip() == "Show more info"
+    window.close()
+
+
+def test_scientific_workspace_minimum_prevents_sidebar_overlap(
+    application: QApplication,
+) -> None:
+    window = MainWindow()
+    window.show()
+    window.resize(760, 600)
+    application.processEvents()
+    minimum = DEFAULT_LAYOUT_TOKENS.scientific_workspace_min_width
+    assert window.central_workspace.minimumWidth() == minimum
+    assert window.central_workspace.width() >= minimum
+    original_width = window.width()
+
+    window.set_inspector_visible(True)
+    application.processEvents()
+    assert window.central_workspace.width() >= minimum
+    assert window.minimumWidth() >= (
+        window.workspace.minimumWidth()
+        + minimum
+        + window.inspector.minimumWidth()
+        + 2 * window.splitter.handleWidth()
+    )
+    assert window.inspector.x() >= (
+        window.central_workspace.x() + window.central_workspace.width()
+    )
+    window.resize(760, 600)
+    application.processEvents()
+    assert window.width() >= window.minimumWidth()
+    assert window.central_workspace.width() >= minimum
+
+    window.set_inspector_visible(False)
+    application.processEvents()
+    assert window.minimumWidth() == 760
+    assert window.width() == original_width
+    assert window.central_workspace.width() >= minimum
     window.close()
 
 
@@ -146,6 +220,91 @@ def test_repeated_inspector_show_hide_restores_automatic_window_expansion(
         application.processEvents()
 
     assert window.size() == original_size
+    window.close()
+
+
+def test_inspector_close_restores_preopen_width_after_minimum_grows(
+    application: QApplication,
+) -> None:
+    window = MainWindow()
+    window.show()
+    window.resize(760, 600)
+    application.processEvents()
+    assert window.width() == 760
+
+    window.set_inspector_visible(True)
+    application.processEvents()
+    assert window.width() > 760
+    window.inspector.setMinimumWidth(window.inspector.minimumWidth() + 31)
+    window._enforce_inspector_minimum_width()
+    application.processEvents()
+    assert window.width() >= window.minimumWidth()
+
+    window.set_inspector_visible(False)
+    application.processEvents()
+    assert window.width() == 760
+    assert window._inspector_preopen_width is None
+    window.close()
+
+
+def test_inspector_width_restoration_has_no_repeated_cycle_drift(
+    application: QApplication,
+) -> None:
+    window = MainWindow()
+    window.show()
+    window.resize(760, 600)
+    application.processEvents()
+
+    for extra_minimum in (17, 29, 43):
+        window.set_inspector_visible(True)
+        application.processEvents()
+        window.inspector.setMinimumWidth(
+            INSPECTOR_BASE_MINIMUM_WIDTH + extra_minimum,
+        )
+        window._enforce_inspector_minimum_width()
+        application.processEvents()
+        window.set_inspector_visible(False)
+        application.processEvents()
+        assert window.width() == 760
+
+    window.close()
+
+
+def test_inspector_close_does_not_resize_when_open_required_no_expansion(
+    application: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = MainWindow()
+    window.show()
+    window.resize(1200, 600)
+    application.processEvents()
+    monkeypatch.setattr(window, "_expand_for_inspector", lambda: 0)
+
+    window.set_inspector_visible(True)
+    application.processEvents()
+    assert window.width() == 1200
+    window.set_inspector_visible(False)
+    application.processEvents()
+    assert window.width() == 1200
+    window.close()
+
+
+def test_inspector_width_restoration_respects_current_hard_minimum(
+    application: QApplication,
+) -> None:
+    window = MainWindow()
+    window.show()
+    window.resize(760, 600)
+    application.processEvents()
+    window.set_inspector_visible(True)
+    application.processEvents()
+    hard_minimum = window.minimumWidth() + 100
+    window.setMinimumWidth(hard_minimum)
+
+    window.set_inspector_visible(False)
+    application.processEvents()
+    assert window.minimumWidth() == hard_minimum
+    assert window.width() >= hard_minimum
     window.close()
 
 

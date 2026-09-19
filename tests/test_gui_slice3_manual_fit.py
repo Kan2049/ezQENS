@@ -1967,7 +1967,7 @@ def test_manual_disclosures_share_compact_icon_treatment(
     window.close()
 
 
-def test_central_manual_fit_entry_targets_open_dataset_and_shows_active_state(
+def test_manual_fit_menu_targets_open_dataset_after_workspace_selection(
     application: QApplication,
 ) -> None:
     window, project, opened = _window_with_sample(application)
@@ -1985,17 +1985,14 @@ def test_central_manual_fit_entry_targets_open_dataset_and_shows_active_state(
     assert selected_item is not None
     window.workspace.tree.setCurrentItem(selected_item)
 
-    assert window.manual_fit_button.text() == "Fitting Parameters"
-    assert not window.manual_fit_button.isHidden()
-    assert window.manual_fit_button.isEnabled()
-    assert not window.manual_fit_button.isChecked()
-    window.manual_fit_button.click()
+    assert window.manual_fit_action.isEnabled()
+    window.manual_fit_action.trigger()
 
     assert window._manual_owner == (project, opened.workflow_dataset_id)
     assert window._open_dataset is opened
-    assert window.manual_fit_button.isChecked()
+    assert window.inspector_button.isChecked()
     window.close_manual_fit()
-    assert not window.manual_fit_button.isChecked()
+    assert window._manual_draft is None
     window.close()
 
 
@@ -2010,8 +2007,6 @@ def test_resolution_manual_fit_eligibility_follows_public_workflow_boundary(
 
     assert not available
     assert "require a Sample dataset" in detail
-    assert not window.manual_fit_button.isHidden()
-    assert not window.manual_fit_button.isEnabled()
     assert not window.manual_fit_action.isEnabled()
     window.close()
 
@@ -3221,6 +3216,34 @@ def test_idle_spectrum_drag_zooms_live_in_either_direction_and_tiny_drag_is_safe
     )
     assert view.spectrum_axes.get_xlim() == limits_before_tiny_drag[0]
     assert view.spectrum_axes.get_ylim() == limits_before_tiny_drag[1]
+
+    view.reset_view()
+    view.canvas.draw()  # type: ignore[no-untyped-call]
+    axes = view.spectrum_axes
+    assert axes is not None
+    initial_x = axes.get_xlim()
+    initial_y = axes.get_ylim()
+    center = (float(np.mean(initial_x)), float(np.mean(initial_y)))
+    view._on_spectrum_button_press(
+        _spectrum_pointer_event(window, center[0], center[1], pressed=True),
+    )
+    assert view.canvas.pointer_capture_active
+    outside = cast(
+        MouseEvent,
+        SimpleNamespace(
+            button=MouseButton.LEFT,
+            inaxes=None,
+            xdata=None,
+            ydata=None,
+            x=axes.bbox.xmax + 60.0,
+            y=axes.bbox.ymin - 60.0,
+        ),
+    )
+    view._on_spectrum_mouse_motion(outside)
+    view._on_spectrum_button_release(outside)
+    assert not view.canvas.pointer_capture_active
+    assert axes.get_xlim() == pytest.approx((center[0], initial_x[1]))
+    assert axes.get_ylim() == pytest.approx((initial_y[0], center[1]))
     window.close()
 
 
@@ -3880,7 +3903,7 @@ def test_workspace_manual_model_progress_and_inspector_heading(
     assert "Ready for Fit" in sample_state_tooltip()
     window.show_manual_fit(project, sample)
     assert window.manual_fit_editor.title.text() == "Fitting Parameters"
-    assert window.manual_fit_button.text() == "Fitting Parameters"
+    assert window.inspector_button.text() == ""
     assert window.manual_fit_action.text() == "Fitting Parameters…"
     assert window.manual_fit_editor.add_button.toolTip() == "Add a fitting function"
     assert (

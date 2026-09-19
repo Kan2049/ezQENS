@@ -3273,7 +3273,7 @@ def test_autofit_dialog_preview_and_explicit_adoption_are_group_local(
     ]
     control_text = {control.text() for control in controls}
     assert not {"MultiFit", "Fit All Groups"} & control_text
-    assert window.manual_fit_button.text() == "Fitting Parameters"
+    assert window.inspector_button.text() == ""
     assert window.manual_fit_action.text() == "Fitting Parameters…"
     assert window.auto_fit_button.text() == "AutoFit…"
     window.close()
