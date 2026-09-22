@@ -435,6 +435,7 @@ def execute_multi_q_branch(
     fit_excluded_groups: Collection[int] = (),
     derived_result_excluded_groups: Collection[int] = (),
     cancel_requested: Callable[[], bool] | None = None,
+    group_started_callback: Callable[[int], object] | None = None,
     progress_callback: Callable[[MultiQFitOutcome], object] | None = None,
     max_nfev: int = 2500,
 ) -> MultiQBranchResult:
@@ -443,8 +444,10 @@ def execute_multi_q_branch(
     The lower and higher sides maintain independent most-recent-success seed
     chains.  Per-Q configurations already contain target-local bounds, free
     state, fitting selection, and scientific constraints; only initial values
-    are replaced from the predecessor result.  When supplied, progress_callback
-    receives each authoritative terminal outcome and its return value is ignored.
+    are replaced from the predecessor result.  When supplied,
+    group_started_callback receives each non-excluded target immediately before
+    its processing begins, while progress_callback receives each authoritative
+    terminal outcome.  Observer return values are ignored.
     """
 
     if not isinstance(prepared_resolution, PreparedResolution):
@@ -520,6 +523,13 @@ def execute_multi_q_branch(
             except Exception:
                 pass
 
+    def publish_started(group_index: int) -> None:
+        if group_started_callback is not None:
+            try:
+                group_started_callback(group_index)
+            except Exception:
+                pass
+
     def finalize(outcome: MultiQFitOutcome) -> None:
         if outcome.status is MultiQFitStatus.NOT_RUN:
             raise RuntimeError("a NOT_RUN outcome cannot be finalized")
@@ -541,6 +551,7 @@ def execute_multi_q_branch(
             if cancel_requested is not None and cancel_requested():
                 cancelled = True
                 return
+            publish_started(group_index)
             target = configurations[group_index]
             if target is None:
                 diagnostic = _blocked_diagnostic(

@@ -501,6 +501,14 @@ intercepted. Selected-candidate continuation wraps each branch event in a frozen
 order, and cancellation emits nothing for a later candidate whose branch never
 starts.
 
+The executor also accepts an optional target-start observer. It publishes one
+group index after that target's cancellation check passes and immediately before
+configuration, seeding, readiness, or fitting work begins. The retained anchor,
+predeclared fitting exclusions, cancelled-before-start targets, and future
+`NOT_RUN` groups do not produce start events. A started target can terminate as
+`SUCCESS`, `FAILED`, or `BLOCKED`. This observer has the same exception-isolation
+boundary as terminal progress and is exposed unchanged by Manual `Fit to all Q`.
+
 Each production `FitResult` carries a small runtime `FitContextBinding` to the
 exact immutable `PreparedResolution`, `FittingSelection`, and group index used
 for that execution. This is an object association, not a persistent UUID,
@@ -613,6 +621,34 @@ interior. It never writes the adjusted value back into `ManualModelState`.
 
 These are in-memory application values, not scientific persistence entities or
 a final project-file contract.
+
+For M6-S5A, `ActiveTransferableConstraints` is a read-only view of only the
+currently effective Manual constraints: enabled supplied user bounds, fixed
+parameter values, and complete center-sharing relationships identified by typed
+runtime identity. Dormant bounds, free parameters, and non-center equality ties
+are not transfer choices. `MultiQConstraintTransferPolicy` stores only selected
+typed references/relationship identities and validates them atomically against
+that active view; it does not contain numerical constraint values, relationship
+members, fitted values, model composition, Resolution, Q assignment, or fitting
+selection.
+
+The Manual `Fit to all Q` path requires an existing successful Current
+single-Q `FitResult` from the active anchor context and never fits or refits the
+anchor. The anchor's current `ManualModelState` supplies mandatory composition,
+stable component identities, and the authoritative values behind the selected
+S5 Bounds, Fixed, and atomic center-Tie decisions. Unselected constraints retain
+compatible target-local state; selected constraints are materialized through
+the ordinary Manual path, while predecessor fitted values continue to seed only
+free target parameters through the existing same-side nearest-success chains.
+An incompatible target remains blocked rather than weakening a transferred
+constraint.
+
+`FittingWorkspaceState` distinguishes an unsaved Current Result from a Current
+Result associated with one saved in-memory snapshot. Save As appends a snapshot
+and binds Current to it. A later Run may replace Current while explicitly
+retaining that association, without changing the snapshot; explicit Save then
+updates only that associated entry. Save without an association fails, while a
+later Save As always appends and rebinds. This lifecycle is in-memory only.
 
 ### 4.7 Later dynamics values — provisional
 

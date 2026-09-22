@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Collection, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import InitVar, dataclass, field, replace
 from enum import StrEnum
 
 import numpy as np
@@ -39,7 +39,6 @@ from .manual import (
     ManualFitDraft,
     SingleQAutoFitOutcome,
     _single_q_auto_fit_context_unchanged,
-    run_manual_fit,
     run_single_q_auto_fit,
 )
 from .manual_state import (
@@ -62,6 +61,238 @@ class MethodTransferCategory(StrEnum):
     RESOLUTION = "resolution"
     Q_BINS = "q_bins"
     FITTING_SELECTION = "fitting_selection"
+
+
+class CenterTieKind(StrEnum):
+    """Runtime identities for transferable center-sharing topology."""
+
+    LEGACY_SHARED_CENTER = "legacy_shared_center"
+    CENTER_GROUP = "center_group"
+    PARAMETER_TIE = "parameter_tie"
+
+
+@dataclass(frozen=True, slots=True)
+class CenterTieIdentity:
+    """Atomic identity of one active center-sharing relationship."""
+
+    kind: CenterTieKind
+    group_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.kind, CenterTieKind):
+            raise ValueError("center tie kind must be a CenterTieKind")
+        if self.kind is CenterTieKind.LEGACY_SHARED_CENTER:
+            if self.group_id is not None:
+                raise ValueError("legacy shared center must not have a group_id")
+            return
+        if (
+            not isinstance(self.group_id, str)
+            or not self.group_id.strip()
+            or self.group_id != self.group_id.strip()
+        ):
+            raise ValueError("center tie group_id must be a canonical nonempty string")
+
+
+@dataclass(frozen=True, slots=True)
+class ActiveBoundsConstraint:
+    """One currently enabled Manual user-bounds constraint."""
+
+    reference: ParameterReference
+    lower: float | None
+    upper: float | None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.reference, ParameterReference):
+            raise ValueError("bounds reference must be a ParameterReference")
+        if self.lower is None and self.upper is None:
+            raise ValueError("active bounds require at least one supplied limit")
+        if any(
+            value is not None and not np.isfinite(float(value))
+            for value in (self.lower, self.upper)
+        ):
+            raise ValueError("active bounds limits must be finite when supplied")
+
+
+@dataclass(frozen=True, slots=True)
+class ActiveFixedConstraint:
+    """One currently fixed Manual parameter and its authoritative value."""
+
+    reference: ParameterReference
+    value: float
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.reference, ParameterReference):
+            raise ValueError("fixed reference must be a ParameterReference")
+        if not np.isfinite(float(self.value)):
+            raise ValueError("fixed value must be finite")
+
+
+@dataclass(frozen=True, slots=True)
+class ActiveCenterTieConstraint:
+    """One complete active center-sharing relationship."""
+
+    identity: CenterTieIdentity
+    members: tuple[ParameterReference, ...]
+
+    def __post_init__(self) -> None:
+        members = tuple(self.members)
+        if not isinstance(self.identity, CenterTieIdentity):
+            raise ValueError("center tie identity must be a CenterTieIdentity")
+        if not members:
+            raise ValueError("active center tie requires at least one member")
+        if any(
+            not isinstance(member, ParameterReference)
+            or member.family is not ParameterFamily.CENTER
+            or member.component.family
+            not in (ComponentFamily.ELASTIC, ComponentFamily.LORENTZIAN)
+            for member in members
+        ):
+            raise ValueError(
+                "center tie members must be Elastic/Lorentzian Center references"
+            )
+        if len(set(members)) != len(members):
+            raise ValueError("center tie members must be unique")
+        object.__setattr__(self, "members", members)
+
+
+@dataclass(frozen=True, slots=True)
+class ActiveTransferableConstraints:
+    """Active Manual constraints that S5 may offer for selective transfer."""
+
+    bounds: tuple[ActiveBoundsConstraint, ...] = ()
+    fixed: tuple[ActiveFixedConstraint, ...] = ()
+    center_ties: tuple[ActiveCenterTieConstraint, ...] = ()
+
+    def __post_init__(self) -> None:
+        bounds = tuple(self.bounds)
+        fixed = tuple(self.fixed)
+        center_ties = tuple(self.center_ties)
+        if any(not isinstance(item, ActiveBoundsConstraint) for item in bounds):
+            raise ValueError("bounds must contain ActiveBoundsConstraint values")
+        if any(not isinstance(item, ActiveFixedConstraint) for item in fixed):
+            raise ValueError("fixed must contain ActiveFixedConstraint values")
+        if any(not isinstance(item, ActiveCenterTieConstraint) for item in center_ties):
+            raise ValueError(
+                "center_ties must contain ActiveCenterTieConstraint values"
+            )
+        if len({item.reference for item in bounds}) != len(bounds):
+            raise ValueError("active bounds references must be unique")
+        if len({item.reference for item in fixed}) != len(fixed):
+            raise ValueError("active fixed references must be unique")
+        if len({item.identity for item in center_ties}) != len(center_ties):
+            raise ValueError("active center tie identities must be unique")
+        object.__setattr__(self, "bounds", bounds)
+        object.__setattr__(self, "fixed", fixed)
+        object.__setattr__(self, "center_ties", center_ties)
+
+
+def active_transferable_constraints(
+    model: ManualModelState,
+) -> ActiveTransferableConstraints:
+    """Describe only constraints currently active in one Manual model."""
+
+    references = model.parameter_references()
+    bounds: list[ActiveBoundsConstraint] = []
+    fixed: list[ActiveFixedConstraint] = []
+    for reference in references:
+        intent = model.parameter_intent(reference)
+        if intent.user_bounds_enabled and (
+            intent.user_lower_limit is not None or intent.user_upper_limit is not None
+        ):
+            bounds.append(
+                ActiveBoundsConstraint(
+                    reference,
+                    intent.user_lower_limit,
+                    intent.user_upper_limit,
+                )
+            )
+        if not intent.free:
+            fixed.append(ActiveFixedConstraint(reference, intent.current_value))
+
+    center_ties: list[ActiveCenterTieConstraint] = []
+    legacy_candidates: list[ParameterReference] = []
+    if model.elastic_area is not None and model.elastic_center_group is None:
+        legacy_candidates.append(
+            ParameterReference(ELASTIC_COMPONENT, ParameterFamily.CENTER)
+        )
+    legacy_candidates.extend(
+        ParameterReference(component.identity, ParameterFamily.CENTER)
+        for component in model.lorentzians
+        if component.center is None and component.center_group is None
+    )
+    legacy_members = tuple(
+        reference for reference in legacy_candidates if model.tie_for(reference) is None
+    )
+    if len(legacy_members) >= 2:
+        center_ties.append(
+            ActiveCenterTieConstraint(
+                CenterTieIdentity(CenterTieKind.LEGACY_SHARED_CENTER),
+                legacy_members,
+            )
+        )
+    for center_group in model.center_groups:
+        center_ties.append(
+            ActiveCenterTieConstraint(
+                CenterTieIdentity(CenterTieKind.CENTER_GROUP, center_group.group_id),
+                model.center_group_members(center_group.group_id),
+            )
+        )
+    for tie_group in model.parameter_ties:
+        if tie_group.family is ParameterFamily.CENTER:
+            center_ties.append(
+                ActiveCenterTieConstraint(
+                    CenterTieIdentity(
+                        CenterTieKind.PARAMETER_TIE,
+                        tie_group.group_id,
+                    ),
+                    tie_group.members,
+                )
+            )
+    return ActiveTransferableConstraints(
+        bounds=tuple(bounds),
+        fixed=tuple(fixed),
+        center_ties=tuple(center_ties),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class MultiQConstraintTransferPolicy:
+    """Effective S5 transfer decisions validated against one active model."""
+
+    model: InitVar[ManualModelState]
+    bounds: frozenset[ParameterReference] = field(default_factory=frozenset)
+    fixed: frozenset[ParameterReference] = field(default_factory=frozenset)
+    center_ties: frozenset[CenterTieIdentity] = field(default_factory=frozenset)
+
+    def __post_init__(self, model: ManualModelState) -> None:
+        if not isinstance(model, ManualModelState):
+            raise ValueError("model must be a ManualModelState")
+        active = active_transferable_constraints(model)
+        bounds = frozenset(self.bounds)
+        fixed = frozenset(self.fixed)
+        center_ties = frozenset(self.center_ties)
+        if any(not isinstance(item, ParameterReference) for item in bounds | fixed):
+            raise ValueError(
+                "bounds/fixed selections must be ParameterReference values"
+            )
+        if any(not isinstance(item, CenterTieIdentity) for item in center_ties):
+            raise ValueError("center tie selections must be CenterTieIdentity values")
+        active_bounds = {item.reference for item in active.bounds}
+        active_fixed = {item.reference for item in active.fixed}
+        active_ties = {item.identity for item in active.center_ties}
+        if not bounds <= active_bounds:
+            raise ValueError(
+                "bounds selection contains an inactive or unknown reference"
+            )
+        if not fixed <= active_fixed:
+            raise ValueError(
+                "fixed selection contains an inactive or unknown reference"
+            )
+        if not center_ties <= active_ties:
+            raise ValueError("center tie selection contains an inactive or unknown tie")
+        object.__setattr__(self, "bounds", bounds)
+        object.__setattr__(self, "fixed", fixed)
+        object.__setattr__(self, "center_ties", center_ties)
 
 
 @dataclass(frozen=True, slots=True)
@@ -807,6 +1038,28 @@ class FittingWorkspaceState:
     current_result: FitResult | MultiQBranchResult | None = None
     saved_methods: tuple[SavedFittingMethod, ...] = ()
     saved_results: tuple[SavedFitResult, ...] = ()
+    current_saved_result_index: int | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "saved_methods", tuple(self.saved_methods))
+        object.__setattr__(self, "saved_results", tuple(self.saved_results))
+        index = self.current_saved_result_index
+        if index is None:
+            return
+        if self.current_result is None:
+            raise ValueError("a saved-Result association requires a current Result")
+        if isinstance(index, bool) or not isinstance(index, int):
+            raise ValueError("current_saved_result_index must be an integer or None")
+        if index < 0 or index >= len(self.saved_results):
+            raise ValueError("current_saved_result_index is out of range")
+
+    @property
+    def associated_saved_result(self) -> SavedFitResult | None:
+        """Return the saved snapshot associated with Current, when one exists."""
+
+        if self.current_saved_result_index is None:
+            return None
+        return self.saved_results[self.current_saved_result_index]
 
 
 def set_working_method(
@@ -819,8 +1072,18 @@ def set_working_method(
 def set_current_result(
     state: FittingWorkspaceState,
     result: FitResult | MultiQBranchResult,
+    *,
+    retain_saved_association: bool = False,
 ) -> FittingWorkspaceState:
-    return replace(state, current_result=result)
+    if not isinstance(retain_saved_association, bool):
+        raise ValueError("retain_saved_association must be boolean")
+    return replace(
+        state,
+        current_result=result,
+        current_saved_result_index=(
+            state.current_saved_result_index if retain_saved_association else None
+        ),
+    )
 
 
 def save_working_method(
@@ -835,12 +1098,43 @@ def save_working_method(
 
 def save_current_result(
     state: FittingWorkspaceState,
+    name: str | None = None,
+) -> FittingWorkspaceState:
+    """Save Current into its associated snapshot, or Save As when named.
+
+    The optional name preserves the established named-call behavior as Save As.
+    An unnamed call is the explicit Save operation and requires an association.
+    """
+
+    if name is not None:
+        return save_current_result_as(state, name)
+    if state.current_result is None:
+        raise ValueError("there is no current Result to save")
+    index = state.current_saved_result_index
+    if index is None:
+        raise ValueError("the current Result is not associated; use Save As")
+    saved_results = list(state.saved_results)
+    saved_results[index] = SavedFitResult(
+        saved_results[index].name,
+        state.current_result,
+    )
+    return replace(state, saved_results=tuple(saved_results))
+
+
+def save_current_result_as(
+    state: FittingWorkspaceState,
     name: str,
 ) -> FittingWorkspaceState:
+    """Append an immutable Current snapshot and associate Current with it."""
+
     if state.current_result is None:
         raise ValueError("there is no current Result to save")
     saved = SavedFitResult(name, state.current_result)
-    return replace(state, saved_results=(*state.saved_results, saved))
+    return replace(
+        state,
+        saved_results=(*state.saved_results, saved),
+        current_saved_result_index=len(state.saved_results),
+    )
 
 
 def _resolved_context(
@@ -1013,19 +1307,407 @@ def _branch_configurations(
     return tuple(configurations)
 
 
-def _method_for_branch_composition(
-    model: SpectralModelDefinition,
-) -> FittingMethod:
-    """Create a composition-only Method without promoting anchor-local options."""
+def _center_modes(
+    model: ManualModelState,
+) -> dict[ParameterReference, tuple[MethodCenterMode, str | None]]:
+    """Return the declared center mode for every component-owned center."""
 
-    composition = MethodComposition(
-        elastic_present=model.elastic_area is not None,
-        lorentzian_identities=tuple(
-            component.identity for component in model.lorentzians
-        ),
-        background=model.background,
+    modes: dict[ParameterReference, tuple[MethodCenterMode, str | None]] = {}
+    if model.elastic_area is not None:
+        reference = ParameterReference(ELASTIC_COMPONENT, ParameterFamily.CENTER)
+        modes[reference] = (
+            (
+                MethodCenterMode.CENTER_GROUP
+                if model.elastic_center_group is not None
+                else MethodCenterMode.LEGACY_SHARED
+            ),
+            model.elastic_center_group,
+        )
+    for component in model.lorentzians:
+        reference = ParameterReference(component.identity, ParameterFamily.CENTER)
+        if component.center is not None:
+            modes[reference] = (MethodCenterMode.INDEPENDENT, None)
+        elif component.center_group is not None:
+            modes[reference] = (
+                MethodCenterMode.CENTER_GROUP,
+                component.center_group,
+            )
+        else:
+            modes[reference] = (MethodCenterMode.LEGACY_SHARED, None)
+    return modes
+
+
+def _compatible_shared_center_intent(
+    members: Sequence[ParameterReference],
+    resolved_intents: dict[ParameterReference, ManualParameterIntent],
+) -> ManualParameterIntent:
+    """Return one order-independent intent for a resulting shared center slot."""
+
+    intents = tuple(resolved_intents[member] for member in members)
+    states = {
+        (
+            intent.free,
+            intent.user_bounds_enabled,
+            intent.user_lower_limit,
+            intent.user_upper_limit,
+        )
+        for intent in intents
+    }
+    if len(states) != 1:
+        raise ValueError(
+            "selected center tie members have incompatible resulting "
+            "Manual parameter state"
+        )
+    free, bounds_enabled, lower, upper = states.pop()
+    current_values = {intent.current_value for intent in intents}
+    if not free:
+        if len(current_values) != 1:
+            raise ValueError(
+                "selected center tie members have incompatible resulting "
+                "Manual parameter state"
+            )
+        current_value = current_values.pop()
+    else:
+        minimum = min(current_values)
+        maximum = max(current_values)
+        current_value = minimum + 0.5 * (maximum - minimum)
+        if not np.isfinite(current_value):
+            current_value = 0.5 * minimum + 0.5 * maximum
+        if not np.isfinite(current_value):
+            raise ValueError(
+                "selected center tie members have no finite temporary current value"
+            )
+    return ManualParameterIntent(
+        current_value,
+        lower,
+        upper,
+        free=free,
+        user_bounds_enabled=bounds_enabled,
     )
-    return capture_fitting_method(_default_model(composition))
+
+
+def _apply_s5_center_ties(
+    source: ManualModelState,
+    target: ManualModelState,
+    policy: MultiQConstraintTransferPolicy,
+    resolved_intents: dict[ParameterReference, ManualParameterIntent],
+) -> ManualModelState:
+    """Overlay only selected complete source center relationships."""
+
+    if not policy.center_ties:
+        return target
+    active_by_identity = {
+        item.identity: item
+        for item in active_transferable_constraints(source).center_ties
+    }
+    selected = tuple(
+        relationship
+        for relationship in active_by_identity.values()
+        if relationship.identity in policy.center_ties
+    )
+
+    selected_intents = {
+        relationship.identity: _compatible_shared_center_intent(
+            relationship.members,
+            resolved_intents,
+        )
+        for relationship in selected
+    }
+    target_references = set(target.parameter_references())
+    if any(
+        member not in target_references
+        for relationship in selected
+        for member in relationship.members
+    ):
+        raise ValueError(
+            "selected center relationship is incompatible with target composition"
+        )
+
+    modes = _center_modes(target)
+    selected_members = {
+        member for relationship in selected for member in relationship.members
+    }
+    selected_center_groups = {
+        relationship.identity.group_id: relationship
+        for relationship in selected
+        if relationship.identity.kind is CenterTieKind.CENTER_GROUP
+    }
+
+    for group_id, relationship in selected_center_groups.items():
+        if group_id is None:
+            raise RuntimeError("validated center group lost its group_id")
+        existing = next(
+            (item for item in target.center_groups if item.group_id == group_id),
+            None,
+        )
+        if existing is not None and set(target.center_group_members(group_id)) != set(
+            relationship.members
+        ):
+            raise ValueError(
+                "target center-group identity has incompatible complete membership"
+            )
+
+    for relationship in selected:
+        if relationship.identity.kind is CenterTieKind.LEGACY_SHARED_CENTER:
+            members = set(relationship.members)
+            for reference, (mode, _group_id) in tuple(modes.items()):
+                if mode is not MethodCenterMode.LEGACY_SHARED or reference in members:
+                    continue
+                if reference.component == ELASTIC_COMPONENT:
+                    raise ValueError(
+                        "selected legacy center tie cannot detach target Elastic "
+                        "from an incompatible legacy relationship"
+                    )
+                modes[reference] = (MethodCenterMode.INDEPENDENT, None)
+            for member in relationship.members:
+                modes[member] = (MethodCenterMode.LEGACY_SHARED, None)
+        elif relationship.identity.kind is CenterTieKind.CENTER_GROUP:
+            group_id = relationship.identity.group_id
+            if group_id is None:
+                raise RuntimeError("validated center group lost its group_id")
+            for member in relationship.members:
+                modes[member] = (MethodCenterMode.CENTER_GROUP, group_id)
+        else:
+            for member in relationship.members:
+                if modes[member][0] is not MethodCenterMode.LEGACY_SHARED:
+                    continue
+                if member.component == ELASTIC_COMPONENT:
+                    raise ValueError(
+                        "selected general center tie cannot detach target Elastic "
+                        "from legacy shared-center state"
+                    )
+                modes[member] = (MethodCenterMode.INDEPENDENT, None)
+
+    center_groups: list[ManualCenterGroupState] = []
+    for center_group in target.center_groups:
+        if center_group.group_id in selected_center_groups:
+            continue
+        if any(
+            mode is MethodCenterMode.CENTER_GROUP and group_id == center_group.group_id
+            for mode, group_id in modes.values()
+        ):
+            center_groups.append(center_group)
+    for group_id, relationship in selected_center_groups.items():
+        if group_id is None:
+            raise RuntimeError("validated center group lost its group_id")
+        center_groups.append(
+            ManualCenterGroupState(
+                group_id,
+                selected_intents[relationship.identity],
+            )
+        )
+
+    legacy_members = tuple(
+        reference
+        for reference, (mode, _group_id) in modes.items()
+        if mode is MethodCenterMode.LEGACY_SHARED
+    )
+    selected_legacy = next(
+        (
+            relationship
+            for relationship in selected
+            if relationship.identity.kind is CenterTieKind.LEGACY_SHARED_CENTER
+        ),
+        None,
+    )
+    energy_shift = (
+        selected_intents[selected_legacy.identity]
+        if selected_legacy is not None
+        else resolved_intents[legacy_members[0]]
+        if legacy_members
+        else None
+    )
+    elastic_reference = ParameterReference(
+        ELASTIC_COMPONENT,
+        ParameterFamily.CENTER,
+    )
+    elastic_center_group = (
+        modes[elastic_reference][1]
+        if elastic_reference in modes
+        and modes[elastic_reference][0] is MethodCenterMode.CENTER_GROUP
+        else None
+    )
+    lorentzians = tuple(
+        replace(
+            component,
+            center=(
+                resolved_intents[
+                    ParameterReference(component.identity, ParameterFamily.CENTER)
+                ]
+                if modes[
+                    ParameterReference(component.identity, ParameterFamily.CENTER)
+                ][0]
+                is MethodCenterMode.INDEPENDENT
+                else None
+            ),
+            center_group=(
+                modes[ParameterReference(component.identity, ParameterFamily.CENTER)][1]
+                if modes[
+                    ParameterReference(component.identity, ParameterFamily.CENTER)
+                ][0]
+                is MethodCenterMode.CENTER_GROUP
+                else None
+            ),
+        )
+        for component in target.lorentzians
+    )
+
+    selected_parameter_ties = {
+        relationship.identity.group_id: relationship
+        for relationship in selected
+        if relationship.identity.kind is CenterTieKind.PARAMETER_TIE
+    }
+    parameter_ties: list[ManualParameterTieState] = []
+    for tie_group in target.parameter_ties:
+        if tie_group.group_id in selected_parameter_ties:
+            selected_group = selected_parameter_ties[tie_group.group_id]
+            if selected_group is None:
+                raise RuntimeError("validated parameter tie lost its identity")
+            if tie_group.family is not ParameterFamily.CENTER or set(
+                tie_group.members
+            ) != set(selected_group.members):
+                raise ValueError(
+                    "target parameter-tie identity has incompatible membership"
+                )
+            continue
+        if tie_group.family is not ParameterFamily.CENTER:
+            parameter_ties.append(tie_group)
+            continue
+        remaining = tuple(
+            member for member in tie_group.members if member not in selected_members
+        )
+        if remaining:
+            parameter_ties.append(replace(tie_group, members=remaining))
+    for group_id, relationship in selected_parameter_ties.items():
+        if group_id is None:
+            raise RuntimeError("validated parameter tie lost its group_id")
+        if any(tie_group.group_id == group_id for tie_group in parameter_ties):
+            raise ValueError("selected center tie conflicts with a target tie identity")
+        parameter_ties.append(
+            ManualParameterTieState(
+                group_id,
+                relationship.members,
+                selected_intents[relationship.identity],
+            )
+        )
+
+    return ManualModelState(
+        energy_shift=energy_shift,
+        elastic_area=target.elastic_area,
+        lorentzians=lorentzians,
+        background=target.background,
+        b0=target.b0,
+        b1=target.b1,
+        center_groups=tuple(center_groups),
+        elastic_center_group=elastic_center_group,
+        parameter_ties=tuple(parameter_ties),
+    )
+
+
+def _resolved_s5_parameter_intents(
+    source: ManualModelState,
+    target: ManualModelState,
+    policy: MultiQConstraintTransferPolicy,
+) -> dict[ParameterReference, ManualParameterIntent]:
+    """Resolve selected categories per reference before topology can share them."""
+
+    target_references = set(target.parameter_references())
+    if not (policy.bounds | policy.fixed) <= target_references:
+        raise ValueError("selected parameter constraint is absent from target model")
+    resolved = {
+        reference: target.parameter_intent(reference)
+        for reference in target.parameter_references()
+    }
+    for reference in target.parameter_references():
+        intent = resolved[reference]
+        source_intent = source.parameter_intent(reference)
+        if reference in policy.bounds:
+            intent = replace(
+                intent,
+                user_lower_limit=source_intent.user_lower_limit,
+                user_upper_limit=source_intent.user_upper_limit,
+                user_bounds_enabled=source_intent.user_bounds_enabled,
+            )
+        if reference in policy.fixed:
+            if source_intent.free:
+                raise RuntimeError("validated Fixed transfer became free")
+            intent = replace(
+                intent,
+                current_value=source_intent.current_value,
+                free=False,
+            )
+        resolved[reference] = intent
+    return resolved
+
+
+def _apply_resolved_s5_parameter_intents(
+    model: ManualModelState,
+    resolved_intents: dict[ParameterReference, ManualParameterIntent],
+) -> ManualModelState:
+    """Materialize one compatible intent per final optimizer slot."""
+
+    slots: dict[object, list[ParameterReference]] = {}
+    for reference in model.parameter_references():
+        slots.setdefault(_slot_key(model, reference), []).append(reference)
+    updated = model
+    for members in slots.values():
+        if members[0].family is ParameterFamily.CENTER:
+            intent = _compatible_shared_center_intent(members, resolved_intents)
+        else:
+            intents = {resolved_intents[member] for member in members}
+            if len(intents) != 1:
+                raise ValueError(
+                    "target shared parameter members have incompatible resulting "
+                    "Manual parameter state"
+                )
+            intent = intents.pop()
+        updated = replace_parameter_intent(updated, members[0], intent)
+    return updated
+
+
+def _s5_target_model(
+    source: ManualModelState,
+    target: ManualModelState | None,
+    policy: MultiQConstraintTransferPolicy,
+) -> ManualModelState:
+    """Build one fixed-composition target with only selected S5 constraints."""
+
+    composition = _composition(source)
+    base: ManualModelState | None = None
+    if target is not None and _composition_compatible(target, composition):
+        base = _with_branch_component_identities(
+            target,
+            composition,
+            preserve_target_component_state=True,
+        )
+    if base is None:
+        base = _default_model(composition)
+    resolved_intents = _resolved_s5_parameter_intents(source, base, policy)
+    base = _apply_s5_center_ties(source, base, policy, resolved_intents)
+    return _apply_resolved_s5_parameter_intents(base, resolved_intents)
+
+
+def _s5_branch_configurations(
+    draft: ManualFitDraft,
+    context: ManualFitContext,
+    source: ManualModelState,
+    policy: MultiQConstraintTransferPolicy,
+) -> tuple[SpectralModelDefinition | None, ...]:
+    configurations: list[SpectralModelDefinition | None] = []
+    for group_index, setup in enumerate(draft.setups):
+        try:
+            target = _s5_target_model(source, setup.model, policy)
+            materialized = materialize_manual_model(
+                target,
+                context.prepared_resolution,
+                context.selection,
+                group_index,
+            )
+        except (ValueError, _ComponentCorrespondenceError):
+            configurations.append(None)
+        else:
+            configurations.append(materialized.fit_model)
+    return tuple(configurations)
 
 
 def fit_all_q_from_current(
@@ -1034,75 +1716,72 @@ def fit_all_q_from_current(
     *,
     anchor_group_index: int,
     current_fit: FitResult | None = None,
+    transfer_policy: MultiQConstraintTransferPolicy | None = None,
     method: FittingMethod | None = None,
     transfer_overrides: MethodTransferOverrides | None = None,
     fit_excluded_groups: Collection[int] = (),
     derived_result_excluded_groups: Collection[int] = (),
     cancel_requested: Callable[[], bool] | None = None,
+    group_started_callback: Callable[[int], object] | None = None,
+    progress_callback: Callable[[MultiQFitOutcome], object] | None = None,
     max_nfev: int = 2500,
 ) -> MultiQBranchResult:
-    """Run or retain the active Manual/current anchor, then continue one branch."""
+    """Retain a successful Manual Current Result and continue its branch."""
 
+    if method is not None or transfer_overrides is not None:
+        raise ValueError(
+            "fit_all_q_from_current uses MultiQConstraintTransferPolicy; apply a "
+            "generic Method before creating the current Result"
+        )
+    if current_fit is None:
+        raise ValueError("Fit to all Q requires a current successful Single-Q Result")
+    if not isinstance(current_fit, FitResult):
+        raise ValueError("current_fit must be a FitResult")
+    if not current_fit.diagnostics.optimizer_success:
+        raise ValueError("Fit to all Q requires a successful current Result")
     context = _resolved_context(project, draft, anchor_group_index)
-    overrides = transfer_overrides or MethodTransferOverrides()
-    initial_configurations = _branch_configurations(
-        draft,
+    current_fit = _result_in_active_context(
+        current_fit,
         context,
-        method,
-        overrides,
+        anchor_group_index,
     )
-    anchor_configuration = initial_configurations[anchor_group_index]
-    if current_fit is not None:
-        current_fit = _result_in_active_context(
-            current_fit,
-            context,
+    source = draft.setup(anchor_group_index).model
+    if source is None:
+        raise ValueError("Fit to all Q requires an active anchor Manual model")
+    try:
+        anchor_materialization = materialize_manual_model(
+            source,
+            context.prepared_resolution,
+            context.selection,
             anchor_group_index,
         )
-    if (
-        anchor_configuration is None
-        and method is None
-        and current_fit is not None
-        and current_fit.diagnostics.optimizer_success
+    except ValueError as error:
+        raise ValueError(
+            "the active anchor Manual model is not runnable in its context"
+        ) from error
+    if not _same_core_topology(
+        current_fit.configuration,
+        anchor_materialization.fit_model,
     ):
-        anchor_configuration = current_fit.configuration
-    if anchor_configuration is None:
-        raise ValueError("anchor Method is not runnable in the active context")
-    if (
-        current_fit is None
-        or not current_fit.diagnostics.optimizer_success
-        or not _same_core_topology(current_fit.configuration, anchor_configuration)
-    ):
-        current_fit = run_manual_fit(
-            project,
-            draft.with_model(
-                anchor_group_index,
-                apply_fitting_method(
-                    method,
-                    draft.setup(anchor_group_index).model,
-                    target_resolution_dataset_id=context.resolution.dataset_id,
-                    target_q_bins=context.sample.dataset.q_bins,
-                    target_fitting_selection=context.selection,
-                    overrides=overrides,
-                ).model,
-            )
-            if method is not None
-            else draft,
-            anchor_group_index,
-            max_nfev=max_nfev,
+        raise ValueError(
+            "current Result topology is incompatible with the active Manual model"
         )
-        current_fit = _result_in_active_context(
-            current_fit,
-            context,
-            anchor_group_index,
+    if transfer_policy is None:
+        transfer_policy = MultiQConstraintTransferPolicy(source)
+    elif not isinstance(transfer_policy, MultiQConstraintTransferPolicy):
+        raise ValueError("transfer_policy must be a MultiQConstraintTransferPolicy")
+    else:
+        transfer_policy = MultiQConstraintTransferPolicy(
+            source,
+            bounds=transfer_policy.bounds,
+            fixed=transfer_policy.fixed,
+            center_ties=transfer_policy.center_ties,
         )
-    active_method = method
-    if active_method is None:
-        active_method = _method_for_branch_composition(current_fit.configuration)
-    configurations = _branch_configurations(
+    configurations = _s5_branch_configurations(
         draft,
         context,
-        active_method,
-        overrides,
+        source,
+        transfer_policy,
     )
     return execute_multi_q_branch(
         context.prepared_resolution,
@@ -1113,6 +1792,8 @@ def fit_all_q_from_current(
         fit_excluded_groups=fit_excluded_groups,
         derived_result_excluded_groups=derived_result_excluded_groups,
         cancel_requested=cancel_requested,
+        group_started_callback=group_started_callback,
+        progress_callback=progress_callback,
         max_nfev=max_nfev,
     )
 

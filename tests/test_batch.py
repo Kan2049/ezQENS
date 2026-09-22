@@ -56,8 +56,11 @@ from ezqens.resolution import (
     prepare_measured_resolution,
 )
 from ezqens.workflow import (
+    CenterTieIdentity,
+    CenterTieKind,
     FittingMethod,
     FittingWorkspaceState,
+    ManualCenterGroupState,
     ManualFitContext,
     ManualFitDraft,
     ManualLorentzianState,
@@ -65,11 +68,13 @@ from ezqens.workflow import (
     ManualParameterTieState,
     MethodTransferOptions,
     MethodTransferOverrides,
+    MultiQConstraintTransferPolicy,
     ProjectDataset,
     SelectedAutoFitMultiQResult,
     SelectedAutoFitProgressEvent,
     SingleQAutoFitOutcome,
     WorkflowProject,
+    active_transferable_constraints,
     add_project_dataset,
     apply_fitting_method,
     apply_manual_setup_to_all_groups,
@@ -86,6 +91,7 @@ from ezqens.workflow import (
     run_manual_fit,
     run_single_q_auto_fit,
     save_current_result,
+    save_current_result_as,
     save_working_method,
     set_current_result,
     set_working_method,
@@ -559,7 +565,11 @@ def test_middle_anchor_uses_independent_outward_success_chains(
     ]
     assert starts == [1.0, 1.1, 1.0, 1.3]
     assert [item.seed_group_index for item in result.outcomes] == [1, 2, None, 2, 3]
-    assert result.outcome(2).fit_result is anchor
+    retained_anchor = result.outcome(2).fit_result
+    assert retained_anchor is not None
+    assert retained_anchor.parameters == anchor.parameters
+    assert retained_anchor.diagnostics == anchor.diagnostics
+    assert retained_anchor.provenance == anchor.provenance
     assert result.status is MultiQExecutionStatus.COMPLETED
 
 
@@ -616,6 +626,99 @@ def test_branch_progress_publishes_authoritative_terminal_outcomes_in_order(
     assert all(item is result.outcome(item.group_index) for item in events)
     assert events[-1].derived_result_excluded
     assert [group for group, _model in calls] == [3, 4]
+
+
+def test_branch_start_progress_follows_execution_and_precedes_blocked_outcome(
+    multi_q_problem: tuple[
+        PreparedResolution,
+        FittingSelection,
+        tuple[SpectralModelDefinition, ...],
+        FitResult,
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared, selection, configurations, anchor = multi_q_problem
+    target_configurations: list[SpectralModelDefinition | None] = list(configurations)
+    target_configurations[1] = None
+    calls: list[tuple[int, SpectralModelDefinition]] = []
+    monkeypatch.setattr(batch_core, "fit_single_q", _recording_fit(anchor, calls))
+    started: list[int] = []
+    terminal: list[MultiQFitOutcome] = []
+    event_order: list[tuple[str, int]] = []
+
+    def record_started(group_index: int) -> object:
+        started.append(group_index)
+        event_order.append(("started", group_index))
+        return object()
+
+    def record_terminal(outcome: MultiQFitOutcome) -> None:
+        terminal.append(outcome)
+        event_order.append(("terminal", outcome.group_index))
+
+    result = execute_multi_q_branch(
+        prepared,
+        selection,
+        target_configurations,
+        anchor_group_index=2,
+        anchor_fit=anchor,
+        fit_excluded_groups=(0,),
+        group_started_callback=record_started,
+        progress_callback=record_terminal,
+    )
+
+    assert started == [1, 3, 4]
+    assert event_order == [
+        ("terminal", 2),
+        ("terminal", 0),
+        ("started", 1),
+        ("terminal", 1),
+        ("started", 3),
+        ("terminal", 3),
+        ("started", 4),
+        ("terminal", 4),
+    ]
+    assert result.outcome(1).status is MultiQFitStatus.BLOCKED
+    assert all(item is result.outcome(item.group_index) for item in terminal)
+
+
+def test_branch_start_progress_omits_cancelled_and_not_run_targets(
+    multi_q_problem: tuple[
+        PreparedResolution,
+        FittingSelection,
+        tuple[SpectralModelDefinition, ...],
+        FitResult,
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared, selection, configurations, anchor = multi_q_problem
+    calls: list[tuple[int, SpectralModelDefinition]] = []
+    monkeypatch.setattr(batch_core, "fit_single_q", _recording_fit(anchor, calls))
+    checks = 0
+    started: list[int] = []
+
+    def cancelled() -> bool:
+        nonlocal checks
+        checks += 1
+        return checks == 2
+
+    result = execute_multi_q_branch(
+        prepared,
+        selection,
+        configurations,
+        anchor_group_index=2,
+        anchor_fit=anchor,
+        cancel_requested=cancelled,
+        group_started_callback=started.append,
+    )
+
+    assert result.status is MultiQExecutionStatus.CANCELLED
+    assert started == [1]
+    assert [group for group, _model in calls] == [1]
+    assert all(
+        outcome.group_index not in started
+        for outcome in result.outcomes
+        if outcome.status is MultiQFitStatus.NOT_RUN
+    )
 
 
 def test_branch_progress_omits_targets_not_processed_after_cancellation(
@@ -723,6 +826,69 @@ def test_target_progress_exception_retains_target_and_continues_notifications(
     assert attempted[1] is result.outcome(1)
     assert result.outcome(1).status is MultiQFitStatus.SUCCESS
     assert all(item.status is MultiQFitStatus.SUCCESS for item in result.outcomes)
+
+
+def test_start_progress_exception_does_not_change_execution_or_later_notifications(
+    multi_q_problem: tuple[
+        PreparedResolution,
+        FittingSelection,
+        tuple[SpectralModelDefinition, ...],
+        FitResult,
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared, selection, configurations, anchor = multi_q_problem
+    calls: list[tuple[int, SpectralModelDefinition]] = []
+    monkeypatch.setattr(batch_core, "fit_single_q", _recording_fit(anchor, calls))
+    attempted: list[int] = []
+
+    def failing_observer(group_index: int) -> None:
+        attempted.append(group_index)
+        if group_index == 1:
+            raise RuntimeError("start observer failed")
+
+    result = execute_multi_q_branch(
+        prepared,
+        selection,
+        configurations,
+        anchor_group_index=2,
+        anchor_fit=anchor,
+        group_started_callback=failing_observer,
+    )
+
+    assert attempted == [1, 0, 3, 4]
+    assert [group for group, _model in calls] == attempted
+    assert result.status is MultiQExecutionStatus.COMPLETED
+    assert all(item.status is MultiQFitStatus.SUCCESS for item in result.outcomes)
+
+
+def test_start_progress_base_exception_propagates_before_target_work(
+    multi_q_problem: tuple[
+        PreparedResolution,
+        FittingSelection,
+        tuple[SpectralModelDefinition, ...],
+        FitResult,
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared, selection, configurations, anchor = multi_q_problem
+    calls: list[tuple[int, SpectralModelDefinition]] = []
+    monkeypatch.setattr(batch_core, "fit_single_q", _recording_fit(anchor, calls))
+
+    def interrupt(_group_index: int) -> None:
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        execute_multi_q_branch(
+            prepared,
+            selection,
+            configurations,
+            anchor_group_index=2,
+            anchor_fit=anchor,
+            group_started_callback=interrupt,
+        )
+
+    assert calls == []
 
 
 def test_selected_autofit_progress_event_rejects_not_run_outcome() -> None:
@@ -1640,9 +1806,900 @@ def test_working_and_saved_method_result_lifecycles_are_independent(
     assert state.working_method is edited_method
     assert state.saved_results[0].result is anchor
     assert state.current_result is replacement_result
+    assert state.current_saved_result_index is None
 
 
-def test_fit_all_q_runs_missing_manual_anchor_then_continues(
+def _s5_constraint_model() -> ManualModelState:
+    third = ComponentIdentity(ComponentFamily.LORENTZIAN, "s5_l3")
+    base = _manual_model()
+    first, second = base.lorentzians
+    disabled_area = ManualParameterIntent(
+        second.area.current_value,
+        0.1,
+        0.9,
+        user_bounds_enabled=False,
+    )
+    first = replace(first, center_group="shared-center")
+    second = replace(
+        second,
+        area=disabled_area,
+        center=ManualParameterIntent(-0.04),
+    )
+    third_component = ManualLorentzianState(
+        area=ManualParameterIntent(0.15),
+        fwhm=ManualParameterIntent(0.5),
+        center=ManualParameterIntent(0.08),
+        identity=third,
+    )
+    center_members = (
+        ParameterReference(second.identity, ParameterFamily.CENTER),
+        ParameterReference(third, ParameterFamily.CENTER),
+    )
+    noncenter_members = (
+        ParameterReference(first.identity, ParameterFamily.FWHM),
+        ParameterReference(second.identity, ParameterFamily.FWHM),
+    )
+    return replace(
+        base,
+        lorentzians=(first, second, third_component),
+        b0=ManualParameterIntent(-0.03, -1.0, 1.0, free=False),
+        center_groups=(
+            ManualCenterGroupState(
+                "shared-center",
+                ManualParameterIntent(0.01, -0.2, 0.2),
+            ),
+        ),
+        elastic_center_group="shared-center",
+        parameter_ties=(
+            ManualParameterTieState(
+                "center-chain",
+                center_members,
+                ManualParameterIntent(0.02),
+            ),
+            ManualParameterTieState(
+                "width-chain",
+                noncenter_members,
+                ManualParameterIntent(0.2),
+            ),
+        ),
+    )
+
+
+def test_active_transferable_constraints_expose_only_effective_s5_state() -> None:
+    model = _s5_constraint_model()
+    active = active_transferable_constraints(model)
+    disabled_area = ParameterReference(L2, ParameterFamily.AREA)
+    fixed_offset = ParameterReference(BACKGROUND_COMPONENT, ParameterFamily.OFFSET)
+
+    bounds = {item.reference: item for item in active.bounds}
+    elastic_area = ParameterReference(ELASTIC_COMPONENT, ParameterFamily.AREA)
+    assert disabled_area not in bounds
+    assert bounds[elastic_area].lower == 0.0
+    assert bounds[elastic_area].upper == 2.0
+    assert {item.reference for item in active.fixed} == {fixed_offset}
+    assert active.fixed[0].value == pytest.approx(-0.03)
+
+    ties = {item.identity: item.members for item in active.center_ties}
+    group_identity = CenterTieIdentity(CenterTieKind.CENTER_GROUP, "shared-center")
+    chain_identity = CenterTieIdentity(CenterTieKind.PARAMETER_TIE, "center-chain")
+    assert ties[group_identity] == (
+        ParameterReference(ELASTIC_COMPONENT, ParameterFamily.CENTER),
+        ParameterReference(L1, ParameterFamily.CENTER),
+    )
+    assert ties[chain_identity] == (
+        ParameterReference(L2, ParameterFamily.CENTER),
+        ParameterReference(
+            ComponentIdentity(ComponentFamily.LORENTZIAN, "s5_l3"),
+            ParameterFamily.CENTER,
+        ),
+    )
+    assert all(item.identity.group_id != "width-chain" for item in active.center_ties)
+
+
+def test_active_transferable_constraints_derive_legacy_tie_from_structure() -> None:
+    active = active_transferable_constraints(_manual_model())
+    legacy = next(
+        item
+        for item in active.center_ties
+        if item.identity.kind is CenterTieKind.LEGACY_SHARED_CENTER
+    )
+    assert legacy.identity.group_id is None
+    assert legacy.members == (
+        ParameterReference(ELASTIC_COMPONENT, ParameterFamily.CENTER),
+        ParameterReference(L1, ParameterFamily.CENTER),
+        ParameterReference(L2, ParameterFamily.CENTER),
+    )
+
+
+def test_s5_transfer_policy_selects_active_constraints_atomically() -> None:
+    model = _s5_constraint_model()
+    bounds_reference = ParameterReference(ELASTIC_COMPONENT, ParameterFamily.AREA)
+    fixed_reference = ParameterReference(BACKGROUND_COMPONENT, ParameterFamily.OFFSET)
+    tie_identity = CenterTieIdentity(CenterTieKind.PARAMETER_TIE, "center-chain")
+
+    policy = MultiQConstraintTransferPolicy(
+        model,
+        bounds=frozenset((bounds_reference,)),
+        fixed=frozenset((fixed_reference,)),
+        center_ties=frozenset((tie_identity,)),
+    )
+    assert policy.bounds == frozenset((bounds_reference,))
+    assert policy.fixed == frozenset((fixed_reference,))
+    assert policy.center_ties == frozenset((tie_identity,))
+    assert MultiQConstraintTransferPolicy(model) == MultiQConstraintTransferPolicy(
+        model
+    )
+
+    inactive_bounds = ParameterReference(L2, ParameterFamily.AREA)
+    with pytest.raises(ValueError, match="inactive or unknown reference"):
+        MultiQConstraintTransferPolicy(model, bounds=frozenset((inactive_bounds,)))
+    with pytest.raises(ValueError, match="inactive or unknown reference"):
+        MultiQConstraintTransferPolicy(
+            model,
+            fixed=frozenset(
+                (ParameterReference(BACKGROUND_COMPONENT, ParameterFamily.SLOPE),)
+            ),
+        )
+    with pytest.raises(ValueError, match="inactive or unknown tie"):
+        MultiQConstraintTransferPolicy(
+            model,
+            center_ties=frozenset(
+                (CenterTieIdentity(CenterTieKind.CENTER_GROUP, "missing"),)
+            ),
+        )
+    with pytest.raises(ValueError, match="CenterTieIdentity"):
+        MultiQConstraintTransferPolicy(
+            model,
+            center_ties=frozenset(
+                (ParameterReference(L2, ParameterFamily.CENTER),)  # type: ignore[arg-type]
+            ),
+        )
+
+
+def test_current_result_save_and_save_as_lifecycle(
+    multi_q_problem: tuple[
+        PreparedResolution,
+        FittingSelection,
+        tuple[SpectralModelDefinition, ...],
+        FitResult,
+    ],
+) -> None:
+    _prepared, _selection, _configurations, anchor = multi_q_problem
+    first_rerun = replace(anchor, fitted_model=anchor.configuration)
+    second_rerun = replace(anchor, evaluation=anchor.evaluation)
+
+    state = set_current_result(FittingWorkspaceState(), anchor)
+    assert state.saved_results == ()
+    assert state.associated_saved_result is None
+    with pytest.raises(ValueError, match="use Save As"):
+        save_current_result(state)
+
+    state = save_current_result_as(state, "first snapshot")
+    assert state.current_saved_result_index == 0
+    assert state.associated_saved_result is state.saved_results[0]
+    assert state.saved_results[0].result is anchor
+
+    state = set_current_result(
+        state,
+        first_rerun,
+        retain_saved_association=True,
+    )
+    assert state.current_saved_result_index == 0
+    assert state.saved_results[0].result is anchor
+    state = save_current_result(state)
+    assert len(state.saved_results) == 1
+    assert state.saved_results[0].name == "first snapshot"
+    assert state.saved_results[0].result is first_rerun
+
+    state = save_current_result_as(state, "second snapshot")
+    assert state.current_saved_result_index == 1
+    assert len(state.saved_results) == 2
+    assert state.saved_results[0].result is first_rerun
+    assert state.saved_results[1].result is first_rerun
+
+    state = set_current_result(
+        state,
+        second_rerun,
+        retain_saved_association=True,
+    )
+    state = save_current_result(state)
+    assert len(state.saved_results) == 2
+    assert state.saved_results[0].result is first_rerun
+    assert state.saved_results[1].result is second_rerun
+
+    state = set_current_result(state, anchor)
+    assert state.current_result is anchor
+    assert state.current_saved_result_index is None
+    assert tuple(item.result for item in state.saved_results) == (
+        first_rerun,
+        second_rerun,
+    )
+
+
+def test_fit_all_q_rejects_missing_current_result_without_execution(
+    multi_q_problem: tuple[
+        PreparedResolution,
+        FittingSelection,
+        tuple[SpectralModelDefinition, ...],
+        FitResult,
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared, selection, _configurations, _anchor = multi_q_problem
+    project, _sample, draft = _workflow_problem(prepared, selection)
+
+    def unexpected_fit(*_args: object, **_kwargs: object) -> FitResult:
+        raise AssertionError("missing Current must not execute a fit")
+
+    monkeypatch.setattr(batch_core, "fit_single_q", unexpected_fit)
+    with pytest.raises(ValueError, match="current successful Single-Q Result"):
+        fit_all_q_from_current(
+            project,
+            draft,
+            anchor_group_index=2,
+            max_nfev=800,
+        )
+
+
+def test_fit_all_q_rejects_unsuccessful_current_result_without_execution(
+    multi_q_problem: tuple[
+        PreparedResolution,
+        FittingSelection,
+        tuple[SpectralModelDefinition, ...],
+        FitResult,
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared, selection, _configurations, _anchor = multi_q_problem
+    project, _sample, draft = _workflow_problem(prepared, selection)
+    anchor = run_manual_fit(project, draft, 2, max_nfev=800)
+    unsuccessful = replace(
+        anchor,
+        diagnostics=replace(anchor.diagnostics, optimizer_success=False),
+    )
+
+    def unexpected_fit(*_args: object, **_kwargs: object) -> FitResult:
+        raise AssertionError("unsuccessful Current must not execute a fit")
+
+    monkeypatch.setattr(batch_core, "fit_single_q", unexpected_fit)
+    with pytest.raises(ValueError, match="successful current Result"):
+        fit_all_q_from_current(
+            project,
+            draft,
+            anchor_group_index=2,
+            current_fit=unsuccessful,
+        )
+
+
+def test_fit_all_q_retains_anchor_and_existing_sequential_seed_chains(
+    multi_q_problem: tuple[
+        PreparedResolution,
+        FittingSelection,
+        tuple[SpectralModelDefinition, ...],
+        FitResult,
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared, selection, _configurations, _anchor = multi_q_problem
+    project, _sample, draft = _workflow_problem(prepared, selection)
+    anchor = run_manual_fit(project, draft, 2, max_nfev=800)
+    anchor = _result_with_values(
+        anchor,
+        2,
+        anchor.configuration,
+        _elastic_value(1.0),
+    )
+    source = draft.setup(2).model
+    assert source is not None
+    policy = MultiQConstraintTransferPolicy(source)
+    calls: list[tuple[int, SpectralModelDefinition]] = []
+    monkeypatch.setattr(
+        batch_core,
+        "fit_single_q",
+        _recording_fit(anchor, calls, {3: 1.3}, {1}),
+    )
+
+    result = fit_all_q_from_current(
+        project,
+        draft,
+        anchor_group_index=2,
+        current_fit=anchor,
+        transfer_policy=policy,
+    )
+
+    retained_anchor = result.outcome(2).fit_result
+    assert retained_anchor is not None
+    assert retained_anchor.parameters == anchor.parameters
+    assert retained_anchor.diagnostics == anchor.diagnostics
+    assert retained_anchor.provenance == anchor.provenance
+    assert [group for group, _model in calls] == [1, 0, 3, 4]
+    starts = {
+        group: model.elastic_area.initial_value
+        for group, model in calls
+        if model.elastic_area is not None
+    }
+    assert starts == {1: 1.0, 0: 1.0, 3: 1.0, 4: 1.3}
+    assert result.outcome(1).status is MultiQFitStatus.FAILED
+    assert result.outcome(0).seed_group_index == 2
+    assert result.outcome(3).seed_group_index == 2
+    assert result.outcome(4).seed_group_index == 3
+
+
+def test_fit_all_q_exposes_start_and_terminal_progress_without_changing_results(
+    multi_q_problem: tuple[
+        PreparedResolution,
+        FittingSelection,
+        tuple[SpectralModelDefinition, ...],
+        FitResult,
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared, selection, _configurations, _anchor = multi_q_problem
+    project, _sample, draft = _workflow_problem(prepared, selection)
+    anchor = run_manual_fit(project, draft, 2, max_nfev=800)
+    source = draft.setup(2).model
+    assert source is not None
+    calls: list[tuple[int, SpectralModelDefinition]] = []
+    monkeypatch.setattr(batch_core, "fit_single_q", _recording_fit(anchor, calls))
+    started: list[int] = []
+    terminal: list[MultiQFitOutcome] = []
+
+    result = fit_all_q_from_current(
+        project,
+        draft,
+        anchor_group_index=2,
+        current_fit=anchor,
+        transfer_policy=MultiQConstraintTransferPolicy(source),
+        fit_excluded_groups=(0,),
+        group_started_callback=started.append,
+        progress_callback=terminal.append,
+    )
+
+    assert started == [1, 3, 4]
+    assert [(item.group_index, item.status) for item in terminal] == [
+        (2, MultiQFitStatus.SUCCESS),
+        (0, MultiQFitStatus.EXCLUDED),
+        (1, MultiQFitStatus.SUCCESS),
+        (3, MultiQFitStatus.SUCCESS),
+        (4, MultiQFitStatus.SUCCESS),
+    ]
+    assert all(item is result.outcome(item.group_index) for item in terminal)
+    assert [group for group, _model in calls] == started
+
+
+def _s5b_source_and_target_models() -> tuple[ManualModelState, ManualModelState]:
+    base = _manual_model(background=BackgroundModel.LINEAR)
+    first, second = base.lorentzians
+    source = replace(
+        base,
+        elastic_area=ManualParameterIntent(0.8, 0.0, 2.0),
+        lorentzians=(
+            replace(
+                first,
+                area=ManualParameterIntent(0.35, 0.2, 0.4),
+                center_group="selected-center",
+            ),
+            replace(second, center=ManualParameterIntent(0.04)),
+        ),
+        b0=ManualParameterIntent(-0.03, -1.0, 1.0, free=False),
+        center_groups=(
+            ManualCenterGroupState(
+                "selected-center",
+                ManualParameterIntent(0.01, -0.2, 0.2),
+            ),
+        ),
+        elastic_center_group="selected-center",
+        parameter_ties=(
+            ManualParameterTieState(
+                "unselected-center",
+                (ParameterReference(L2, ParameterFamily.CENTER),),
+                ManualParameterIntent(0.04),
+            ),
+            ManualParameterTieState(
+                "noncenter-width",
+                (
+                    ParameterReference(L1, ParameterFamily.FWHM),
+                    ParameterReference(L2, ParameterFamily.FWHM),
+                ),
+                ManualParameterIntent(0.2, free=False),
+            ),
+        ),
+    )
+    target = replace(
+        base,
+        energy_shift=ManualParameterIntent(0.0),
+        elastic_area=ManualParameterIntent(0.4, 0.1, 0.5),
+        lorentzians=(
+            replace(
+                first,
+                area=ManualParameterIntent(0.3, -1.0, 0.5),
+                fwhm=ManualParameterIntent(0.7, 0.05, 1.0),
+            ),
+            replace(second, fwhm=ManualParameterIntent(0.6, 0.05, 1.0)),
+        ),
+        b0=ManualParameterIntent(0.2, -0.5, 0.5, free=True),
+        center_groups=(),
+        elastic_center_group=None,
+        parameter_ties=(),
+    )
+    return source, target
+
+
+def test_fit_all_q_applies_only_selected_s5_constraints(
+    multi_q_problem: tuple[
+        PreparedResolution,
+        FittingSelection,
+        tuple[SpectralModelDefinition, ...],
+        FitResult,
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared, selection, _configurations, _anchor = multi_q_problem
+    project, _sample, draft = _workflow_problem(prepared, selection)
+    source, target = _s5b_source_and_target_models()
+    draft = draft.with_model(2, source).with_model(1, target)
+    anchor = run_manual_fit(project, draft, 2, max_nfev=800)
+    selected_bounds = ParameterReference(ELASTIC_COMPONENT, ParameterFamily.AREA)
+    selected_fixed = ParameterReference(BACKGROUND_COMPONENT, ParameterFamily.OFFSET)
+    selected_tie = CenterTieIdentity(
+        CenterTieKind.CENTER_GROUP,
+        "selected-center",
+    )
+    policy = MultiQConstraintTransferPolicy(
+        source,
+        bounds=frozenset((selected_bounds,)),
+        fixed=frozenset((selected_fixed,)),
+        center_ties=frozenset((selected_tie,)),
+    )
+    calls: list[tuple[int, SpectralModelDefinition]] = []
+    monkeypatch.setattr(batch_core, "fit_single_q", _recording_fit(anchor, calls))
+
+    fit_all_q_from_current(
+        project,
+        draft,
+        anchor_group_index=2,
+        current_fit=anchor,
+        transfer_policy=policy,
+    )
+
+    submitted = next(model for group, model in calls if group == 1)
+    assert submitted.elastic_area is not None
+    assert submitted.elastic_area.lower_bound == pytest.approx(0.0)
+    assert submitted.elastic_area.upper_bound == pytest.approx(2.0)
+    first_component = next(
+        item for item in submitted.lorentzians if item.identity == L1
+    )
+    assert first_component.area.lower_bound == pytest.approx(0.0)
+    assert first_component.area.upper_bound == pytest.approx(0.5)
+    assert submitted.b0 is not None
+    assert submitted.b0.initial_value == pytest.approx(-0.03)
+    assert not submitted.b0.free
+    assert first_component.fwhm.free
+    assert first_component.fwhm.initial_value == pytest.approx(
+        anchor.parameter_by_reference(
+            ParameterReference(L1, ParameterFamily.FWHM)
+        ).value
+    )
+    assert submitted.elastic_center_group == "selected-center"
+    assert first_component.center_group == "selected-center"
+    assert all(
+        group.group_id != "unselected-center" for group in submitted.parameter_ties
+    )
+    assert all(
+        group.group_id != "noncenter-width" for group in submitted.parameter_ties
+    )
+
+
+def test_fit_all_q_transfers_selected_general_center_tie_atomically(
+    multi_q_problem: tuple[
+        PreparedResolution,
+        FittingSelection,
+        tuple[SpectralModelDefinition, ...],
+        FitResult,
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared, selection, _configurations, _anchor = multi_q_problem
+    project, _sample, draft = _workflow_problem(prepared, selection)
+    base = _manual_model(background=BackgroundModel.LINEAR)
+    first, second = base.lorentzians
+    members = (
+        ParameterReference(L1, ParameterFamily.CENTER),
+        ParameterReference(L2, ParameterFamily.CENTER),
+    )
+    source = replace(
+        base,
+        lorentzians=(
+            replace(first, center=ManualParameterIntent(0.01)),
+            replace(second, center=ManualParameterIntent(0.01)),
+        ),
+        center_groups=(
+            ManualCenterGroupState("unselected-elastic", ManualParameterIntent(0.01)),
+        ),
+        elastic_center_group="unselected-elastic",
+        parameter_ties=(
+            ManualParameterTieState(
+                "selected-center-chain",
+                members,
+                ManualParameterIntent(0.01),
+            ),
+        ),
+    )
+    draft = draft.with_model(2, source)
+    anchor = run_manual_fit(project, draft, 2, max_nfev=800)
+    policy = MultiQConstraintTransferPolicy(
+        source,
+        center_ties=frozenset(
+            (
+                CenterTieIdentity(
+                    CenterTieKind.PARAMETER_TIE,
+                    "selected-center-chain",
+                ),
+            )
+        ),
+    )
+    calls: list[tuple[int, SpectralModelDefinition]] = []
+    monkeypatch.setattr(batch_core, "fit_single_q", _recording_fit(anchor, calls))
+
+    fit_all_q_from_current(
+        project,
+        draft,
+        anchor_group_index=2,
+        current_fit=anchor,
+        transfer_policy=policy,
+    )
+
+    submitted = next(model for group, model in calls if group == 1)
+    transferred = next(
+        group
+        for group in submitted.parameter_ties
+        if group.group_id == "selected-center-chain"
+    )
+    assert transferred.members == members
+    assert all(
+        group.group_id != "unselected-elastic" for group in submitted.center_groups
+    )
+
+
+def _s5b_center_tie_models(
+    source_intent: ManualParameterIntent,
+    target_first: ManualParameterIntent,
+    target_second: ManualParameterIntent,
+    *,
+    reverse_members: bool = False,
+) -> tuple[
+    ManualModelState,
+    ManualModelState,
+    tuple[ParameterReference, ParameterReference],
+]:
+    base = _manual_model(background=BackgroundModel.LINEAR)
+    first, second = base.lorentzians
+    members = (
+        ParameterReference(L1, ParameterFamily.CENTER),
+        ParameterReference(L2, ParameterFamily.CENTER),
+    )
+    stored_members = tuple(reversed(members)) if reverse_members else members
+    source = replace(
+        base,
+        lorentzians=(
+            replace(first, center=source_intent),
+            replace(second, center=source_intent),
+        ),
+        parameter_ties=(
+            ManualParameterTieState(
+                "selected-center-chain",
+                stored_members,
+                source_intent,
+            ),
+        ),
+    )
+    target = replace(
+        base,
+        lorentzians=(
+            replace(first, center=target_first),
+            replace(second, center=target_second),
+        ),
+        parameter_ties=(),
+    )
+    return source, target, members
+
+
+def _run_s5b_center_tie_transfer(
+    problem: tuple[
+        PreparedResolution,
+        FittingSelection,
+        tuple[SpectralModelDefinition, ...],
+        FitResult,
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+    source: ManualModelState,
+    target: ManualModelState,
+    *,
+    bounds: frozenset[ParameterReference] = frozenset(),
+    fixed: frozenset[ParameterReference] = frozenset(),
+) -> tuple[MultiQBranchResult, list[tuple[int, SpectralModelDefinition]]]:
+    prepared, selection, _configurations, _anchor = problem
+    project, _sample, draft = _workflow_problem(prepared, selection)
+    draft = draft.with_model(2, source).with_model(1, target)
+    anchor = run_manual_fit(project, draft, 2, max_nfev=800)
+    policy = MultiQConstraintTransferPolicy(
+        source,
+        bounds=bounds,
+        fixed=fixed,
+        center_ties=frozenset(
+            (
+                CenterTieIdentity(
+                    CenterTieKind.PARAMETER_TIE,
+                    "selected-center-chain",
+                ),
+            )
+        ),
+    )
+    calls: list[tuple[int, SpectralModelDefinition]] = []
+    monkeypatch.setattr(batch_core, "fit_single_q", _recording_fit(anchor, calls))
+    result = fit_all_q_from_current(
+        project,
+        draft,
+        anchor_group_index=2,
+        current_fit=anchor,
+        transfer_policy=policy,
+    )
+    return result, calls
+
+
+def test_s5_center_tie_only_blocks_conflicting_target_free_fixed_state(
+    multi_q_problem: tuple[
+        PreparedResolution,
+        FittingSelection,
+        tuple[SpectralModelDefinition, ...],
+        FitResult,
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source, target, _members = _s5b_center_tie_models(
+        ManualParameterIntent(0.01),
+        ManualParameterIntent(0.1, -0.3, 0.3, free=False),
+        ManualParameterIntent(0.2, -0.3, 0.3, free=True),
+    )
+
+    result, calls = _run_s5b_center_tie_transfer(
+        multi_q_problem,
+        monkeypatch,
+        source,
+        target,
+    )
+
+    assert result.outcome(1).status is MultiQFitStatus.BLOCKED
+    assert all(group_index != 1 for group_index, _model in calls)
+
+
+def test_s5_center_tie_only_blocks_conflicting_enabled_target_bounds(
+    multi_q_problem: tuple[
+        PreparedResolution,
+        FittingSelection,
+        tuple[SpectralModelDefinition, ...],
+        FitResult,
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source, target, _members = _s5b_center_tie_models(
+        ManualParameterIntent(0.01),
+        ManualParameterIntent(0.1, -0.3, 0.3),
+        ManualParameterIntent(0.1, -0.1, 0.2),
+    )
+
+    result, calls = _run_s5b_center_tie_transfer(
+        multi_q_problem,
+        monkeypatch,
+        source,
+        target,
+    )
+
+    assert result.outcome(1).status is MultiQFitStatus.BLOCKED
+    assert all(group_index != 1 for group_index, _model in calls)
+
+
+@pytest.mark.parametrize("reverse_members", [False, True])
+def test_s5_free_center_tie_uses_predecessor_seed_despite_different_currents(
+    multi_q_problem: tuple[
+        PreparedResolution,
+        FittingSelection,
+        tuple[SpectralModelDefinition, ...],
+        FitResult,
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+    reverse_members: bool,
+) -> None:
+    source, target, members = _s5b_center_tie_models(
+        ManualParameterIntent(0.01, -0.3, 0.3),
+        ManualParameterIntent(0.1, -0.3, 0.3),
+        ManualParameterIntent(0.2, -0.3, 0.3),
+        reverse_members=reverse_members,
+    )
+
+    result, calls = _run_s5b_center_tie_transfer(
+        multi_q_problem,
+        monkeypatch,
+        source,
+        target,
+    )
+
+    assert result.outcome(1).status is MultiQFitStatus.SUCCESS
+    anchor = result.outcome(2).fit_result
+    assert anchor is not None
+    predecessor_value = anchor.parameter_by_reference(members[0]).value
+    submitted = next(model for group, model in calls if group == 1)
+    assert all(
+        submitted.parameter_configuration(member).initial_value
+        == pytest.approx(predecessor_value)
+        for member in members
+    )
+
+
+def test_s5_center_tie_only_blocks_unequal_fixed_target_values(
+    multi_q_problem: tuple[
+        PreparedResolution,
+        FittingSelection,
+        tuple[SpectralModelDefinition, ...],
+        FitResult,
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source, target, _members = _s5b_center_tie_models(
+        ManualParameterIntent(0.01),
+        ManualParameterIntent(0.1, -0.3, 0.3, free=False),
+        ManualParameterIntent(0.2, -0.3, 0.3, free=False),
+    )
+
+    result, calls = _run_s5b_center_tie_transfer(
+        multi_q_problem,
+        monkeypatch,
+        source,
+        target,
+    )
+
+    assert result.outcome(1).status is MultiQFitStatus.BLOCKED
+    assert all(group_index != 1 for group_index, _model in calls)
+
+
+def test_s5_center_tie_only_preserves_compatible_target_intent(
+    multi_q_problem: tuple[
+        PreparedResolution,
+        FittingSelection,
+        tuple[SpectralModelDefinition, ...],
+        FitResult,
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target_intent = ManualParameterIntent(0.12, -0.3, 0.3, free=False)
+    source, target, members = _s5b_center_tie_models(
+        ManualParameterIntent(0.01),
+        target_intent,
+        target_intent,
+    )
+
+    result, calls = _run_s5b_center_tie_transfer(
+        multi_q_problem,
+        monkeypatch,
+        source,
+        target,
+    )
+
+    assert result.outcome(1).status is MultiQFitStatus.SUCCESS
+    submitted = next(model for group, model in calls if group == 1)
+    for member in members:
+        parameter = submitted.parameter_configuration(member)
+        assert parameter.initial_value == pytest.approx(0.12)
+        assert parameter.lower_bound == pytest.approx(-0.3)
+        assert parameter.upper_bound == pytest.approx(0.3)
+        assert not parameter.free
+
+
+def test_s5_center_tie_with_selected_fixed_resolves_target_state(
+    multi_q_problem: tuple[
+        PreparedResolution,
+        FittingSelection,
+        tuple[SpectralModelDefinition, ...],
+        FitResult,
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_intent = ManualParameterIntent(0.07, -0.3, 0.3, free=False)
+    source, target, members = _s5b_center_tie_models(
+        source_intent,
+        ManualParameterIntent(0.1, -0.3, 0.3, free=False),
+        ManualParameterIntent(0.2, -0.3, 0.3, free=True),
+    )
+
+    result, calls = _run_s5b_center_tie_transfer(
+        multi_q_problem,
+        monkeypatch,
+        source,
+        target,
+        fixed=frozenset(members),
+    )
+
+    assert result.outcome(1).status is MultiQFitStatus.SUCCESS
+    submitted = next(model for group, model in calls if group == 1)
+    for member in members:
+        parameter = submitted.parameter_configuration(member)
+        assert parameter.initial_value == pytest.approx(0.07)
+        assert not parameter.free
+
+
+def test_s5_center_tie_with_selected_bounds_resolves_target_state(
+    multi_q_problem: tuple[
+        PreparedResolution,
+        FittingSelection,
+        tuple[SpectralModelDefinition, ...],
+        FitResult,
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_intent = ManualParameterIntent(0.1, -0.08, 0.16)
+    source, target, members = _s5b_center_tie_models(
+        source_intent,
+        ManualParameterIntent(0.1, -0.3, 0.3),
+        ManualParameterIntent(0.1, -0.1, 0.2),
+    )
+
+    result, calls = _run_s5b_center_tie_transfer(
+        multi_q_problem,
+        monkeypatch,
+        source,
+        target,
+        bounds=frozenset(members),
+    )
+
+    assert result.outcome(1).status is MultiQFitStatus.SUCCESS
+    submitted = next(model for group, model in calls if group == 1)
+    for member in members:
+        parameter = submitted.parameter_configuration(member)
+        assert parameter.lower_bound == pytest.approx(-0.08)
+        assert parameter.upper_bound == pytest.approx(0.16)
+        assert parameter.free
+
+
+@pytest.mark.parametrize("reverse_members", [False, True])
+def test_s5_center_tie_member_order_does_not_select_an_intent(
+    multi_q_problem: tuple[
+        PreparedResolution,
+        FittingSelection,
+        tuple[SpectralModelDefinition, ...],
+        FitResult,
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+    reverse_members: bool,
+) -> None:
+    target_intent = ManualParameterIntent(0.13, -0.25, 0.35, free=False)
+    source, target, members = _s5b_center_tie_models(
+        ManualParameterIntent(-0.02),
+        target_intent,
+        target_intent,
+        reverse_members=reverse_members,
+    )
+
+    result, calls = _run_s5b_center_tie_transfer(
+        multi_q_problem,
+        monkeypatch,
+        source,
+        target,
+    )
+
+    assert result.outcome(1).status is MultiQFitStatus.SUCCESS
+    submitted = next(model for group, model in calls if group == 1)
+    assert {
+        (
+            submitted.parameter_configuration(member).initial_value,
+            submitted.parameter_configuration(member).lower_bound,
+            submitted.parameter_configuration(member).upper_bound,
+            submitted.parameter_configuration(member).free,
+        )
+        for member in members
+    } == {(0.13, -0.25, 0.35, False)}
+
+
+def test_fit_all_q_legacy_method_arguments_are_explicitly_separate(
     multi_q_problem: tuple[
         PreparedResolution,
         FittingSelection,
@@ -1652,16 +2709,18 @@ def test_fit_all_q_runs_missing_manual_anchor_then_continues(
 ) -> None:
     prepared, selection, _configurations, _anchor = multi_q_problem
     project, _sample, draft = _workflow_problem(prepared, selection)
+    anchor = run_manual_fit(project, draft, 2, max_nfev=800)
+    source = draft.setup(2).model
+    assert source is not None
 
-    result = fit_all_q_from_current(
-        project,
-        draft,
-        anchor_group_index=2,
-        max_nfev=800,
-    )
-
-    assert result.outcome(2).status is MultiQFitStatus.SUCCESS
-    assert all(item.status is MultiQFitStatus.SUCCESS for item in result.outcomes)
+    with pytest.raises(ValueError, match="MultiQConstraintTransferPolicy"):
+        fit_all_q_from_current(
+            project,
+            draft,
+            anchor_group_index=2,
+            current_fit=anchor,
+            method=capture_fitting_method(source),
+        )
 
 
 def test_fresh_selected_autofit_accepts_reprepared_aligned_nan_uncertainty(
@@ -1772,9 +2831,6 @@ def test_selected_auto_candidates_create_ordered_independent_branches(
     project, _sample, draft, outcome, evidence = selected_auto_problem
     most_recommended, other_successful = evidence
 
-    def unexpected_anchor_refit(*_args: object, **_kwargs: object) -> FitResult:
-        raise AssertionError("selected AutoFit anchors must not be refit")
-
     def unexpected_auto_rerun(*_args: object, **_kwargs: object) -> object:
         raise AssertionError("selected branches must reuse one AutoFit evaluation")
 
@@ -1795,10 +2851,6 @@ def test_selected_auto_candidates_create_ordered_independent_branches(
         captured_methods.append(method)
         return method
 
-    monkeypatch.setattr(
-        "ezqens.workflow.multi_q.run_manual_fit",
-        unexpected_anchor_refit,
-    )
     monkeypatch.setattr(
         "ezqens.workflow.multi_q.run_single_q_auto_fit",
         unexpected_auto_rerun,
@@ -2227,13 +3279,14 @@ def test_applied_b0_current_fit_retains_editable_fixed_zero_b1_branch(
     assert not anchor.configuration.b1.free
 
 
-def test_applied_auto_b0_result_is_refit_as_its_editable_b1_working_state(
+def test_topology_incompatible_current_result_is_rejected_without_refit(
     multi_q_problem: tuple[
         PreparedResolution,
         FittingSelection,
         tuple[SpectralModelDefinition, ...],
         FitResult,
     ],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     prepared, selection, _configurations, _anchor = multi_q_problem
     project, _sample, editable_draft = _workflow_problem(
@@ -2255,21 +3308,18 @@ def test_applied_auto_b0_result_is_refit_as_its_editable_b1_working_state(
         max_nfev=800,
     )
 
-    result = fit_all_q_from_current(
-        project,
-        editable_draft,
-        anchor_group_index=2,
-        current_fit=auto_candidate_result,
-        max_nfev=800,
-    )
+    def unexpected_fit(*_args: object, **_kwargs: object) -> FitResult:
+        raise AssertionError("incompatible Current must not be refit")
 
-    editable_anchor = result.outcome(2).fit_result
-    assert editable_anchor is not None
-    assert editable_anchor is not auto_candidate_result
-    assert editable_anchor.configuration.background is BackgroundModel.LINEAR
-    assert editable_anchor.configuration.b1 is not None
-    assert editable_anchor.configuration.b1.initial_value == 0.0
-    assert not editable_anchor.configuration.b1.free
+    monkeypatch.setattr(batch_core, "fit_single_q", unexpected_fit)
+    with pytest.raises(ValueError, match="topology is incompatible"):
+        fit_all_q_from_current(
+            project,
+            editable_draft,
+            anchor_group_index=2,
+            current_fit=auto_candidate_result,
+            max_nfev=800,
+        )
 
 
 def test_fresh_auto_all_q_does_not_fall_back_to_best_supported(
@@ -2312,7 +3362,10 @@ def test_current_fit_composition_materializes_an_initially_empty_branch(
     anchor = run_manual_fit(project, configured, 2, max_nfev=800)
     empty = replace(
         configured,
-        setups=tuple(replace(setup, model=None) for setup in configured.setups),
+        setups=tuple(
+            setup if setup.group_index == 2 else replace(setup, model=None)
+            for setup in configured.setups
+        ),
     )
 
     result = fit_all_q_from_current(
@@ -2638,6 +3691,9 @@ def test_infeasible_target_constraints_block_that_q_without_mutating_intent(
     )
 
     assert result.outcome(1).status is MultiQFitStatus.BLOCKED
+    assert result.outcome(1).fit_result is None
+    assert result.outcome(0).status is MultiQFitStatus.SUCCESS
+    assert result.outcome(0).seed_group_index == 2
     unchanged = draft.setup(1).model
     assert unchanged is not None
     assert unchanged.parameter_intent(reference) == invalid_intent
