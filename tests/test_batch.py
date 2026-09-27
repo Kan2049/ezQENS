@@ -83,11 +83,14 @@ from ezqens.workflow import (
     capture_fitting_method,
     commit_fitting_selection,
     continue_selected_auto_fit_candidates,
+    create_parameter_tie,
     create_project,
     fit_all_q_from_current,
+    join_parameter_tie,
     materialize_manual_model,
     open_manual_fit_draft,
     resolve_manual_fit_context,
+    run_and_adopt_manual_fit,
     run_manual_fit,
     run_single_q_auto_fit,
     save_current_result,
@@ -3389,6 +3392,310 @@ def test_current_fit_composition_materializes_an_initially_empty_branch(
         == anchor_identities
         for outcome in result.outcomes
     )
+
+
+@pytest.mark.parametrize("background", [BackgroundModel.NONE, BackgroundModel.CONSTANT])
+@pytest.mark.parametrize("transfer_all", [False, True])
+def test_s5_empty_target_preserves_independent_centers_after_manual_adoption(
+    multi_q_problem: tuple[
+        PreparedResolution,
+        FittingSelection,
+        tuple[SpectralModelDefinition, ...],
+        FitResult,
+    ],
+    background: BackgroundModel,
+    transfer_all: bool,
+) -> None:
+    prepared, selection, _configurations, _anchor = multi_q_problem
+    project, _sample, draft = _workflow_problem(prepared, selection)
+    source = _manual_model(background=background)
+    source = replace(
+        source,
+        lorentzians=(
+            replace(source.lorentzians[0], center=ManualParameterIntent(0.06)),
+        ),
+        b0=(
+            ManualParameterIntent(0.02, -1.0, 1.0, free=False)
+            if background is BackgroundModel.CONSTANT
+            else None
+        ),
+        b1=None,
+    )
+    draft = draft.with_model(2, source).with_model(1, None)
+    execution = run_and_adopt_manual_fit(project, draft, 2, max_nfev=800)
+    assert execution.success
+    assert execution.fit_result is not None
+    assert execution.adopted_draft is not None
+    anchor_model = execution.adopted_draft.setup(2).model
+    assert anchor_model is not None
+    active = active_transferable_constraints(anchor_model)
+    policy = MultiQConstraintTransferPolicy(
+        anchor_model,
+        bounds=(
+            frozenset(item.reference for item in active.bounds)
+            if transfer_all
+            else frozenset()
+        ),
+        fixed=(
+            frozenset(item.reference for item in active.fixed)
+            if transfer_all
+            else frozenset()
+        ),
+        center_ties=(
+            frozenset(item.identity for item in active.center_ties)
+            if transfer_all
+            else frozenset()
+        ),
+    )
+    assert not active.center_ties
+
+    branch = fit_all_q_from_current(
+        project,
+        execution.adopted_draft,
+        anchor_group_index=2,
+        current_fit=execution.fit_result,
+        transfer_policy=policy,
+        fit_excluded_groups=(0, 3, 4),
+        max_nfev=800,
+    )
+    target = branch.outcome(1)
+    assert target.status is MultiQFitStatus.SUCCESS
+    assert target.fit_result is not None
+    elastic_center = ParameterReference(ELASTIC_COMPONENT, ParameterFamily.CENTER)
+    lorentzian_center = ParameterReference(L1, ParameterFamily.CENTER)
+    assert target.fit_result.parameter_by_reference(
+        elastic_center
+    ) is not target.fit_result.parameter_by_reference(lorentzian_center)
+    assert target.fit_result.configuration.energy_shift is not None
+    assert target.fit_result.configuration.lorentzians[0].center is not None
+    assert target.fit_result.configuration.elastic_area is not None
+    assert target.fit_result.configuration.elastic_area.upper_bound == (
+        2.0 if transfer_all else math.inf
+    )
+    if background is BackgroundModel.CONSTANT:
+        assert target.fit_result.configuration.b0 is not None
+        assert target.fit_result.configuration.b0.free is not transfer_all
+    for reference in (elastic_center, lorentzian_center):
+        assert target.fit_result.configuration.parameter_configuration(
+            reference
+        ).initial_value == pytest.approx(
+            execution.fit_result.parameter_by_reference(reference).value
+        )
+
+
+@pytest.mark.parametrize("transfer_tie", [False, True])
+def test_s5_empty_target_applies_only_selected_shared_center_group(
+    multi_q_problem: tuple[
+        PreparedResolution,
+        FittingSelection,
+        tuple[SpectralModelDefinition, ...],
+        FitResult,
+    ],
+    transfer_tie: bool,
+) -> None:
+    prepared, selection, _configurations, _anchor = multi_q_problem
+    project, _sample, draft = _workflow_problem(prepared, selection)
+    source = _manual_model(background=BackgroundModel.CONSTANT)
+    source = replace(
+        source,
+        energy_shift=None,
+        lorentzians=(replace(source.lorentzians[0], center_group="anchor-center"),),
+        center_groups=(
+            ManualCenterGroupState("anchor-center", ManualParameterIntent(0.01)),
+        ),
+        elastic_center_group="anchor-center",
+        b1=None,
+    )
+    draft = draft.with_model(2, source).with_model(1, None)
+    execution = run_and_adopt_manual_fit(project, draft, 2, max_nfev=800)
+    assert execution.success
+    assert execution.fit_result is not None
+    assert execution.adopted_draft is not None
+    anchor_model = execution.adopted_draft.setup(2).model
+    assert anchor_model is not None
+    active = active_transferable_constraints(anchor_model)
+    center_ties = (
+        frozenset(item.identity for item in active.center_ties)
+        if transfer_tie
+        else frozenset()
+    )
+    assert len(active.center_ties) == 1
+
+    branch = fit_all_q_from_current(
+        project,
+        execution.adopted_draft,
+        anchor_group_index=2,
+        current_fit=execution.fit_result,
+        transfer_policy=MultiQConstraintTransferPolicy(
+            anchor_model,
+            center_ties=center_ties,
+        ),
+        fit_excluded_groups=(0, 3, 4),
+        max_nfev=800,
+    )
+    target = branch.outcome(1)
+    assert target.status is MultiQFitStatus.SUCCESS
+    assert target.fit_result is not None
+    elastic_center = ParameterReference(ELASTIC_COMPONENT, ParameterFamily.CENTER)
+    lorentzian_center = ParameterReference(L1, ParameterFamily.CENTER)
+    assert (
+        target.fit_result.parameter_by_reference(elastic_center)
+        is target.fit_result.parameter_by_reference(lorentzian_center)
+    ) is transfer_tie
+    assert (
+        target.fit_result.configuration.elastic_center_group == "anchor-center"
+    ) is transfer_tie
+
+
+@pytest.mark.parametrize("background", [BackgroundModel.NONE, BackgroundModel.CONSTANT])
+@pytest.mark.parametrize("transfer_all", [False, True])
+def test_s5_empty_target_applies_only_selected_manual_center_bond(
+    multi_q_problem: tuple[
+        PreparedResolution,
+        FittingSelection,
+        tuple[SpectralModelDefinition, ...],
+        FitResult,
+    ],
+    background: BackgroundModel,
+    transfer_all: bool,
+) -> None:
+    prepared, selection, _configurations, _anchor = multi_q_problem
+    project, _sample, draft = _workflow_problem(prepared, selection)
+    source = _manual_model(background=background)
+    source = replace(
+        source,
+        lorentzians=(
+            replace(source.lorentzians[0], center=ManualParameterIntent(0.06)),
+        ),
+        b1=None,
+    )
+    elastic_center = ParameterReference(ELASTIC_COMPONENT, ParameterFamily.CENTER)
+    lorentzian_center = ParameterReference(L1, ParameterFamily.CENTER)
+    draft = draft.with_model(2, source).with_model(1, None)
+    draft = create_parameter_tie(
+        draft,
+        2,
+        (elastic_center,),
+        source_member=elastic_center,
+        tie_group_id="center-bond",
+    )
+    draft = join_parameter_tie(draft, 2, "center-bond", lorentzian_center)
+    execution = run_and_adopt_manual_fit(project, draft, 2, max_nfev=800)
+    assert execution.success
+    assert execution.fit_result is not None
+    assert execution.adopted_draft is not None
+    anchor_model = execution.adopted_draft.setup(2).model
+    assert anchor_model is not None
+    active = active_transferable_constraints(anchor_model)
+    assert len(active.center_ties) == 1
+    assert active.center_ties[0].identity == CenterTieIdentity(
+        CenterTieKind.PARAMETER_TIE, "center-bond"
+    )
+    policy = MultiQConstraintTransferPolicy(
+        anchor_model,
+        bounds=(
+            frozenset(item.reference for item in active.bounds)
+            if transfer_all
+            else frozenset()
+        ),
+        fixed=(
+            frozenset(item.reference for item in active.fixed)
+            if transfer_all
+            else frozenset()
+        ),
+        center_ties=(
+            frozenset(item.identity for item in active.center_ties)
+            if transfer_all
+            else frozenset()
+        ),
+    )
+
+    branch = fit_all_q_from_current(
+        project,
+        execution.adopted_draft,
+        anchor_group_index=2,
+        current_fit=execution.fit_result,
+        transfer_policy=policy,
+        fit_excluded_groups=(0, 3, 4),
+        max_nfev=800,
+    )
+    target = branch.outcome(1)
+    assert target.status is MultiQFitStatus.SUCCESS
+    assert target.fit_result is not None
+    assert (
+        target.fit_result.parameter_by_reference(elastic_center)
+        is target.fit_result.parameter_by_reference(lorentzian_center)
+    ) is transfer_all
+    assert {
+        group.group_id for group in target.fit_result.configuration.parameter_ties
+    } == ({"center-bond"} if transfer_all else set())
+
+
+def test_s5_selected_center_bond_cannot_detach_populated_legacy_center(
+    multi_q_problem: tuple[
+        PreparedResolution,
+        FittingSelection,
+        tuple[SpectralModelDefinition, ...],
+        FitResult,
+    ],
+) -> None:
+    prepared, selection, _configurations, _anchor = multi_q_problem
+    project, _sample, draft = _workflow_problem(prepared, selection)
+    source = _manual_model(background=BackgroundModel.CONSTANT)
+    source = replace(
+        source,
+        lorentzians=(
+            replace(source.lorentzians[0], center=ManualParameterIntent(0.06)),
+        ),
+        b1=None,
+    )
+    populated_target = replace(
+        source,
+        lorentzians=(replace(source.lorentzians[0], center=None),),
+    )
+    elastic_center = ParameterReference(ELASTIC_COMPONENT, ParameterFamily.CENTER)
+    lorentzian_center = ParameterReference(L1, ParameterFamily.CENTER)
+    draft = draft.with_model(2, source).with_model(1, populated_target)
+    draft = create_parameter_tie(
+        draft,
+        2,
+        (elastic_center,),
+        source_member=elastic_center,
+        tie_group_id="center-bond",
+    )
+    draft = join_parameter_tie(draft, 2, "center-bond", lorentzian_center)
+    execution = run_and_adopt_manual_fit(project, draft, 2, max_nfev=800)
+    assert execution.success
+    assert execution.fit_result is not None
+    assert execution.adopted_draft is not None
+    anchor_model = execution.adopted_draft.setup(2).model
+    assert anchor_model is not None
+    tie = CenterTieIdentity(CenterTieKind.PARAMETER_TIE, "center-bond")
+
+    baseline = fit_all_q_from_current(
+        project,
+        execution.adopted_draft,
+        anchor_group_index=2,
+        current_fit=execution.fit_result,
+        transfer_policy=MultiQConstraintTransferPolicy(anchor_model),
+        fit_excluded_groups=(0, 3, 4),
+        max_nfev=800,
+    )
+    assert baseline.outcome(1).status is MultiQFitStatus.SUCCESS
+    selected = fit_all_q_from_current(
+        project,
+        execution.adopted_draft,
+        anchor_group_index=2,
+        current_fit=execution.fit_result,
+        transfer_policy=MultiQConstraintTransferPolicy(
+            anchor_model,
+            center_ties=frozenset((tie,)),
+        ),
+        fit_excluded_groups=(0, 3, 4),
+        max_nfev=800,
+    )
+    assert selected.outcome(1).status is MultiQFitStatus.BLOCKED
+    assert selected.outcome(1).fit_result is None
 
 
 def test_ambiguous_reversed_setup_clone_blocks_without_positional_mapping(

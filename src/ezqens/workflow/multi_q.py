@@ -792,8 +792,14 @@ def capture_fitting_method(
     )
 
 
-def _default_model(composition: MethodComposition) -> ManualModelState:
-    has_center = composition.elastic_present or bool(composition.lorentzian_identities)
+def _default_model(
+    composition: MethodComposition,
+    *,
+    independent_lorentzian_centers: bool = False,
+) -> ManualModelState:
+    has_center = composition.elastic_present or (
+        bool(composition.lorentzian_identities) and not independent_lorentzian_centers
+    )
     return ManualModelState(
         energy_shift=ManualParameterIntent(0.0) if has_center else None,
         elastic_area=(
@@ -803,6 +809,11 @@ def _default_model(composition: MethodComposition) -> ManualModelState:
             ManualLorentzianState(
                 area=ManualParameterIntent(1.0),
                 fwhm=ManualParameterIntent(0.1),
+                center=(
+                    ManualParameterIntent(0.0)
+                    if independent_lorentzian_centers
+                    else None
+                ),
                 identity=identity,
             )
             for identity in composition.lorentzian_identities
@@ -1424,6 +1435,11 @@ def _apply_s5_center_ties(
         )
 
     modes = _center_modes(target)
+    legacy_slot_members = tuple(
+        reference
+        for reference in target.parameter_references()
+        if _slot_key(target, reference) == ("legacy",)
+    )
     selected_members = {
         member for relationship in selected for member in relationship.members
     }
@@ -1472,10 +1488,12 @@ def _apply_s5_center_ties(
                 if modes[member][0] is not MethodCenterMode.LEGACY_SHARED:
                     continue
                 if member.component == ELASTIC_COMPONENT:
-                    raise ValueError(
-                        "selected general center tie cannot detach target Elastic "
-                        "from legacy shared-center state"
-                    )
+                    if len(legacy_slot_members) > 1:
+                        raise ValueError(
+                            "selected general center tie cannot detach target Elastic "
+                            "from legacy shared-center state"
+                        )
+                    continue
                 modes[member] = (MethodCenterMode.INDEPENDENT, None)
 
     center_groups: list[ManualCenterGroupState] = []
@@ -1681,7 +1699,10 @@ def _s5_target_model(
             preserve_target_component_state=True,
         )
     if base is None:
-        base = _default_model(composition)
+        base = _default_model(
+            composition,
+            independent_lorentzian_centers=True,
+        )
     resolved_intents = _resolved_s5_parameter_intents(source, base, policy)
     base = _apply_s5_center_ties(source, base, policy, resolved_intents)
     return _apply_resolved_s5_parameter_intents(base, resolved_intents)
