@@ -38,12 +38,14 @@ from ezqens.resolution import PreparedResolution
 from .manual import (
     ManualFitDraft,
     SingleQAutoFitOutcome,
+    _adopt_manual_fit_values,
     _single_q_auto_fit_context_unchanged,
     run_single_q_auto_fit,
 )
 from .manual_state import (
     ManualCenterGroupState,
     ManualLorentzianState,
+    ManualModelMaterialization,
     ManualModelState,
     ManualParameterTieState,
     materialize_manual_model,
@@ -1708,13 +1710,35 @@ def _s5_target_model(
     return _apply_resolved_s5_parameter_intents(base, resolved_intents)
 
 
+@dataclass(frozen=True, slots=True)
+class _S5PreparedTarget:
+    model: ManualModelState
+    materialization: ManualModelMaterialization
+
+
+@dataclass(frozen=True, slots=True)
+class ManualMultiQFitExecutionOutcome:
+    """Authoritative branch evidence and its adopted per-Q Manual working state."""
+
+    branch_result: MultiQBranchResult
+    adopted_draft: ManualFitDraft
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.branch_result, MultiQBranchResult):
+            raise ValueError("branch_result must be a MultiQBranchResult")
+        if not isinstance(self.adopted_draft, ManualFitDraft):
+            raise ValueError("adopted_draft must be a ManualFitDraft")
+        if len(self.adopted_draft.setups) != len(self.branch_result.outcomes):
+            raise ValueError("adopted Manual setups must match the branch Q groups")
+
+
 def _s5_branch_configurations(
     draft: ManualFitDraft,
     context: ManualFitContext,
     source: ManualModelState,
     policy: MultiQConstraintTransferPolicy,
-) -> tuple[SpectralModelDefinition | None, ...]:
-    configurations: list[SpectralModelDefinition | None] = []
+) -> tuple[_S5PreparedTarget | None, ...]:
+    prepared: list[_S5PreparedTarget | None] = []
     for group_index, setup in enumerate(draft.setups):
         try:
             target = _s5_target_model(source, setup.model, policy)
@@ -1725,13 +1749,13 @@ def _s5_branch_configurations(
                 group_index,
             )
         except (ValueError, _ComponentCorrespondenceError):
-            configurations.append(None)
+            prepared.append(None)
         else:
-            configurations.append(materialized.fit_model)
-    return tuple(configurations)
+            prepared.append(_S5PreparedTarget(target, materialized))
+    return tuple(prepared)
 
 
-def fit_all_q_from_current(
+def _execute_fit_all_q_from_current(
     project: WorkflowProject,
     draft: ManualFitDraft,
     *,
@@ -1746,8 +1770,8 @@ def fit_all_q_from_current(
     group_started_callback: Callable[[int], object] | None = None,
     progress_callback: Callable[[MultiQFitOutcome], object] | None = None,
     max_nfev: int = 2500,
-) -> MultiQBranchResult:
-    """Retain a successful Manual Current Result and continue its branch."""
+) -> tuple[MultiQBranchResult, tuple[_S5PreparedTarget | None, ...]]:
+    """Execute S5 while retaining the exact target Manual state used for fitting."""
 
     if method is not None or transfer_overrides is not None:
         raise ValueError(
@@ -1798,16 +1822,19 @@ def fit_all_q_from_current(
             fixed=transfer_policy.fixed,
             center_ties=transfer_policy.center_ties,
         )
-    configurations = _s5_branch_configurations(
+    prepared_targets = _s5_branch_configurations(
         draft,
         context,
         source,
         transfer_policy,
     )
-    return execute_multi_q_branch(
+    branch = execute_multi_q_branch(
         context.prepared_resolution,
         context.selection,
-        configurations,
+        tuple(
+            target.materialization.fit_model if target is not None else None
+            for target in prepared_targets
+        ),
         anchor_group_index=anchor_group_index,
         anchor_fit=current_fit,
         fit_excluded_groups=fit_excluded_groups,
@@ -1817,6 +1844,97 @@ def fit_all_q_from_current(
         progress_callback=progress_callback,
         max_nfev=max_nfev,
     )
+    return branch, prepared_targets
+
+
+def fit_all_q_from_current(
+    project: WorkflowProject,
+    draft: ManualFitDraft,
+    *,
+    anchor_group_index: int,
+    current_fit: FitResult | None = None,
+    transfer_policy: MultiQConstraintTransferPolicy | None = None,
+    method: FittingMethod | None = None,
+    transfer_overrides: MethodTransferOverrides | None = None,
+    fit_excluded_groups: Collection[int] = (),
+    derived_result_excluded_groups: Collection[int] = (),
+    cancel_requested: Callable[[], bool] | None = None,
+    group_started_callback: Callable[[int], object] | None = None,
+    progress_callback: Callable[[MultiQFitOutcome], object] | None = None,
+    max_nfev: int = 2500,
+) -> MultiQBranchResult:
+    """Retain a successful Manual Current Result and continue its branch."""
+
+    branch, _prepared_targets = _execute_fit_all_q_from_current(
+        project,
+        draft,
+        anchor_group_index=anchor_group_index,
+        current_fit=current_fit,
+        transfer_policy=transfer_policy,
+        method=method,
+        transfer_overrides=transfer_overrides,
+        fit_excluded_groups=fit_excluded_groups,
+        derived_result_excluded_groups=derived_result_excluded_groups,
+        cancel_requested=cancel_requested,
+        group_started_callback=group_started_callback,
+        progress_callback=progress_callback,
+        max_nfev=max_nfev,
+    )
+    return branch
+
+
+def fit_all_q_from_current_with_adoption(
+    project: WorkflowProject,
+    draft: ManualFitDraft,
+    *,
+    anchor_group_index: int,
+    current_fit: FitResult | None = None,
+    transfer_policy: MultiQConstraintTransferPolicy | None = None,
+    method: FittingMethod | None = None,
+    transfer_overrides: MethodTransferOverrides | None = None,
+    fit_excluded_groups: Collection[int] = (),
+    derived_result_excluded_groups: Collection[int] = (),
+    cancel_requested: Callable[[], bool] | None = None,
+    group_started_callback: Callable[[int], object] | None = None,
+    progress_callback: Callable[[MultiQFitOutcome], object] | None = None,
+    max_nfev: int = 2500,
+) -> ManualMultiQFitExecutionOutcome:
+    """Continue a branch and adopt only successful target values into Manual state."""
+
+    branch, prepared_targets = _execute_fit_all_q_from_current(
+        project,
+        draft,
+        anchor_group_index=anchor_group_index,
+        current_fit=current_fit,
+        transfer_policy=transfer_policy,
+        method=method,
+        transfer_overrides=transfer_overrides,
+        fit_excluded_groups=fit_excluded_groups,
+        derived_result_excluded_groups=derived_result_excluded_groups,
+        cancel_requested=cancel_requested,
+        group_started_callback=group_started_callback,
+        progress_callback=progress_callback,
+        max_nfev=max_nfev,
+    )
+    adopted_draft = draft
+    for outcome in branch.outcomes:
+        if (
+            outcome.group_index == anchor_group_index
+            or outcome.status is not MultiQFitStatus.SUCCESS
+        ):
+            continue
+        prepared = prepared_targets[outcome.group_index]
+        if prepared is None or outcome.fit_result is None:
+            raise RuntimeError("successful target lost its Manual preparation")
+        adopted_draft = adopted_draft.with_model(
+            outcome.group_index,
+            _adopt_manual_fit_values(
+                prepared.model,
+                outcome.fit_result,
+                prepared.materialization,
+            ),
+        )
+    return ManualMultiQFitExecutionOutcome(branch, adopted_draft)
 
 
 def _manual_state_from_core(model: SpectralModelDefinition) -> ManualModelState:

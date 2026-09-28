@@ -643,6 +643,15 @@ free target parameters through the existing same-side nearest-success chains.
 An incompatible target remains blocked rather than weakening a transferred
 constraint.
 
+`fit_all_q_from_current_with_adoption(...)` returns the authoritative
+`MultiQBranchResult` together with a new `ManualFitDraft`. For each successful
+non-anchor target, that draft retains the exact Manual topology and constraint
+intent used before fit materialization, with fitted Current Values adopted by
+typed optimizer-parameter references. Failed, blocked, excluded, and unrun
+targets keep their prior setups, including an absent setup. This editable
+working state can later diverge from the immutable retained FitResult without
+rewriting that result. The existing branch-only workflow call remains available.
+
 `FittingWorkspaceState` distinguishes an unsaved Current Result from a Current
 Result associated with one saved in-memory snapshot. Save As appends a snapshot
 and binds Current to it. A later Run may replace Current while explicitly
