@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ezqens.batch import MultiQFitStatus
 from ezqens.domain import DiagnosticSeverity, ReducedDataset
 from ezqens.fitting import (
     ComponentIdentity,
@@ -66,6 +67,17 @@ SPECTRUM_ZOOM_DRAG_THRESHOLD_PX = 4.0
 BOUNDARY_HIT_RADIUS_LOGICAL_PX = 8.0
 
 
+def _fit_status_description(status: MultiQFitStatus | None) -> str:
+    if status is None or status is MultiQFitStatus.NOT_RUN:
+        return "Not run"
+    return {
+        MultiQFitStatus.SUCCESS: "Success",
+        MultiQFitStatus.FAILED: "Failed",
+        MultiQFitStatus.BLOCKED: "Blocked",
+        MultiQFitStatus.EXCLUDED: "Excluded",
+    }[status]
+
+
 def axis_label(quantity: str, unit: str) -> str:
     """Return a truthful axis label without decorating an unknown unit."""
 
@@ -86,6 +98,7 @@ class ReducedDatasetView(QWidget):
     mask_lasso_requested = Signal(int, object, str)
     mask_boundary_previewed = Signal(int, object, float)
     mask_boundary_requested = Signal(int, object, float)
+    mask_boundary_preview_cancelled = Signal()
     mask_operation_feedback_changed = Signal(str)
     manual_fit_requested = Signal()
     manual_component_completed = Signal(object, object)
@@ -118,6 +131,7 @@ class ReducedDatasetView(QWidget):
         self.mask_operation_feedback = "Exclude"
         self._mask_points: list[tuple[float, float]] = []
         self._boundary_drag_side: str | None = None
+        self._mask_interaction_enabled = True
         self._boundary_handle_artists: dict[str, Line2D] = {}
         self._boundary_handle_positions: dict[str, float] = {}
         self._mask_boundary_coordinates: tuple[BoundaryCoordinates, ...] | None = None
@@ -142,6 +156,8 @@ class ReducedDatasetView(QWidget):
         self.overview_x_cell_bounds: tuple[tuple[float, float], ...] = ()
         self.overview_active_highlight: Rectangle | None = None
         self.navigator_active_highlight: PathCollection | None = None
+        self.overview_fit_status_markers: PathCollection | None = None
+        self.navigator_fit_status_markers: PathCollection | None = None
         self._overview_q_label_artists: tuple[Text, ...] = ()
         self._navigator_q_label_artists: tuple[Text, ...] = ()
         self._overview_label_indices: tuple[int, ...] = ()
@@ -159,6 +175,9 @@ class ReducedDatasetView(QWidget):
         self.overview_visible = True
         self._navigation_drag_active = False
         self._navigation_drag_axes: Axes | None = None
+        self._navigation_enabled = True
+        self._fit_statuses: tuple[MultiQFitStatus | None, ...] = ()
+        self._processing_group_index: int | None = None
         self.y_scale = "linear"
         self.heatmap_scale = "linear"
         self.y_range_locked = True
@@ -168,6 +187,10 @@ class ReducedDatasetView(QWidget):
         self._overview_border = "#deded9"
         self._overview_accent = OVERVIEW_ACCENT_COLOR
         self._overview_masked = "#8d819d"
+        self._fit_status_success = "#159447"
+        self._fit_status_warning = "#e87800"
+        self._fit_status_danger = "#dc2626"
+        self._fit_status_muted = NAVIGATOR_INACTIVE_COLOR
 
         self.previous_button = QToolButton()
         self.previous_button.setObjectName("previousGroupButton")
@@ -366,6 +389,8 @@ class ReducedDatasetView(QWidget):
         self._manual_preview = None
         self._manual_fit_result = None
         self._manual_pending_evaluation = None
+        self._fit_statuses = tuple(None for _ in dataset.spectra)
+        self._processing_group_index = None
         self.mask_inspection_mode = False
         self.current_group_index = group_index
         self._spectrum_x_limits = None
@@ -427,6 +452,13 @@ class ReducedDatasetView(QWidget):
         if tool is None:
             self.canvas.unsetCursor()
 
+    def set_mask_interaction_enabled(self, enabled: bool) -> None:
+        """Block task gestures while a fit owns the displayed selection."""
+
+        self._mask_interaction_enabled = enabled
+        if not enabled:
+            self._cancel_mask_gesture()
+
     def set_mask_operation(self, operation: str) -> None:
         """Set the persistent Rectangle/Lasso operation without touching data."""
 
@@ -464,6 +496,10 @@ class ReducedDatasetView(QWidget):
         self.overview_x_cell_bounds = ()
         self.overview_active_highlight = None
         self.navigator_active_highlight = None
+        self.overview_fit_status_markers = None
+        self.navigator_fit_status_markers = None
+        self._fit_statuses = ()
+        self._processing_group_index = None
         self._overview_q_label_artists = ()
         self._navigator_q_label_artists = ()
         self.spectrum_q_title = None
@@ -516,6 +552,9 @@ class ReducedDatasetView(QWidget):
             raise ValueError("dataset replacement must preserve the number of groups")
         self.dataset = dataset
         self.overview_source_dataset = overview_source
+        if len(self._fit_statuses) != len(dataset.spectra):
+            self._fit_statuses = tuple(None for _ in dataset.spectra)
+            self._processing_group_index = None
         if self.current_group_index >= len(dataset.spectra):
             self.current_group_index = 0
         blocker = QSignalBlocker(self.group_spinbox)
@@ -650,6 +689,10 @@ class ReducedDatasetView(QWidget):
         text: str,
         border: str,
         accent: str,
+        success: str | None = None,
+        warning: str | None = None,
+        danger: str | None = None,
+        muted: str | None = None,
     ) -> None:
         """Apply application-chrome colors to overview-only navigation surfaces."""
 
@@ -657,8 +700,52 @@ class ReducedDatasetView(QWidget):
         self._overview_text = text
         self._overview_border = border
         self._overview_accent = accent
+        self._fit_status_success = success or self._fit_status_success
+        self._fit_status_warning = warning or self._fit_status_warning
+        self._fit_status_danger = danger or self._fit_status_danger
+        self._fit_status_muted = muted or self._fit_status_muted
         if self.dataset is not None:
             self._draw()
+
+    def set_q_navigation_enabled(self, enabled: bool) -> None:
+        """Temporarily disable user Q navigation while allowing run-following."""
+
+        self._navigation_enabled = enabled
+        if not enabled:
+            self._end_navigation_drag()
+        if self.dataset is not None:
+            self._update_navigation_state(self.dataset)
+
+    def set_fit_statuses(
+        self,
+        statuses: tuple[MultiQFitStatus | None, ...],
+        *,
+        processing_group_index: int | None = None,
+    ) -> None:
+        """Project authoritative per-Q Result status into navigator markers."""
+
+        if self.dataset is not None and len(statuses) != len(self.dataset.spectra):
+            raise ValueError("fit status count must match dataset group count")
+        if processing_group_index is not None and not 0 <= processing_group_index < len(
+            statuses
+        ):
+            raise ValueError("processing group is outside fit status range")
+        self._fit_statuses = tuple(statuses)
+        self._processing_group_index = processing_group_index
+        self._update_fit_status_markers()
+
+    @property
+    def fit_status_descriptions(self) -> tuple[str, ...]:
+        """Return the non-color status text exposed by the Q navigator."""
+
+        return tuple(
+            (
+                "Processing"
+                if index == self._processing_group_index
+                else _fit_status_description(status)
+            )
+            for index, status in enumerate(self._fit_statuses)
+        )
 
     @property
     def current_group_description(self) -> str:
@@ -669,6 +756,8 @@ class ReducedDatasetView(QWidget):
     def set_current_group(self, group_index: int) -> None:
         """Select a zero-based group and synchronize controls and plots."""
 
+        if self._boundary_drag_side is not None:
+            self._cancel_mask_gesture()
         self.cancel_manual_component_interaction()
         dataset = self._require_dataset()
         if not 0 <= group_index < len(dataset.spectra):
@@ -752,6 +841,8 @@ class ReducedDatasetView(QWidget):
             )
         overview_figure = self.overview_canvas.figure
         overview_figure.clear()
+        self.overview_fit_status_markers = None
+        self.navigator_fit_status_markers = None
         self._overview_q_label_artists = ()
         self._navigator_q_label_artists = ()
         self._overview_label_indices = ()
@@ -1173,6 +1264,11 @@ class ReducedDatasetView(QWidget):
             edgecolor=OVERVIEW_ACTIVE_COLOR,
             zorder=4,
         )
+        self.overview_fit_status_markers = self._draw_fit_status_markers(
+            axes,
+            coordinates,
+            y=1.0,
+        )
         spectrum = source_dataset.spectra[0]
         axes.set_ylabel(axis_label("Energy", spectrum.energy_unit), fontsize=8)
         axes.set_xlabel("")
@@ -1272,20 +1368,22 @@ class ReducedDatasetView(QWidget):
             linewidth=1.0,
             zorder=1,
         )
-        axes.scatter(
+        self.navigator_fit_status_markers = axes.scatter(
             coordinates,
             np.zeros_like(coordinates),
-            color=NAVIGATOR_INACTIVE_COLOR,
             s=16,
-            zorder=2,
+            zorder=3,
         )
+        self._apply_fit_status_marker_style(self.navigator_fit_status_markers)
         current_coordinate = coordinates[self.current_group_index]
         self.navigator_active_highlight = axes.scatter(
             [current_coordinate],
             [0.0],
-            color=self._overview_accent,
+            facecolors="none",
+            edgecolors=self._overview_accent,
+            linewidths=1.5,
             s=40,
-            zorder=3,
+            zorder=4,
         )
         axes.set_xlim(0.5, len(dataset.spectra) + 0.5)
         self._navigator_scale_base_xlim = axes.get_xlim()
@@ -1547,9 +1645,97 @@ class ReducedDatasetView(QWidget):
         )
         return True
 
+    def _draw_fit_status_markers(
+        self,
+        axes: Axes,
+        coordinates: np.ndarray,
+        *,
+        y: float,
+    ) -> PathCollection:
+        markers = axes.scatter(
+            coordinates,
+            np.full_like(coordinates, y),
+            s=16,
+            transform=axes.get_xaxis_transform(),
+            clip_on=False,
+            zorder=6,
+        )
+        self._apply_fit_status_marker_style(markers)
+        return markers
+
+    def _apply_fit_status_marker_style(self, markers: PathCollection) -> None:
+        if self.dataset is None:
+            return
+        count = len(self.dataset.spectra)
+        statuses = (
+            self._fit_statuses
+            if len(self._fit_statuses) == count
+            else tuple(None for _ in range(count))
+        )
+        faces: list[str] = []
+        edges: list[str] = []
+        widths: list[float] = []
+        sizes: list[float] = []
+        for index, status in enumerate(statuses):
+            if index == self._processing_group_index:
+                faces.append(self._fit_status_warning)
+                edges.append(self._fit_status_warning)
+                widths.append(1.2)
+                sizes.append(34.0)
+            elif status is MultiQFitStatus.SUCCESS:
+                faces.append(self._fit_status_success)
+                edges.append(self._fit_status_success)
+                widths.append(0.8)
+                sizes.append(16.0)
+            elif status is MultiQFitStatus.FAILED:
+                faces.append(self._fit_status_danger)
+                edges.append(self._fit_status_danger)
+                widths.append(0.8)
+                sizes.append(16.0)
+            elif status is MultiQFitStatus.BLOCKED:
+                faces.append("none")
+                edges.append(self._fit_status_danger)
+                widths.append(1.5)
+                sizes.append(22.0)
+            elif status is MultiQFitStatus.EXCLUDED:
+                faces.append(self._fit_status_muted)
+                edges.append(self._fit_status_muted)
+                widths.append(0.8)
+                sizes.append(16.0)
+            else:
+                faces.append(self._fit_status_warning)
+                edges.append(self._fit_status_warning)
+                widths.append(0.8)
+                sizes.append(16.0)
+        markers.set_facecolor(faces)
+        markers.set_edgecolor(edges)
+        markers.set_linewidth(widths)
+        markers.set_sizes(sizes)
+        tooltip = "\n".join(
+            f"Group {index + 1}: {description}"
+            for index, description in enumerate(self.fit_status_descriptions)
+        )
+        self.overview_canvas.setToolTip(tooltip)
+        self.navigation_widget.setToolTip(tooltip)
+
+    def _update_fit_status_markers(self) -> None:
+        for markers in (
+            self.overview_fit_status_markers,
+            self.navigator_fit_status_markers,
+        ):
+            if markers is not None:
+                self._apply_fit_status_marker_style(markers)
+        self.overview_canvas.draw_idle()  # type: ignore[no-untyped-call]
+
     def _update_navigation_state(self, dataset: ReducedDataset) -> None:
-        self.previous_button.setEnabled(self.current_group_index > 0)
-        self.next_button.setEnabled(self.current_group_index + 1 < len(dataset.spectra))
+        self.previous_button.setEnabled(
+            self._navigation_enabled and self.current_group_index > 0
+        )
+        self.next_button.setEnabled(
+            self._navigation_enabled
+            and self.current_group_index + 1 < len(dataset.spectra)
+        )
+        self.group_spinbox.setEnabled(self._navigation_enabled)
         blocker = QSignalBlocker(self.group_spinbox)
         self.group_spinbox.setValue(self.current_group_index + 1)
         del blocker
@@ -1600,7 +1786,11 @@ class ReducedDatasetView(QWidget):
         return f"Q = {q_value:.6g} {Q_DISPLAY_UNIT}"
 
     def _group_number_changed(self, group_number: int) -> None:
-        if self.dataset is not None and group_number - 1 != self.current_group_index:
+        if (
+            self._navigation_enabled
+            and self.dataset is not None
+            and group_number - 1 != self.current_group_index
+        ):
             self.set_current_group(group_number - 1)
 
     def _overview_x_coordinates(self, dataset: ReducedDataset) -> np.ndarray:
@@ -1620,6 +1810,7 @@ class ReducedDatasetView(QWidget):
             return
         if (
             event.button is MouseButton.LEFT
+            and self._navigation_enabled
             and event.inaxes in (self.overview_axes, self.navigator_axes)
             and event.xdata is not None
         ):
@@ -1705,7 +1896,7 @@ class ReducedDatasetView(QWidget):
         )
 
     def _draw_q_center_draft(self) -> None:
-        if self.dataset is not None and self._q_center_draft_is_editable():
+        if self.dataset is not None:
             self._draw()
 
     def _on_mouse_motion(self, event: MouseEvent) -> None:
@@ -1732,6 +1923,8 @@ class ReducedDatasetView(QWidget):
             return
         if self._mask_tool is None:
             self._handle_spectrum_zoom_press(event)
+            return
+        if not self._mask_interaction_enabled:
             return
         if event.button is not MouseButton.LEFT:
             return
@@ -1783,6 +1976,8 @@ class ReducedDatasetView(QWidget):
             return
         if self._mask_tool is None:
             self._handle_spectrum_zoom_motion(event)
+            return
+        if not self._mask_interaction_enabled:
             return
         if self._boundary_drag_side is not None:
             if event.inaxes is self.spectrum_axes and event.xdata is not None:
@@ -2162,6 +2357,8 @@ class ReducedDatasetView(QWidget):
     def _move_boundary_preview(self, side: str, energy: float) -> None:
         """Move the visible handle and request a non-committing core preview."""
 
+        if not self._mask_interaction_enabled:
+            return
         artist = self._boundary_handle_artists.get(side)
         if artist is not None:
             artist.set_xdata([energy, energy])
@@ -2230,10 +2427,13 @@ class ReducedDatasetView(QWidget):
             self._mask_preview_line = None
 
     def _cancel_mask_gesture(self) -> None:
+        boundary_drag_active = self._boundary_drag_side is not None
         self._boundary_drag_side = None
         self._mask_points = []
         self._clear_mask_preview_artists()
         self._set_mask_operation_feedback(self.mask_operation, inverted=False)
+        if boundary_drag_active:
+            self.mask_boundary_preview_cancelled.emit()
         self.canvas.draw_idle()  # type: ignore[no-untyped-call]
 
     def _toggle_overview(self) -> None:
@@ -2252,6 +2452,8 @@ class ReducedDatasetView(QWidget):
         axes: Axes | None,
         coordinate: float,
     ) -> None:
+        if not self._navigation_enabled:
+            return
         if axes is self.overview_axes:
             self.select_group_from_overview(coordinate)
         elif axes is self.navigator_axes:

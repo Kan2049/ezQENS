@@ -26,7 +26,7 @@ The guiding principles are:
 6. Design extension seams, not extension scaffolding.
 7. Future data sources should converge on the common `ReducedDataset` / `Spectrum` boundary.
 8. Scientific visualization should evolve alongside the analysis core rather than being postponed until the final GUI.
-9. Desktop GUI development should begin only after a complete single-Q scientific fitting path has been validated.
+9. Desktop GUI development follows validation of the scientific fitting path and consumes the same GUI-independent core.
 10. For equally correct solutions, prefer fewer concepts, less code, fewer dependencies, lower resource use, and easier maintenance.
 11. Keep reusable fitting **Methods** logically independent from the data on which they are executed.
 12. Keep historical **Results** distinct from editable Methods: changing a Method must not silently rewrite an already produced Result.
@@ -187,9 +187,15 @@ workflow requires them.
 
 ### 4.4 Q rebinning
 
-Generic Q rebinning is not implemented in the initial reduced-text workflow.
+Generic Q rebinning was deferred during Milestone 2. A later validated workflow
+supports constrained Q rebinning of reduced data with explicit current source
+and target Q-bin edges and propagated per-point fractional coverage. It
+requires compatible contributing energy coordinates, keeps targets within
+current source coverage, and does not refine contributing source bins. It does
+not interpolate, extrapolate, repair Q by nearest neighbor, or silently
+reconstruct missing coverage.
 
-For final reduced `S(Q,E)` spectra, scientifically correct rebinning may require
+Other Q transformations of final reduced `S(Q,E)` spectra may require
 information that is no longer available, such as:
 
 * original detector contributions;
@@ -198,23 +204,23 @@ information that is no longer available, such as:
 * normalization weights;
 * geometry or event information.
 
-Future intermediate or raw-data workflows may retain enough information to
-construct new Q bins correctly.
+Future intermediate or raw-data workflows may provide additional information
+for scientifically distinct Q transformations.
 
-The architecture should therefore allow a future transformation conceptually like:
+The existing constrained transformation follows:
 
 ```text
-source/intermediate/raw data
+reduced data with Q edges and fractional coverage
         ↓
-Q grouping or Q rebinning
+constrained Q rebinning
         ↓
 ReducedDataset + Q assignment
         ↓
 existing analysis core
 ```
 
-Do not introduce `QRebinner`, detector-weight, geometry, registry, or instrument
-abstractions before a concrete supported use case exists.
+Detector-weight, geometry, registry, and instrument abstractions remain outside
+the validated reduced-data operation.
 
 ### 4.5 Scientific visualization
 
@@ -343,76 +349,35 @@ convolution-boundary problems.
 
 ---
 
-## 7. Milestone 5 — Single-Q free fitting
+## 7. Milestone 5 — Single-Q free fitting ✅ (completed and frozen)
 
 ### Goal
 
 Fit one selected QENS spectrum reliably using the validated measured-resolution
 and convolution path.
 
-Phase A provides the reusable production single-Q engine, manual arbitrary-N
-Lorentzian configuration, standard 0L/1L/2L multistart candidate evaluation,
-absolute-sigma covariance and threshold-free diagnostics. The production
-AutoFit core now applies the reviewed deterministic M5 policy to that existing
-candidate evidence without changing candidate fitting.
+The frozen Single-Q core provides manual arbitrary-N Lorentzian fitting,
+measured-resolution convolution, absolute-sigma weighted diagnostics and
+covariance, and standard 0L/1L/2L × NONE/B0/B1 AutoFit candidate evaluation.
+AutoFit keeps best-supported evidence distinct from its stricter Most
+Recommended result and preserves residual, identifiability, and model-selection
+evidence for inspection.
 
-A corrective prerequisite now requires every measured-resolution Q group to
-pass structural/preparation QC before normalization and scientific use. An
-untouched normal group is internally authorized as default KEEP with
-`AUTOMATIC_QC` source. Explicit user confirmation remains required for
-user-reviewed KEEP, any AUTO-padding override, and boundary-only contiguous
-EXCLUDE; these paths retain `USER_REVIEW` source. KEEP may carry a neutral
-user-retained-structure warning. The gate records signed-area-ratio and
-normalization provenance per Q without automatic feature detection,
-classification, correction, or a ratio threshold. M4 convolution mathematics
-and Phase-A fitting mathematics remain unchanged.
+Measured-resolution preparation applies structural QC per Q. An untouched
+normal group can receive default `AUTOMATIC_QC` KEEP authorization; explicit
+changes require `USER_REVIEW`. The accepted support, signed-area ratio, and
+normalization remain inspectable without automatic feature classification or
+correction.
 
-The first useful free-fit model should support:
-
-* elastic contribution;
-* zero or more quasielastic Lorentzian components;
-* simple background;
-* explicit execution-time parameter starting values;
-* bounds;
-* fixed/free parameter state;
-* weighted fitting using valid uncertainties.
-
-The first accepted implementation prioritizes:
-
-* reliable parameter recovery;
-* residual inspection;
-* convergence information;
-* physically meaningful FWHM output;
-* transparent failure behavior.
-
-AutoFit searches only 0L/1L/2L × NONE/B0/B1 and recommends the simplest
-adequately supported observable family. Its result separates primary-family
-support from assessment of additional complexity, retains candidate evidence,
-and distinguishes marginal, background-confounded, and statistically supported
-but uninterpretable transitions. Family IC envelopes remain separate from
-residual eligibility of the concrete recommendation candidate, so an
-INADEQUATE fit cannot replace an ADEQUATE or QUESTIONABLE primary even when it
-contributes strong descriptive IC evidence. SUPPORTED_TRANSITION describes
-model-family evidence, not proof of an added physical process. Severe
-multistart stability is assessed on FWHM-canonicalized Lorentzian areas and
-linewidths, excluding nuisance-only variation. The reviewed M5 residual,
-AICc/BIC, and severe identifiability calibration is fixed in the production
-policy and is not a universal physical constant or user-tunable threshold set.
-Minimum AICc/BIC alone never selects the recommendation, D_unique is absent,
-and a 2L result does not exclude higher unsearched complexity.
-
-Exhausting the fixed Auto scope is distinct from finding an adequate 2L model.
-When an evaluated 2L result remains inadequate, Auto returns no recommendation
-and exposes the existing user-configured arbitrary-N manual fit as an available
-continuation; it never starts or labels a 3L-or-higher fit as Auto. Availability
-after a supported 2L result likewise does not recommend escalation.
+The validated manual workflow supports editable parameters, bounds, fixed/free
+state, center relationships, readiness, fit execution, and result inspection.
+AutoFit remains limited to the nine standard candidates; arbitrary-N fitting
+is a separate manual continuation. Minimum AICc/BIC alone does not select a
+scientific recommendation.
 
 Structured resolution-containment assessment and reference-Q policy remain
-unresolved. Existing provenance cannot distinguish scientific truncation of
-relevant resolution structure, so AutoFit records that capability gap and
-applies no geometric or signed-area threshold. Milestone 5 remains active until
-this production policy completes the required independent code and scientific
-reviews and is explicitly frozen.
+unresolved. AutoFit records the current assessment limitation without applying
+an unsupported geometric or signed-area threshold.
 
 ### Scientific visualization
 
@@ -448,15 +413,14 @@ inspect result
 
 ## 8. Desktop GUI and reusable analysis workflow
 
-Once the single-Q fitting path passes scientific validation, development of the
-interactive desktop workflow may begin.
+Desktop GUI and workflow development is active. Existing GUI slices already
+consume the validated Single-Q and Multi-Q scientific core.
 
 The GUI must remain a thin interface over the validated scientific core.
 
-The first GUI slices should focus on the existing complete scientific workflow
-rather than implementing future scientific models prematurely.
+Current GUI slices focus on the validated scientific workflow.
 
-Expected interaction areas include:
+Implemented and planned interaction areas include:
 
 * sample and resolution loading;
 * spectrum/Q overview;
@@ -539,8 +503,9 @@ produced. Changing the reusable Method later must not silently change an
 existing historical Result. Re-running an edited or reused Method produces a
 new Result rather than rewriting the scientific meaning of an older Result.
 
-Method and Result persistence details are specified only when the corresponding
-GUI/workflow milestone becomes active.
+Current workflow state distinguishes editable Methods, Current Results, and
+saved in-memory Result snapshots. Durable project persistence remains future
+work.
 
 ### 8.3 Method contents and application semantics
 
@@ -577,7 +542,8 @@ Typical optional application categories may include:
 * Q-bin configuration; and
 * fitting selection.
 
-The exact grouping and UI are deferred until implementation.
+Generic Method application offers typed optional transfer categories. Any S5
+Fit-to-all-Q checkbox preference belongs to the GUI, not the scientific core.
 
 A Method may remember user-preferred application defaults. These preferences
 are usage metadata rather than part of the scientific Model definition.
@@ -690,19 +656,26 @@ family requires that abstraction.
 
 ---
 
-## 9. Milestone 6 — Multi-Q free fitting and derived QENS quantities
+## 9. Milestone 6 — Multi-Q free fitting and derived QENS quantities (active)
 
 ### Goal
 
 Apply the validated single-Q free fit independently across Q.
 
-Expected outputs include:
+Validated capabilities to date include:
 
-* per-Q spectral fits;
-* FWHM versus Q;
-* relaxation times derived from the approved linewidth convention;
-* experimental EISF from fitted integrated component areas;
-* transparent handling of failed, excluded, or manually refitted Q points.
+* anchor-outward independent Single-Q fits in physical-Q order, with separate
+  lower/higher nearest-success seed chains and explicit per-Q outcomes;
+* reusable Method application and in-memory Current/Saved Result lifecycle;
+* continuation of caller-selected AutoFit candidates as independent Q branches;
+* component-resolved FWHM, relaxation time, and EISF derived from existing
+  fitted Results, with uncertainty availability and failed/excluded states;
+* GUI comparison of selected AutoFit branches and derived QENS outputs;
+* Manual Fit to all Q from a retained successful Current Single-Q anchor,
+  selectively transferring Bounds, Fixed state, and center-Tie topology without
+  silently refitting that anchor;
+* terminal per-Q progress and target-start observation seams for Multi-Q runs;
+* constrained Q-grid assignment and fractional-coverage Q rebinning workflows.
 
 Batch fitting in this milestone remains a sequence of **independent free fits**
 rather than an implicit global fit.
@@ -713,9 +686,8 @@ fitting through their own core-owned model relationships. Such global fitting
 is a separate later capability and must not be simulated by GUI-side parameter
 ties or by silently changing the semantics of Milestone-6 batch fitting.
 
-Detailed fit seeding, Method application, refit state, exclusion state,
-fit-quality summaries, Result persistence, and derived-uncertainty policies
-will be specified when this milestone becomes active.
+These capabilities use in-memory workflow state. Durable project persistence
+and further analysis-level presentation remain open M6/application work.
 
 ### Scientific visualization
 
@@ -728,6 +700,10 @@ Add analysis-level views such as:
 * EISF(Q);
 * residual overview;
 * included/excluded Q states.
+
+A later GUI slice will provide a separate post-Result cross-Q parameter explorer
+for selecting an existing fitted component and parameter, such as L1 Area(Q).
+This is distinct from AutoFit candidate comparison through FWHM(Q) and EISF(Q).
 
 After Milestone 6, the desktop GUI may become the primary interactive workflow
 while Python/Jupyter usage remains fully supported.

@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ezqens.batch import MultiQFitOutcome, MultiQFitStatus
 from ezqens.fitting import (
     BACKGROUND_COMPONENT,
     ELASTIC_COMPONENT,
@@ -32,6 +33,7 @@ from ezqens.fitting import (
     ParameterFamily,
     ParameterMetadata,
     ParameterReference,
+    SpectralModelDefinition,
 )
 from ezqens.gui.icons import IconName, apply_disclosure_icon, load_icon
 from ezqens.workflow import (
@@ -174,6 +176,10 @@ class ManualFitEditor(QFrame):
     component_removal_requested = Signal(object)
     apply_resolution_requested = Signal()
     run_requested = Signal()
+    fit_all_q_requested = Signal()
+    cancel_fit_all_q_requested = Signal()
+    save_result_requested = Signal()
+    save_result_as_requested = Signal()
     clear_model_requested = Signal()
     expanded_changed = Signal(bool)
 
@@ -182,9 +188,11 @@ class ManualFitEditor(QFrame):
         self.setObjectName("manualFitEditor")
         self._model: ManualModelState | None = None
         self._metadata: dict[ParameterReference, ParameterMetadata] = {}
+        self._result_metadata: dict[ParameterReference, ParameterMetadata] = {}
         self._controls: dict[ParameterReference, _ParameterControls] = {}
         self._result_rows: dict[ParameterReference, _ResultParameterWidgets] = {}
         self._current_readiness: ManualWorkflowReadiness | None = None
+        self._context_locked = False
         self._icon_colors = {
             "neutral": "#676764",
             "accent": "#496d91",
@@ -225,6 +233,32 @@ class ManualFitEditor(QFrame):
         self.run_button.setObjectName("manualRunFitButton")
         self.run_button.setText("Run Fit")
         self.run_button.clicked.connect(self.run_requested)
+        self.fit_all_q_button = QToolButton()
+        self.fit_all_q_button.setObjectName("manualFitAllQButton")
+        self.fit_all_q_button.setText("Fit to all Q")
+        self.fit_all_q_button.setEnabled(False)
+        self.fit_all_q_button.setToolTip(
+            "Requires a successful Current Single-Q Result for this Group"
+        )
+        self.fit_all_q_button.clicked.connect(self.fit_all_q_requested)
+        self.cancel_fit_all_q_button = QToolButton()
+        self.cancel_fit_all_q_button.setObjectName("manualCancelFitAllQButton")
+        self.cancel_fit_all_q_button.setText("Cancel")
+        self.cancel_fit_all_q_button.clicked.connect(self.cancel_fit_all_q_requested)
+        self.cancel_fit_all_q_button.hide()
+        self.result_state_label = QLabel("No Current Result")
+        self.result_state_label.setObjectName("manualCurrentResultState")
+        self.result_state_label.setProperty("secondary", True)
+        self.save_result_button = QToolButton()
+        self.save_result_button.setObjectName("manualSaveResultButton")
+        self.save_result_button.setText("Save")
+        self.save_result_button.setEnabled(False)
+        self.save_result_button.clicked.connect(self.save_result_requested)
+        self.save_result_as_button = QToolButton()
+        self.save_result_as_button.setObjectName("manualSaveResultAsButton")
+        self.save_result_as_button.setText("Save As…")
+        self.save_result_as_button.setEnabled(False)
+        self.save_result_as_button.clicked.connect(self.save_result_as_requested)
         self.diagnostics_button = QToolButton()
         self.diagnostics_button.setObjectName("manualDiagnosticsToggle")
         self.diagnostics_button.setText("Diagnostics / readiness")
@@ -270,6 +304,11 @@ class ManualFitEditor(QFrame):
             color=self._icon_colors["neutral"],
         )
         self.result_toggle_button.toggled.connect(self._set_result_expanded)
+        self.result_outcome_message_label = QLabel(self.result_section)
+        self.result_outcome_message_label.setObjectName("manualResultOutcomeMessage")
+        self.result_outcome_message_label.setProperty("secondary", True)
+        self.result_outcome_message_label.setWordWrap(True)
+        self.result_outcome_message_label.hide()
         self.result_content = QWidget(self.result_section)
         result_content_layout = QVBoxLayout(self.result_content)
         result_content_layout.setContentsMargins(0, 0, 0, 0)
@@ -343,6 +382,7 @@ class ManualFitEditor(QFrame):
             self.result_toggle_button,
             alignment=Qt.AlignmentFlag.AlignLeft,
         )
+        result_layout.addWidget(self.result_outcome_message_label)
         result_layout.addWidget(self.result_content)
         self.result_content.hide()
         self.result_section.hide()
@@ -373,6 +413,13 @@ class ManualFitEditor(QFrame):
         status.setContentsMargins(0, 0, 0, 0)
         status.addWidget(self.status_label, 1)
         status.addWidget(self.run_button)
+        status.addWidget(self.fit_all_q_button)
+        status.addWidget(self.cancel_fit_all_q_button)
+        result_actions = QHBoxLayout()
+        result_actions.setContentsMargins(0, 0, 0, 0)
+        result_actions.addWidget(self.result_state_label, 1)
+        result_actions.addWidget(self.save_result_button)
+        result_actions.addWidget(self.save_result_as_button)
 
         self.sections = QWidget(self)
         self._sections_layout = QVBoxLayout(self.sections)
@@ -385,6 +432,7 @@ class ManualFitEditor(QFrame):
         body_layout.setSpacing(6)
         body_layout.addLayout(composition)
         body_layout.addLayout(status)
+        body_layout.addLayout(result_actions)
         body_layout.addWidget(
             self.apply_resolution_button,
             alignment=Qt.AlignmentFlag.AlignLeft,
@@ -473,7 +521,11 @@ class ManualFitEditor(QFrame):
             if controls.chain is None:
                 continue
             group_id = _shared_group_id(self._model, reference)
-            color = "neutral" if group_id is None else _tie_color(self._model, group_id)
+            color = (
+                "neutral"
+                if group_id is None
+                else manual_tie_color(self._model, group_id)
+            )
             controls.chain.setIcon(load_icon(IconName.CHAIN, self._icon_colors[color]))
 
     def set_state(
@@ -484,20 +536,41 @@ class ManualFitEditor(QFrame):
         lifecycle: ManualFitLifecycle = ManualFitLifecycle.READY,
         execution_diagnostics: tuple[WorkflowDiagnostic, ...] = (),
         fit_result: FitResult | None = None,
+        result_outcome: MultiQFitOutcome | None = None,
+        result_metadata: tuple[ParameterMetadata, ...] = (),
+        saved_result_name: str | None = None,
     ) -> None:
         """Render immutable workflow state without deriving scientific values."""
 
         self._model = model
         self._metadata = {item.reference: item for item in metadata}
+        self._result_metadata = {
+            item.reference: item for item in (result_metadata or metadata)
+        }
         self._current_readiness = readiness
         self._controls = {}
         self._clear_sections()
         self.model_label.setText(f"Model    {self._composition_summary(model)}")
         self.clear_model_button.setEnabled(model is not None)
-        self._render_status(readiness, lifecycle, execution_diagnostics)
-        self._render_fit_result(
-            fit_result if lifecycle is ManualFitLifecycle.CURRENT else None,
+        # Editable readiness/lifecycle does not replace immutable Result truth.
+        rendered_fit = fit_result
+        if result_outcome is not None:
+            rendered_fit = (
+                result_outcome.fit_result
+                if result_outcome.status is MultiQFitStatus.SUCCESS
+                else None
+            )
+        self._render_status(
+            readiness,
+            lifecycle,
             execution_diagnostics,
+            branch_result=result_outcome is not None,
+        )
+        self._render_fit_result(
+            rendered_fit,
+            execution_diagnostics,
+            result_outcome,
+            saved_result_name,
         )
         self._add_fixed_section(
             "δ",
@@ -509,6 +582,53 @@ class ManualFitEditor(QFrame):
             "Background",
             BACKGROUND_COMPONENT,
             (ParameterFamily.OFFSET, ParameterFamily.SLOPE),
+        )
+        self._apply_context_lock()
+
+    def set_context_locked(self, locked: bool) -> None:
+        """Prevent edits that would supersede an active Multi-Q run context."""
+
+        self._context_locked = locked
+        self._apply_context_lock()
+
+    def _apply_context_lock(self) -> None:
+        editable = not self._context_locked
+        self.add_button.setEnabled(editable)
+        self.clear_model_button.setEnabled(editable and self._model is not None)
+        self.apply_resolution_button.setEnabled(editable)
+        self.sections.setEnabled(editable)
+        if self._context_locked:
+            self.run_button.setEnabled(False)
+
+    def set_result_actions(
+        self,
+        *,
+        has_current_result: bool,
+        associated: bool,
+        modified: bool,
+        fit_all_q_enabled: bool,
+        running: bool,
+    ) -> None:
+        """Render application lifecycle state without deriving Result semantics."""
+
+        if not has_current_result:
+            state = "No Current Result"
+        elif not associated:
+            state = "Unsaved"
+        elif modified:
+            state = "Unsaved changes"
+        else:
+            state = "Saved"
+        self.result_state_label.setText(state)
+        self.save_result_button.setEnabled(
+            has_current_result and associated and not running
+        )
+        self.save_result_as_button.setEnabled(has_current_result and not running)
+        self.fit_all_q_button.setEnabled(fit_all_q_enabled and not running)
+        self.fit_all_q_button.setVisible(not running)
+        self.cancel_fit_all_q_button.setVisible(running)
+        self.run_button.setEnabled(
+            self.run_button.isEnabled() and not running and not self._context_locked
         )
 
     def _component_menu(self) -> QMenu:
@@ -566,6 +686,8 @@ class ManualFitEditor(QFrame):
         readiness: ManualWorkflowReadiness,
         lifecycle: ManualFitLifecycle,
         execution_diagnostics: tuple[WorkflowDiagnostic, ...],
+        *,
+        branch_result: bool,
     ) -> None:
         scientific_diagnostics = (
             ()
@@ -586,10 +708,14 @@ class ManualFitEditor(QFrame):
             status = "Needs fit"
         else:
             status = "Ready · Not yet fit"
+        if branch_result:
+            status = f"Manual setup · {status}"
         self.status_label.setText(status)
         messages = [item.message for item in readiness.workflow_diagnostics]
         messages.extend(item.message for item in scientific_diagnostics)
         messages.extend(item.message for item in execution_diagnostics)
+        if branch_result:
+            messages = [f"Manual setup: {message}" for message in messages]
         self.status_label.setToolTip("\n".join(messages))
         self.diagnostics_label.setText("\n".join(messages) or "No diagnostics")
         fitting = lifecycle is ManualFitLifecycle.FITTING
@@ -602,19 +728,42 @@ class ManualFitEditor(QFrame):
         self.apply_resolution_button.setVisible(resolution_missing)
         if resolution_missing:
             self.status_label.setText(
-                "Blocked · Resolution required for preview and fitting"
+                ("Manual setup · " if branch_result else "")
+                + "Blocked · Resolution required for preview and fitting"
             )
 
     def _render_fit_result(
         self,
         result: FitResult | None,
         execution_diagnostics: tuple[WorkflowDiagnostic, ...],
+        outcome: MultiQFitOutcome | None,
+        saved_result_name: str | None,
     ) -> None:
         """Render one current public FitResult without deriving scientific values."""
 
         self._clear_result_parameter_rows()
-        if result is None or self._model is None:
-            self.result_section.hide()
+        heading = (
+            "Fit Result"
+            if outcome is None
+            else f"Result · {outcome.status.value.replace('_', ' ').capitalize()}"
+        )
+        if saved_result_name is not None:
+            heading = f"Saved Result · {saved_result_name}"
+            if outcome is not None:
+                heading += f" · {outcome.status.value.replace('_', ' ').capitalize()}"
+        self.result_toggle_button.setText(heading)
+        outcome_messages = (
+            ()
+            if outcome is None
+            else (
+                *(item.message for item in outcome.diagnostics),
+                *((outcome.error_message,) if outcome.error_message else ()),
+            )
+        )
+        self.result_outcome_message_label.setText("\n".join(outcome_messages))
+        self.result_outcome_message_label.setVisible(bool(outcome_messages))
+        if result is None:
+            self.result_section.setVisible(outcome is not None)
             self.result_content.hide()
             return
         self.result_summary_label.setText(
@@ -638,28 +787,30 @@ class ManualFitEditor(QFrame):
             self._result_parameters_layout.addWidget(header, 0, column)
         active_labels: list[str] = []
         for row_index, reference in enumerate(
-            self._model.parameter_references(),
+            result.configuration.parameter_references(),
             start=1,
         ):
             try:
                 estimate = result.parameter_by_reference(reference)
             except KeyError:
-                slope = self._model.b1
+                slope = result.configuration.b1
                 adopted_b0_slope = (
                     reference.component == BACKGROUND_COMPONENT
                     and reference.family is ParameterFamily.SLOPE
-                    and self._model.background is BackgroundModel.LINEAR
+                    and result.configuration.background is BackgroundModel.LINEAR
                     and slope is not None
                     and not slope.free
-                    and slope.current_value == 0.0
+                    and slope.initial_value == 0.0
                     and result.fitted_model is not None
                     and result.fitted_model.background is BackgroundModel.CONSTANT
                 )
                 if adopted_b0_slope:
                     continue
                 raise
-            name_text = self._result_reference_label(reference)
-            metadata = self._metadata.get(reference, _fallback_metadata(reference))
+            name_text = self._result_reference_label(result, reference)
+            metadata = self._result_metadata.get(
+                reference, _fallback_metadata(reference)
+            )
             name = QLabel(name_text)
             value = QLabel(_result_float(estimate.value))
             uncertainty = QLabel(
@@ -670,9 +821,11 @@ class ManualFitEditor(QFrame):
             for label in (name, value, uncertainty):
                 label.setToolTip(metadata.unit)
             details_parts: list[str] = []
-            group_id = _shared_group_id(self._model, reference)
+            group_id = _result_group_id(result.configuration, reference)
             if group_id is not None:
-                details_parts.append(f"Chain {_tie_group_index(self._model, group_id)}")
+                details_parts.append(
+                    f"Chain {_result_group_index(result.configuration, group_id)}"
+                )
             bounds: list[str] = []
             if estimate.active_lower_bound:
                 bounds.append("lower")
@@ -750,8 +903,9 @@ class ManualFitEditor(QFrame):
                 widget.hide()
                 widget.deleteLater()
 
-    def _result_reference_label(self, reference: ParameterReference) -> str:
-        assert self._model is not None
+    def _result_reference_label(
+        self, result: FitResult, reference: ParameterReference
+    ) -> str:
         if reference.component == ELASTIC_COMPONENT:
             component = "δ"
         elif reference.component == BACKGROUND_COMPONENT:
@@ -759,10 +913,10 @@ class ManualFitEditor(QFrame):
         else:
             component = next(
                 f"L{index}"
-                for index, item in enumerate(self._model.lorentzians, start=1)
+                for index, item in enumerate(result.configuration.lorentzians, start=1)
                 if item.identity == reference.component
             )
-        metadata = self._metadata.get(reference, _fallback_metadata(reference))
+        metadata = self._result_metadata.get(reference, _fallback_metadata(reference))
         return f"{component} {metadata.display_label}"
 
     def _set_result_diagnostics_expanded(self, expanded: bool) -> None:
@@ -1015,7 +1169,7 @@ class ManualFitEditor(QFrame):
             group_id = _shared_group_id(self._model, reference)
             if group_id is not None:
                 chain.setChecked(True)
-                tie_color = _tie_color(self._model, group_id)
+                tie_color = manual_tie_color(self._model, group_id)
                 chain.setProperty("tieColor", tie_color)
             chain.setIcon(load_icon(IconName.CHAIN, self._icon_colors[tie_color]))
             chain.setToolTip(
@@ -1270,7 +1424,7 @@ def _result_float(value: float) -> str:
     return _display_float(float(value), decimal_places=3)
 
 
-def _tie_color(model: ManualModelState, group_id: str) -> str:
+def manual_tie_color(model: ManualModelState, group_id: str) -> str:
     """Map immutable tie-group order to the small shared presentation palette."""
 
     index = _tie_group_index(model, group_id) - 1
@@ -1288,6 +1442,33 @@ def _shared_group_id(
         return tie.group_id
     center_group = model.center_group_for(reference)
     return None if center_group is None else center_group.group_id
+
+
+def _result_group_id(
+    model: SpectralModelDefinition,
+    reference: ParameterReference,
+) -> str | None:
+    """Read a Result's own typed tie identity for display."""
+
+    tie = model.tie_for(reference)
+    if tie is not None:
+        return tie.group_id
+    if reference.family is not ParameterFamily.CENTER:
+        return None
+    if reference.component == ELASTIC_COMPONENT:
+        return model.elastic_center_group
+    for component in model.lorentzians:
+        if component.identity == reference.component:
+            return component.center_group
+    return None
+
+
+def _result_group_index(model: SpectralModelDefinition, group_id: str) -> int:
+    group_ids = (
+        *(group.group_id for group in model.parameter_ties),
+        *(group.group_id for group in model.center_groups),
+    )
+    return group_ids.index(group_id) + 1
 
 
 def _tie_group_index(model: ManualModelState, group_id: str) -> int:

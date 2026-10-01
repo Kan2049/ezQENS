@@ -54,6 +54,7 @@ class QAssignmentEditor(QFrame):
     save_q_method_requested = Signal(object)
     q_file_imported = Signal(object, object)
     q_center_draft_changed = Signal()
+    draft_state_changed = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -68,6 +69,7 @@ class QAssignmentEditor(QFrame):
         self._regular_exact_values: dict[str, float] = {}
         self._setting_regular_numeric_text = False
         self._pending_singleton_field: str | None = None
+        self._draft_dirty = False
         self._diagnostics: tuple[ImportDiagnostic, ...] = ()
         self._available_methods: tuple[tuple[str, QBins], ...] = ()
         self._q_center_slots: list[float | None] = []
@@ -171,7 +173,7 @@ class QAssignmentEditor(QFrame):
         self.close_button.setObjectName("closeQEditorButton")
         self.close_button.setText("Close")
         self.close_button.setToolTip("Close Q assignment")
-        self.close_button.clicked.connect(self.hide)
+        self.close_button.clicked.connect(self.discard)
 
         top = QHBoxLayout()
         top.setContentsMargins(0, 0, 0, 0)
@@ -250,6 +252,7 @@ class QAssignmentEditor(QFrame):
         self._visible_representation = None
         self._regular_exact_values.clear()
         self._pending_singleton_field = None
+        self._draft_dirty = False
         blocker = QSignalBlocker(self.representation_combo)
         self.representation_combo.setCurrentText(Q_CENTER)
         del blocker
@@ -261,6 +264,21 @@ class QAssignmentEditor(QFrame):
         self.groups_edit.setText(str(len(dataset.spectra)))
         self.show()
         self.q_center_draft_changed.emit()
+        self.draft_state_changed.emit()
+
+    @property
+    def has_unapplied_changes(self) -> bool:
+        """Return whether a visible draft differs from committed Q identity."""
+
+        return self._draft_dirty and not self.isHidden()
+
+    def discard(self) -> None:
+        """Hide the draft and restore committed Q presentation without applying."""
+
+        self._draft_dirty = False
+        self.hide()
+        self.q_center_draft_changed.emit()
+        self.draft_state_changed.emit()
 
     def import_dave_file(self, path: str) -> DAVEQBinsResult:
         """Use the validated DAVE reader and leave data untouched on mismatch."""
@@ -298,6 +316,7 @@ class QAssignmentEditor(QFrame):
         self._visible_representation = None
         self._regular_exact_values.clear()
         self._pending_singleton_field = None
+        self._draft_dirty = True
         representation = Q_EDGES if q_bins.edges is not None else Q_CENTER
         blocker = QSignalBlocker(self.representation_combo)
         self.representation_combo.setCurrentText(representation)
@@ -306,6 +325,7 @@ class QAssignmentEditor(QFrame):
         self._show_representation(representation)
         self.groups_edit.setText(str(self._group_count()))
         self.q_center_draft_changed.emit()
+        self.draft_state_changed.emit()
 
     def q_center_slots(self) -> tuple[float | None, ...]:
         """Return the local center draft, including intentionally blank slots."""
@@ -323,6 +343,7 @@ class QAssignmentEditor(QFrame):
         if len(self._q_center_slots) != self._group_count():
             self._q_center_slots = [None] * self._group_count()
         self._q_center_slots[group_index] = value
+        self._draft_dirty = True
         self._edited_representation = Q_CENTER
         if all(slot is not None for slot in self._q_center_slots):
             self._q_values = np.asarray(self._q_center_slots, dtype=np.float64)
@@ -334,6 +355,7 @@ class QAssignmentEditor(QFrame):
         self._set_input_mode(EXPLICIT_VALUES, capture_current=False)
         self._refresh_preview()
         self.q_center_draft_changed.emit()
+        self.draft_state_changed.emit()
 
     def set_apply_handler(
         self,
@@ -375,7 +397,10 @@ class QAssignmentEditor(QFrame):
         self._edges = None if q_bins.edges is None else q_bins.edges.copy()
         self._edited_representation = None
         self._text_edited_representation = None
+        self._draft_dirty = False
         self._refresh_preview()
+        self.q_center_draft_changed.emit()
+        self.draft_state_changed.emit()
         return True
 
     def _build_uniform_q_bins(self, representation: str | None = None) -> QBins:
@@ -566,12 +591,16 @@ class QAssignmentEditor(QFrame):
 
     def _mark_edited(self) -> None:
         if self.input_mode_combo.currentText() == EXPLICIT_VALUES:
+            self._draft_dirty = True
             self._edited_representation = self.representation_combo.currentText()
             self._text_edited_representation = self.representation_combo.currentText()
+            self.draft_state_changed.emit()
 
     def _regular_field_changed(self, key: str) -> None:
         if self._setting_regular_numeric_text:
             return
+        self._draft_dirty = True
+        self.draft_state_changed.emit()
         if self._is_singleton_center_field(key):
             self._pending_singleton_field = key
             self._refresh_preview()

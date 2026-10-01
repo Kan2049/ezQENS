@@ -76,6 +76,8 @@ ITEM_KIND_ROLE = Qt.ItemDataRole.UserRole + 1
 DATASET_INDEX_ROLE = Qt.ItemDataRole.UserRole + 2
 ACTIVE_DATASET_ROLE = Qt.ItemDataRole.UserRole + 3
 Q_METHOD_INDEX_ROLE = Qt.ItemDataRole.UserRole + 4
+SAVED_RESULT_INDEX_ROLE = Qt.ItemDataRole.UserRole + 5
+DATASET_ID_ROLE = Qt.ItemDataRole.UserRole + 6
 Q_METHOD_MIME_TYPE = "application/x-ezqens-q-method"
 
 
@@ -441,6 +443,7 @@ class WorkspaceSidebar(QWidget):
     import_files_requested = Signal()
     import_folder_requested = Signal()
     dataset_open_requested = Signal(object, object)
+    saved_result_open_requested = Signal(object, object, int)
     dataset_added = Signal(object, object)
     dataset_role_changed = Signal(object, object, object)
     dataset_role_change_requested = Signal(object, object, object)
@@ -481,6 +484,10 @@ class WorkspaceSidebar(QWidget):
         ) = None
         self._fitting_started_resolver: (
             Callable[[ProjectState, DatasetState], bool] | None
+        ) = None
+        self._saved_results_resolver: (
+            Callable[[ProjectState, DatasetState], tuple[tuple[int, str, str], ...]]
+            | None
         ) = None
 
         title = QLabel("ezQENS")
@@ -916,6 +923,16 @@ class WorkspaceSidebar(QWidget):
 
         self._fitting_started_resolver = resolver
 
+    def set_saved_results_resolver(
+        self,
+        resolver: Callable[
+            [ProjectState, DatasetState], tuple[tuple[int, str, str], ...]
+        ],
+    ) -> None:
+        """Read explicit saved Result identities from the owning application state."""
+
+        self._saved_results_resolver = resolver
+
     def refresh_dataset_analysis(self, project: ProjectState) -> None:
         """Refresh only the presentation derived for one Project's Data rows."""
 
@@ -1082,13 +1099,22 @@ class WorkspaceSidebar(QWidget):
             self.project_selected.emit(self._projects[project_index])
 
     def _on_item_double_clicked(self, item: QTreeWidgetItem, _column: int) -> None:
-        if item.data(0, ITEM_KIND_ROLE) != "dataset":
+        kind = item.data(0, ITEM_KIND_ROLE)
+        if kind not in {"dataset", "saved_result"}:
             return
         project_index = item.data(0, PROJECT_INDEX_ROLE)
         dataset_index = item.data(0, DATASET_INDEX_ROLE)
         if isinstance(project_index, int) and isinstance(dataset_index, int):
             project = self._projects[project_index]
-            self.dataset_open_requested.emit(project, project.datasets[dataset_index])
+            dataset = project.datasets[dataset_index]
+            if kind == "dataset":
+                self.dataset_open_requested.emit(project, dataset)
+            else:
+                result_index = item.data(0, SAVED_RESULT_INDEX_ROLE)
+                if isinstance(result_index, int):
+                    self.saved_result_open_requested.emit(
+                        project, dataset, result_index
+                    )
 
     def _show_context_menu(self, position: QPoint) -> None:
         item = self.tree.itemAt(position)
@@ -1307,15 +1333,47 @@ class WorkspaceSidebar(QWidget):
     ) -> None:
         project = self._projects[project_index]
         data_item = self._data_items[project_index]
-        selected_dataset = select_dataset or self._dataset_for_item(
-            self.tree.currentItem(),
+        current_item = self.tree.currentItem()
+        selected_dataset = select_dataset or self._dataset_for_item(current_item)
+        previous_rows = {
+            item.data(0, DATASET_ID_ROLE): (item.isExpanded(), item.childCount())
+            for item in (
+                data_item.child(index) for index in range(data_item.childCount())
+            )
+            if item is not None
+        }
+        selected_result = (
+            current_item.data(0, SAVED_RESULT_INDEX_ROLE)
+            if current_item is not None
+            and current_item.data(0, ITEM_KIND_ROLE) == "saved_result"
+            and current_item.data(0, PROJECT_INDEX_ROLE) == project_index
+            and select_dataset is None
+            else None
+        )
+        selected_result_dataset_id = (
+            current_item.data(0, DATASET_ID_ROLE)
+            if selected_result is not None and current_item is not None
+            else None
         )
         data_item.takeChildren()
         for dataset_index, dataset in enumerate(project.datasets):
             item = self._dataset_item(project_index, dataset_index, dataset)
             data_item.addChild(item)
+            was_expanded, previous_children = previous_rows.get(
+                dataset.workflow_dataset_id, (False, 0)
+            )
+            item.setExpanded(was_expanded or item.childCount() > previous_children)
             if dataset is selected_dataset:
                 self.tree.setCurrentItem(item)
+            elif dataset.workflow_dataset_id == selected_result_dataset_id:
+                for child_index in range(item.childCount()):
+                    child = item.child(child_index)
+                    if (
+                        child is not None
+                        and child.data(0, SAVED_RESULT_INDEX_ROLE) == selected_result
+                    ):
+                        self.tree.setCurrentItem(child)
+                        break
         data_item.setExpanded(True)
 
     def _rebuild_method_items(self, project_index: int) -> None:
@@ -1381,6 +1439,7 @@ class WorkspaceSidebar(QWidget):
         item.setData(0, PROJECT_INDEX_ROLE, project_index)
         item.setData(0, ITEM_KIND_ROLE, "dataset")
         item.setData(0, DATASET_INDEX_ROLE, dataset_index)
+        item.setData(0, DATASET_ID_ROLE, dataset.workflow_dataset_id)
         is_active = self._active_project is self._projects[project_index] and (
             self._active_dataset is dataset
         )
@@ -1410,6 +1469,18 @@ class WorkspaceSidebar(QWidget):
                 0,
                 load_icon(IconName.RESOLUTION, self._resolution_icon_color),
             )
+        if self._saved_results_resolver is not None:
+            for result_index, name, kind in self._saved_results_resolver(
+                self._projects[project_index], dataset
+            ):
+                child = QTreeWidgetItem([name, kind])
+                child.setData(0, PROJECT_INDEX_ROLE, project_index)
+                child.setData(0, DATASET_INDEX_ROLE, dataset_index)
+                child.setData(0, DATASET_ID_ROLE, dataset.workflow_dataset_id)
+                child.setData(0, ITEM_KIND_ROLE, "saved_result")
+                child.setData(0, SAVED_RESULT_INDEX_ROLE, result_index)
+                child.setFlags(child.flags() & ~Qt.ItemFlag.ItemIsDragEnabled)
+                item.addChild(child)
         return item
 
 

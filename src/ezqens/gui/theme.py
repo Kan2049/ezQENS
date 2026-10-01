@@ -491,6 +491,21 @@ QToolButton[compactDisclosure="true"]::menu-indicator {{
 #manualFitEditor QToolButton[chainControl="true"][tieColor="violet"] {{
     color: {indicators.violet};
 }}
+#fitToAllQDialog QCheckBox[tieColor="accent"] {{
+    color: {indicators.accent};
+}}
+#fitToAllQDialog QCheckBox[tieColor="amber"] {{
+    color: {indicators.warning};
+}}
+#fitToAllQDialog QCheckBox[tieColor="violet"] {{
+    color: {indicators.violet};
+}}
+#fitAllQTransferTitle {{
+    font-weight: 600;
+}}
+#manualFitAllQButton, #manualSaveResultButton, #manualSaveResultAsButton {{
+    min-height: {DEFAULT_LAYOUT_TOKENS.control_height - 4}px;
+}}
 QTreeWidget {{
     background: transparent;
     border: 0;

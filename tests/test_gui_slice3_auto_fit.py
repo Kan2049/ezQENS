@@ -2766,7 +2766,7 @@ def test_single_apply_and_multi_save_use_existing_result_workspace(
     )
     saved = session.result_workspace.saved_results
     window._invalidate_manual_session(session, (1,))
-    assert session.result_workspace.current_result is None
+    assert session.result_workspace.current_result is branches[0].branch_result
     assert session.result_workspace.saved_results == saved
 
 
@@ -3240,7 +3240,8 @@ def test_autofit_dialog_preview_and_explicit_adoption_are_group_local(
     assert detached_model is not None
     assert detached_model.center_group_for(detached_reference) is None
     assert first_session.execution_state(0).lifecycle is ManualFitLifecycle.NEEDS_FIT
-    assert first_session.execution_state(0).fit_result is None
+    assert first_session.execution_state(0).fit_result is chosen.fit
+    assert window.dataset_view._manual_fit_result is chosen.fit
     retie_chain = window.manual_fit_editor.parameter_controls[detached_reference].chain
     assert retie_chain is not None
     retie_chain.click()
@@ -3263,7 +3264,8 @@ def test_autofit_dialog_preview_and_explicit_adoption_are_group_local(
         ),
     )
     assert first_session.execution_state(0).lifecycle is ManualFitLifecycle.NEEDS_FIT
-    assert first_session.execution_state(0).fit_result is None
+    assert first_session.execution_state(0).fit_result is chosen.fit
+    assert window.dataset_view._manual_fit_result is chosen.fit
     assert first_session.execution_state(1).fit_result is retained_result
     assert second_session.execution_state(0).fit_result is retained_result
 

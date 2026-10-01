@@ -144,7 +144,10 @@ def test_more_info_is_one_responsive_sidebar_control(
     assert not button.icon().isNull()
     assert button.toolTip() == "Show more info"
     assert button.width() > DEFAULT_LAYOUT_TOKENS.control_height
-    assert not window.findChildren(type(button), "centralManualFitButton")
+    manual_fit_buttons = window.findChildren(type(button), "centralManualFitButton")
+    assert manual_fit_buttons == [window.manual_fit_button]
+    assert window.manual_fit_button.text() == "Manual Fit"
+    assert not window.manual_fit_button.isEnabled()
     closed_width = button.width()
 
     button.click()
