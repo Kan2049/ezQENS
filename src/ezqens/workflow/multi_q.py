@@ -26,11 +26,11 @@ from ezqens.fitting import (
     FitContextBinding,
     FitResult,
     ManualParameterIntent,
-    ParameterConfiguration,
     ParameterFamily,
     ParameterReference,
     SpectralModelDefinition,
     StandardModelCandidate,
+    convert_standard_auto_fit_result_to_manual,
 )
 from ezqens.preprocessing import EdgePaddingDetectionResult, FittingSelection
 from ezqens.resolution import PreparedResolution
@@ -39,6 +39,8 @@ from .manual import (
     ManualFitDraft,
     SingleQAutoFitOutcome,
     _adopt_manual_fit_values,
+    _manual_state_from_fitted_model,
+    _manual_state_from_standard_auto_state,
     _single_q_auto_fit_context_unchanged,
     run_single_q_auto_fit,
 )
@@ -52,6 +54,12 @@ from .manual_state import (
     replace_parameter_intent,
 )
 from .project import ManualFitContext, WorkflowProject, resolve_manual_fit_context
+from .results import (
+    ResultOrigin,
+    ResultSnapshot,
+    _is_issued_result_snapshot,
+    _issue_result_snapshot,
+)
 
 
 class MethodTransferCategory(StrEnum):
@@ -297,14 +305,23 @@ class MultiQConstraintTransferPolicy:
         object.__setattr__(self, "center_ties", center_ties)
 
 
+_BRANCH_ISSUER = object()
+
+
 @dataclass(frozen=True, slots=True)
 class AutoFitCandidateBranchResult:
     """One selected anchor candidate together with its independent Q branch."""
 
     anchor_evidence: CandidateFitResult
     branch_result: MultiQBranchResult
+    evaluation: SingleQAutoFitOutcome | None = field(default=None, repr=False)
+    working_states: tuple[ManualModelState | None, ...] = ()
+    _issuer: InitVar[object | None] = None
+    _issued: object = field(init=False, repr=False, compare=False)
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, _issuer: object | None) -> None:
+        if _issuer is not _BRANCH_ISSUER:
+            raise ValueError("AutoFit branch records must be issued by execution")
         if not isinstance(self.anchor_evidence, CandidateFitResult):
             raise ValueError("anchor_evidence must be a CandidateFitResult")
         if not self.anchor_evidence.success or self.anchor_evidence.fit is None:
@@ -314,16 +331,57 @@ class AutoFitCandidateBranchResult:
         retained_anchor = self.branch_result.outcome(
             self.branch_result.anchor_group_index
         ).fit_result
-        if retained_anchor is not self.anchor_evidence.fit:
+        original_fit = self.anchor_evidence.fit
+        if retained_anchor is not original_fit and not (
+            original_fit is not None
+            and retained_anchor is not None
+            and retained_anchor.configuration is original_fit.configuration
+            and retained_anchor.evaluation is original_fit.evaluation
+            and retained_anchor.parameters is original_fit.parameters
+        ):
             raise ValueError(
                 "the branch must retain the selected candidate's anchor FitResult"
             )
+        states = tuple(self.working_states)
+        if len(states) != len(self.branch_result.outcomes):
+            raise ValueError("AutoFit branch working states must match Q topology")
+        if any(
+            item.status is MultiQFitStatus.SUCCESS and states[item.group_index] is None
+            for item in self.branch_result.outcomes
+        ):
+            raise ValueError("successful AutoFit branch Q lost its working state")
+        object.__setattr__(self, "working_states", states)
+        object.__setattr__(self, "_issued", _BRANCH_ISSUER)
 
     @property
     def candidate(self) -> StandardModelCandidate:
         """Return the typed selected candidate identity."""
 
         return self.anchor_evidence.candidate
+
+
+def _issue_auto_fit_candidate_branch_result(
+    anchor_evidence: CandidateFitResult,
+    branch_result: MultiQBranchResult,
+    evaluation: SingleQAutoFitOutcome | None,
+    working_states: tuple[ManualModelState | None, ...],
+) -> AutoFitCandidateBranchResult:
+    """Capture the states submitted for one selected execution branch."""
+
+    return AutoFitCandidateBranchResult(
+        anchor_evidence,
+        branch_result,
+        evaluation,
+        working_states,
+        _issuer=_BRANCH_ISSUER,
+    )
+
+
+def _is_issued_auto_fit_candidate_branch_result(value: object) -> bool:
+    return (
+        isinstance(value, AutoFitCandidateBranchResult)
+        and getattr(value, "_issued", None) is _BRANCH_ISSUER
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -363,7 +421,9 @@ class SelectedAutoFitMultiQResult:
             )
         if len(set(selected)) != len(selected):
             raise ValueError("selected AutoFit candidates must be unique")
-        if any(not isinstance(item, AutoFitCandidateBranchResult) for item in branches):
+        if any(
+            not _is_issued_auto_fit_candidate_branch_result(item) for item in branches
+        ):
             raise ValueError(
                 "branches must contain AutoFitCandidateBranchResult values"
             )
@@ -1040,7 +1100,15 @@ class SavedFittingMethod:
 @dataclass(frozen=True, slots=True)
 class SavedFitResult:
     name: str
-    result: FitResult | MultiQBranchResult
+    snapshot: ResultSnapshot
+
+    def __post_init__(self) -> None:
+        if not _is_issued_result_snapshot(self.snapshot):
+            raise ValueError("saved Result requires an execution snapshot")
+
+    @property
+    def result(self) -> FitResult | MultiQBranchResult:
+        return self.snapshot.result
 
 
 @dataclass(frozen=True, slots=True)
@@ -1048,18 +1116,27 @@ class FittingWorkspaceState:
     """Minimal in-memory working/saved Method and Result lifecycle."""
 
     working_method: FittingMethod | None = None
-    current_result: FitResult | MultiQBranchResult | None = None
+    current: ResultSnapshot | None = None
     saved_methods: tuple[SavedFittingMethod, ...] = ()
     saved_results: tuple[SavedFitResult, ...] = ()
     current_saved_result_index: int | None = None
 
     def __post_init__(self) -> None:
+        if self.current is not None and not _is_issued_result_snapshot(self.current):
+            raise ValueError("Current must be a ResultSnapshot")
         object.__setattr__(self, "saved_methods", tuple(self.saved_methods))
-        object.__setattr__(self, "saved_results", tuple(self.saved_results))
+        saved_results = tuple(self.saved_results)
+        if any(
+            not isinstance(item, SavedFitResult)
+            or not _is_issued_result_snapshot(item.snapshot)
+            for item in saved_results
+        ):
+            raise ValueError("saved Results must be named snapshots")
+        object.__setattr__(self, "saved_results", saved_results)
         index = self.current_saved_result_index
         if index is None:
             return
-        if self.current_result is None:
+        if self.current is None:
             raise ValueError("a saved-Result association requires a current Result")
         if isinstance(index, bool) or not isinstance(index, int):
             raise ValueError("current_saved_result_index must be an integer or None")
@@ -1074,6 +1151,12 @@ class FittingWorkspaceState:
             return None
         return self.saved_results[self.current_saved_result_index]
 
+    @property
+    def current_result(self) -> FitResult | MultiQBranchResult | None:
+        """Read-only projection of the Current snapshot's scientific Result."""
+
+        return None if self.current is None else self.current.result
+
 
 def set_working_method(
     state: FittingWorkspaceState,
@@ -1084,15 +1167,17 @@ def set_working_method(
 
 def set_current_result(
     state: FittingWorkspaceState,
-    result: FitResult | MultiQBranchResult,
+    snapshot: ResultSnapshot,
     *,
     retain_saved_association: bool = False,
 ) -> FittingWorkspaceState:
     if not isinstance(retain_saved_association, bool):
         raise ValueError("retain_saved_association must be boolean")
+    if not _is_issued_result_snapshot(snapshot):
+        raise ValueError("Current must be a ResultSnapshot created at execution")
     return replace(
         state,
-        current_result=result,
+        current=snapshot,
         current_saved_result_index=(
             state.current_saved_result_index if retain_saved_association else None
         ),
@@ -1121,7 +1206,7 @@ def save_current_result(
 
     if name is not None:
         return save_current_result_as(state, name)
-    if state.current_result is None:
+    if state.current is None:
         raise ValueError("there is no current Result to save")
     index = state.current_saved_result_index
     if index is None:
@@ -1129,7 +1214,7 @@ def save_current_result(
     saved_results = list(state.saved_results)
     saved_results[index] = SavedFitResult(
         saved_results[index].name,
-        state.current_result,
+        state.current,
     )
     return replace(state, saved_results=tuple(saved_results))
 
@@ -1140,13 +1225,58 @@ def save_current_result_as(
 ) -> FittingWorkspaceState:
     """Append an immutable Current snapshot and associate Current with it."""
 
-    if state.current_result is None:
+    if state.current is None:
         raise ValueError("there is no current Result to save")
-    saved = SavedFitResult(name, state.current_result)
+    saved = SavedFitResult(name, state.current)
     return replace(
         state,
         saved_results=(*state.saved_results, saved),
         current_saved_result_index=len(state.saved_results),
+    )
+
+
+def append_saved_result(
+    state: FittingWorkspaceState,
+    name: str,
+    snapshot: ResultSnapshot,
+) -> FittingWorkspaceState:
+    """Append an executed snapshot without modifying Current or its association."""
+
+    if not _is_issued_result_snapshot(snapshot):
+        raise ValueError("saved entry requires a ResultSnapshot")
+    return replace(
+        state,
+        saved_results=(*state.saved_results, SavedFitResult(name, snapshot)),
+    )
+
+
+def remove_saved_result(
+    state: FittingWorkspaceState,
+    entry: SavedFitResult,
+) -> FittingWorkspaceState:
+    """Remove one exact entry, retaining Current and other entry identities."""
+
+    index = next(
+        (
+            position
+            for position, item in enumerate(state.saved_results)
+            if item is entry
+        ),
+        None,
+    )
+    if index is None:
+        raise ValueError("saved Result entry is not in this workspace")
+    associated = state.current_saved_result_index
+    return replace(
+        state,
+        saved_results=state.saved_results[:index] + state.saved_results[index + 1 :],
+        current_saved_result_index=(
+            None
+            if associated == index
+            else associated - 1
+            if associated is not None and associated > index
+            else associated
+        ),
     )
 
 
@@ -1722,6 +1852,7 @@ class ManualMultiQFitExecutionOutcome:
 
     branch_result: MultiQBranchResult
     adopted_draft: ManualFitDraft
+    snapshot: ResultSnapshot
 
     def __post_init__(self) -> None:
         if not isinstance(self.branch_result, MultiQBranchResult):
@@ -1730,6 +1861,11 @@ class ManualMultiQFitExecutionOutcome:
             raise ValueError("adopted_draft must be a ManualFitDraft")
         if len(self.adopted_draft.setups) != len(self.branch_result.outcomes):
             raise ValueError("adopted Manual setups must match the branch Q groups")
+        if (
+            not _is_issued_result_snapshot(self.snapshot)
+            or self.snapshot.result is not self.branch_result
+        ):
+            raise ValueError("branch execution snapshot must retain its branch Result")
 
 
 def _s5_branch_configurations(
@@ -1934,39 +2070,19 @@ def fit_all_q_from_current_with_adoption(
                 prepared.materialization,
             ),
         )
-    return ManualMultiQFitExecutionOutcome(branch, adopted_draft)
-
-
-def _manual_state_from_core(model: SpectralModelDefinition) -> ManualModelState:
-    def intent(configuration: ParameterConfiguration) -> ManualParameterIntent:
-        value = configuration
-        return ManualParameterIntent(
-            current_value=value.initial_value,
-            user_lower_limit=(
-                value.lower_bound if math.isfinite(value.lower_bound) else None
+    return ManualMultiQFitExecutionOutcome(
+        branch,
+        adopted_draft,
+        _issue_result_snapshot(
+            branch,
+            tuple(
+                adopted_draft.setup(item.group_index).model
+                if item.status is MultiQFitStatus.SUCCESS
+                else None
+                for item in branch.outcomes
             ),
-            user_upper_limit=(
-                value.upper_bound if math.isfinite(value.upper_bound) else None
-            ),
-            free=value.free,
-        )
-
-    return ManualModelState(
-        energy_shift=intent(model.energy_shift) if model.energy_shift else None,
-        elastic_area=intent(model.elastic_area) if model.elastic_area else None,
-        lorentzians=tuple(
-            ManualLorentzianState(
-                area=intent(item.area),
-                fwhm=intent(item.fwhm),
-                center=intent(item.center) if item.center else None,
-                center_group=item.center_group,
-                identity=item.identity,
-            )
-            for item in model.lorentzians
+            ResultOrigin.MANUAL_FIT_ALL_Q,
         ),
-        background=model.background,
-        b0=intent(model.b0) if model.b0 else None,
-        b1=intent(model.b1) if model.b1 else None,
     )
 
 
@@ -2024,11 +2140,7 @@ def _selected_auto_fit_evidence(
                 f"selected AutoFit candidate {candidate.name} has stale anchor "
                 "group or Q provenance"
             )
-        validated.append(
-            selected_evidence
-            if active_fit is selected_evidence.fit
-            else replace(selected_evidence, fit=active_fit)
-        )
+        validated.append(selected_evidence)
     return tuple(validated)
 
 
@@ -2064,15 +2176,38 @@ def continue_selected_auto_fit_candidates(
         anchor_fit = anchor_evidence.fit
         if anchor_fit is None:  # guarded by _selected_auto_fit_evidence
             raise RuntimeError("validated AutoFit evidence lost its anchor FitResult")
-        source = _manual_state_from_core(anchor_fit.configuration)
-        method = capture_fitting_method(source, context=context)
-        working = draft.with_model(anchor_group_index, source)
-        configurations = _branch_configurations(
-            working,
-            context,
-            method,
-            MethodTransferOverrides(),
+        anchor_fitted_model = anchor_fit.fitted_model
+        if anchor_fitted_model is None:
+            raise RuntimeError("validated AutoFit evidence lost its fitted model")
+        active_anchor = _result_in_active_context(
+            anchor_fit, context, anchor_group_index
         )
+        composition = MethodComposition(
+            elastic_present=True,
+            lorentzian_identities=tuple(
+                item.identity for item in anchor_fit.configuration.lorentzians
+            ),
+            background=anchor_fit.configuration.background,
+        )
+        working_states = tuple(
+            _manual_state_from_fitted_model(anchor_fitted_model)
+            if group_index == anchor_group_index
+            else _default_model(composition)
+            for group_index in range(len(draft.setups))
+        )
+        configurations: list[SpectralModelDefinition | None] = []
+        for group_index, state in enumerate(working_states):
+            try:
+                materialized = materialize_manual_model(
+                    state,
+                    context.prepared_resolution,
+                    context.selection,
+                    group_index,
+                )
+            except ValueError:
+                configurations.append(None)
+            else:
+                configurations.append(materialized.fit_model)
 
         current_candidate = anchor_evidence.candidate
 
@@ -2093,19 +2228,96 @@ def continue_selected_auto_fit_candidates(
             context.selection,
             configurations,
             anchor_group_index=anchor_group_index,
-            anchor_fit=anchor_fit,
+            anchor_fit=active_anchor,
             fit_excluded_groups=fit_excluded_groups,
             derived_result_excluded_groups=derived_result_excluded_groups,
             cancel_requested=cancel_requested,
             progress_callback=publish if progress_callback is not None else None,
             max_nfev=max_nfev,
         )
-        branches.append(AutoFitCandidateBranchResult(anchor_evidence, branch))
+        branches.append(
+            _issue_auto_fit_candidate_branch_result(
+                anchor_evidence,
+                branch,
+                outcome,
+                working_states,
+            )
+        )
         if branch.status is MultiQExecutionStatus.CANCELLED:
             overall_status = MultiQExecutionStatus.CANCELLED
             break
 
     return SelectedAutoFitMultiQResult(overall_status, selected, tuple(branches))
+
+
+def adopt_selected_auto_fit_branch(
+    project: WorkflowProject,
+    draft: ManualFitDraft,
+    evaluation: SingleQAutoFitOutcome,
+    selected_branch: AutoFitCandidateBranchResult,
+    *,
+    center_group_id: str,
+) -> ManualMultiQFitExecutionOutcome:
+    """Atomically adopt one executed branch owned by the exact AutoFit evaluation."""
+
+    if not _is_issued_auto_fit_candidate_branch_result(selected_branch):
+        raise ValueError("selected branch was not issued by AutoFit execution")
+    if selected_branch.evaluation is not evaluation or not any(
+        item is selected_branch.anchor_evidence
+        for item in evaluation.recommendation.candidate_results
+    ):
+        raise ValueError("selected branch is not owned by this AutoFit evaluation")
+    anchor = selected_branch.branch_result.anchor_group_index
+    context = _resolved_context(project, draft, anchor)
+    if not _single_q_auto_fit_context_unchanged(evaluation.scientific_context, context):
+        raise ValueError("AutoFit evaluation no longer matches the active context")
+    if len(selected_branch.working_states) != len(draft.setups):
+        raise ValueError("selected branch has no complete execution working state")
+    adopted = draft
+    converted_outcomes: list[MultiQFitOutcome] = []
+    snapshot_states: list[ManualModelState | None] = [None] * len(draft.setups)
+    for branch_outcome in selected_branch.branch_result.outcomes:
+        if branch_outcome.status is not MultiQFitStatus.SUCCESS:
+            converted_outcomes.append(branch_outcome)
+            continue
+        original_fit = branch_outcome.fit_result
+        if original_fit is None:
+            raise ValueError("successful branch Q has no FitResult")
+        active_fit = _result_in_active_context(
+            original_fit, context, branch_outcome.group_index
+        )
+        converted_fit = convert_standard_auto_fit_result_to_manual(
+            active_fit,
+            center_group_id=center_group_id,
+        )
+        converted_outcomes.append(replace(branch_outcome, fit_result=converted_fit))
+        working = selected_branch.working_states[branch_outcome.group_index]
+        if working is None:
+            raise ValueError("successful branch Q lost its execution working state")
+        model = _manual_state_from_standard_auto_state(
+            working, center_group_id=center_group_id
+        )
+        materialized = materialize_manual_model(
+            model,
+            context.prepared_resolution,
+            context.selection,
+            branch_outcome.group_index,
+        )
+        model = _adopt_manual_fit_values(model, converted_fit, materialized)
+        adopted = adopted.with_model(branch_outcome.group_index, model)
+        snapshot_states[branch_outcome.group_index] = model
+
+    converted_branch = replace(
+        selected_branch.branch_result,
+        outcomes=tuple(converted_outcomes),
+    )
+    snapshot = _issue_result_snapshot(
+        converted_branch,
+        tuple(snapshot_states),
+        ResultOrigin.AUTO_FIT_BRANCH,
+        selected_branch.candidate,
+    )
+    return ManualMultiQFitExecutionOutcome(converted_branch, adopted, snapshot)
 
 
 def auto_fit_all_q(

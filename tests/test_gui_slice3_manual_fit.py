@@ -91,6 +91,7 @@ from ezqens.workflow import (
     ManualParameterEdit,
     ManualParameterTieState,
     MultiQConstraintTransferPolicy,
+    ResultOrigin,
     WorkflowDiagnostic,
     WorkflowDiagnosticCode,
     WorkflowProject,
@@ -101,6 +102,29 @@ from ezqens.workflow import (
     set_current_result,
     update_manual_parameter,
 )
+from ezqens.workflow.results import _issue_result_snapshot
+
+
+def _mock_multi_q_execution(
+    branch: MultiQBranchResult, draft: ManualFitDraft
+) -> ManualMultiQFitExecutionOutcome:
+    states = tuple(
+        (
+            draft.setup(item.group_index).model
+            or ManualModelState(
+                energy_shift=ManualParameterIntent(0.0),
+                elastic_area=ManualParameterIntent(1.0),
+            )
+        )
+        if item.status is MultiQFitStatus.SUCCESS
+        else None
+        for item in branch.outcomes
+    )
+    return ManualMultiQFitExecutionOutcome(
+        branch,
+        draft,
+        _issue_result_snapshot(branch, states, ResultOrigin.MANUAL_FIT_ALL_Q),
+    )
 
 
 @pytest.fixture(scope="module")
@@ -4739,7 +4763,14 @@ def test_fit_all_q_blocked_outcome_keeps_its_own_diagnostic(
         ),
     )
     draft = session.draft
-    session.result_workspace = set_current_result(session.result_workspace, branch)
+    session.result_workspace = set_current_result(
+        session.result_workspace,
+        _issue_result_snapshot(
+            branch,
+            tuple(setup.model for setup in draft.setups),
+            ResultOrigin.MANUAL_FIT_ALL_Q,
+        ),
+    )
     window._project_branch_into_manual_session(session, branch)
     window.dataset_view.set_current_group(1)
 
@@ -4799,7 +4830,14 @@ def test_fit_all_q_other_target_statuses_follow_branch_outcome(
         ),
     )
     draft = session.draft
-    session.result_workspace = set_current_result(session.result_workspace, branch)
+    session.result_workspace = set_current_result(
+        session.result_workspace,
+        _issue_result_snapshot(
+            branch,
+            tuple(setup.model for setup in draft.setups),
+            ResultOrigin.MANUAL_FIT_ALL_Q,
+        ),
+    )
     window._project_branch_into_manual_session(session, branch)
     window.dataset_view.set_current_group(1)
 
@@ -4853,7 +4891,7 @@ def test_fit_all_q_async_navigation_status_and_result_save_lifecycle(
         started.set()
         assert release.wait(timeout=2.0)
         progress(branch.outcomes[1])
-        return ManualMultiQFitExecutionOutcome(branch, cast(ManualFitDraft, _args[1]))
+        return _mock_multi_q_execution(branch, cast(ManualFitDraft, _args[1]))
 
     monkeypatch.setattr(
         manual_fit_all_q_module,
@@ -5201,7 +5239,7 @@ def test_fit_all_q_cancelled_partial_becomes_current_without_false_start(
         assert callable(progress) and callable(group_started)
         progress(branch.outcomes[0])
         # A cancelled-before-start group produces neither observer event.
-        return ManualMultiQFitExecutionOutcome(branch, cast(ManualFitDraft, _args[1]))
+        return _mock_multi_q_execution(branch, cast(ManualFitDraft, _args[1]))
 
     monkeypatch.setattr(
         manual_fit_all_q_module,
@@ -5327,7 +5365,7 @@ def test_fit_all_q_locks_manual_mask_q_units_and_resolution_mutations(
     ) -> ManualMultiQFitExecutionOutcome:
         started.set()
         assert release.wait(timeout=2.0)
-        return ManualMultiQFitExecutionOutcome(branch, cast(ManualFitDraft, _args[1]))
+        return _mock_multi_q_execution(branch, cast(ManualFitDraft, _args[1]))
 
     monkeypatch.setattr(
         manual_fit_all_q_module,
@@ -5449,7 +5487,7 @@ def test_fit_all_q_stale_completion_cannot_replace_invalidated_context(
     ) -> ManualMultiQFitExecutionOutcome:
         started.set()
         assert release.wait(timeout=2.0)
-        return ManualMultiQFitExecutionOutcome(branch, cast(ManualFitDraft, _args[1]))
+        return _mock_multi_q_execution(branch, cast(ManualFitDraft, _args[1]))
 
     monkeypatch.setattr(
         manual_fit_all_q_module,
@@ -5807,7 +5845,7 @@ def test_fit_all_q_draft_discard_restores_committed_display_and_anchor(
     ) -> ManualMultiQFitExecutionOutcome:
         started.set()
         assert release.wait(timeout=2.0)
-        return ManualMultiQFitExecutionOutcome(branch, cast(ManualFitDraft, _args[1]))
+        return _mock_multi_q_execution(branch, cast(ManualFitDraft, _args[1]))
 
     monkeypatch.setattr(
         manual_fit_all_q_module,

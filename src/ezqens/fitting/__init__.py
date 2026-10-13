@@ -21,6 +21,7 @@ from ezqens.fitting.auto import (
     auto_fit_single_q,
     recommend_standard_candidates,
 )
+from ezqens.fitting.conversion import convert_standard_auto_fit_result_to_manual
 from ezqens.fitting.core import (
     FittingError,
     evaluate_spectral_model,
@@ -137,6 +138,7 @@ __all__ = [
     "SpectralModelDefinition",
     "StandardModelCandidate",
     "auto_fit_single_q",
+    "convert_standard_auto_fit_result_to_manual",
     "evaluate_spectral_model",
     "evaluate_standard_candidates",
     "fit_single_q",

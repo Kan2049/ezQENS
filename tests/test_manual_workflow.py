@@ -51,6 +51,7 @@ from ezqens.workflow import (
     ManualParameterTieState,
     PendingManualComponentPreview,
     ProjectDataset,
+    ResultSnapshot,
     WorkflowDiagnosticCode,
     WorkflowError,
     WorkflowProject,
@@ -273,7 +274,9 @@ def test_single_q_autofit_adopts_typed_fitted_candidate_without_label_parsing() 
 
     assert draft.setup(0).model is None
     assert adoption.success
-    assert adoption.fit_result is chosen.fit
+    assert adoption.fit_result is not chosen.fit
+    assert adoption.snapshot is not None
+    assert adoption.snapshot.result is adoption.fit_result
     assert adoption.adopted_draft is not None
     adopted = adoption.adopted_draft.setup(0).model
     assert adopted is not None
@@ -505,6 +508,8 @@ def test_autofit_none_and_b0_adoption_use_editable_manual_backgrounds() -> None:
         none_candidate,
     )
     assert none_adoption.success
+    with pytest.raises(ValueError, match="snapshot"):
+        replace(none_adoption, snapshot=cast(ResultSnapshot, None))
     assert none_adoption.adopted_draft is not None
     none_model = none_adoption.adopted_draft.setup(0).model
     assert none_model is not None

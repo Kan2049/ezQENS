@@ -13,7 +13,14 @@ import numpy.typing as npt
 import pytest
 
 import ezqens.fitting.core as fitting_core
+from ezqens.batch import (
+    MultiQBranchResult,
+    MultiQExecutionStatus,
+    MultiQFitOutcome,
+    MultiQFitStatus,
+)
 from ezqens.convolution import build_convolution_plan, cell_integrated_lorentzian
+from ezqens.derived import derive_qens
 from ezqens.domain import QBins, ReducedDataset, Spectrum, SpectrumRole
 from ezqens.fitting import (
     BackgroundModel,
@@ -29,6 +36,7 @@ from ezqens.fitting import (
     ParameterTieGroup,
     SpectralModelDefinition,
     StandardModelCandidate,
+    convert_standard_auto_fit_result_to_manual,
     evaluate_spectral_model,
     evaluate_standard_candidates,
     fit_single_q,
@@ -1544,6 +1552,174 @@ def test_standard_autofit_component_areas_keep_nonnegative_bounds() -> None:
     assert np.isneginf(slope.lower_bound) and np.isposinf(slope.upper_bound)
     assert offset.value == pytest.approx(-0.004, abs=1.0e-8)
     assert slope.value == pytest.approx(-0.012, abs=1.0e-8)
+
+
+def test_standard_autofit_result_exact_manual_reexpression_all_nine() -> None:
+    truth = model_definition(
+        lorentzians=((0.35, 0.12), (0.12, 0.42)),
+        background=BackgroundModel.LINEAR,
+        b0=0.004,
+        b1=-0.003,
+    )
+    prepared, selection = synthetic_problem(truth)
+    q_bins = prepared.sample_dataset.q_bins
+    assert q_bins is not None
+    for candidate in generate_standard_candidates():
+        original = fit_standard_candidate(
+            prepared, selection, 0, candidate, max_nfev=800
+        )
+        assert original.diagnostics.optimizer_success
+        converted = convert_standard_auto_fit_result_to_manual(
+            original, center_group_id="adopted-center"
+        )
+        assert converted is not original
+        assert converted.statistics is original.statistics
+        assert converted.evaluation is original.evaluation
+        np.testing.assert_array_equal(converted.raw_residuals, original.raw_residuals)
+        np.testing.assert_array_equal(
+            converted.standardized_residuals, original.standardized_residuals
+        )
+        assert converted.provenance is original.provenance
+        assert converted.context_binding is original.context_binding
+        assert converted.diagnostics.jacobian_rank == original.diagnostics.jacobian_rank
+        assert (
+            converted.diagnostics.condition_number
+            == original.diagnostics.condition_number
+        )
+        assert converted.diagnostics.maximum_absolute_correlation == (
+            original.diagnostics.maximum_absolute_correlation
+        )
+        fitted_model = converted.fitted_model
+        assert fitted_model is not None
+        if candidate.lorentzian_count:
+            assert fitted_model.energy_shift is None
+            assert fitted_model.elastic_center_group == "adopted-center"
+            assert all(
+                item.center_group == "adopted-center"
+                for item in fitted_model.lorentzians
+            )
+        else:
+            assert fitted_model.energy_shift is not None
+            assert not fitted_model.center_groups
+        if candidate.background is BackgroundModel.CONSTANT:
+            assert fitted_model.background is BackgroundModel.LINEAR
+            assert converted.parameter("b1").value == 0.0
+            assert not converted.parameter("b1").free
+            assert converted.parameter("b1").standard_error is None
+        else:
+            assert fitted_model.background is candidate.background
+
+        assert original.fitted_model is not None
+        old_slots = fitting_core._parameter_slots(original.fitted_model)
+        new_slots = fitting_core._parameter_slots(fitted_model)
+        assert tuple(slot.name for slot in new_slots) == tuple(
+            parameter.name for parameter in converted.parameters
+        )
+        old_by_key = {slot.key: index for index, slot in enumerate(old_slots)}
+        for new_index, slot in enumerate(new_slots):
+            assert converted.parameters[new_index].references == slot.references
+            old_index = old_by_key.get(slot.key)
+            if old_index is None:
+                assert slot.name == "b1"
+                assert converted.diagnostics.relative_standard_errors[new_index] is None
+                if converted.covariance is not None:
+                    assert np.all(np.isnan(converted.covariance[new_index]))
+                continue
+            old = original.parameters[old_index]
+            new = converted.parameters[new_index]
+            assert (new.value, new.standard_error, new.free) == (
+                old.value,
+                old.standard_error,
+                old.free,
+            )
+            assert (new.lower_bound, new.upper_bound) == (
+                old.lower_bound,
+                old.upper_bound,
+            )
+            assert (new.active_lower_bound, new.active_upper_bound) == (
+                old.active_lower_bound,
+                old.active_upper_bound,
+            )
+            assert (
+                converted.diagnostics.relative_standard_errors[new_index]
+                == (original.diagnostics.relative_standard_errors[old_index])
+            )
+            if converted.covariance is not None and original.covariance is not None:
+                for new_other, other_slot in enumerate(new_slots):
+                    old_other = old_by_key.get(other_slot.key)
+                    if old_other is not None:
+                        assert converted.covariance[new_index, new_other] == (
+                            original.covariance[old_index, old_other]
+                        ) or (
+                            np.isnan(converted.covariance[new_index, new_other])
+                            and np.isnan(original.covariance[old_index, old_other])
+                        )
+        assert len(converted.diagnostics.alternative_starts) == len(
+            original.diagnostics.alternative_starts
+        )
+        assert set(converted.diagnostics.active_bounds) == {
+            f"{item.name}:{'lower' if item.active_lower_bound else 'upper'}"
+            for item in converted.parameters
+            if item.active_lower_bound or item.active_upper_bound
+        }
+        if converted.correlation is not None and original.correlation is not None:
+            for new_index, slot in enumerate(new_slots):
+                old_index = old_by_key.get(slot.key)
+                if old_index is None:
+                    assert np.all(np.isnan(converted.correlation[new_index]))
+                    continue
+                for new_other, other_slot in enumerate(new_slots):
+                    old_other = old_by_key.get(other_slot.key)
+                    if old_other is not None:
+                        new_value = converted.correlation[new_index, new_other]
+                        old_value = original.correlation[old_index, old_other]
+                        assert new_value == old_value or (
+                            np.isnan(new_value) and np.isnan(old_value)
+                        )
+        for old_start, new_start in zip(
+            original.diagnostics.alternative_starts,
+            converted.diagnostics.alternative_starts,
+            strict=True,
+        ):
+            for new_index, slot in enumerate(new_slots):
+                old_index = old_by_key.get(slot.key)
+                assert new_start.start_parameter_values[new_index] == (
+                    old_start.start_parameter_values[old_index]
+                    if old_index is not None
+                    else 0.0
+                )
+                assert new_start.fitted_parameter_values[new_index] == (
+                    old_start.fitted_parameter_values[old_index]
+                    if old_index is not None
+                    else 0.0
+                )
+
+        before = derive_qens(
+            MultiQBranchResult(
+                0,
+                MultiQExecutionStatus.COMPLETED,
+                (MultiQFitOutcome(0, MultiQFitStatus.SUCCESS, original),),
+            ),
+            q_bins,
+        ).points[0]
+        after = derive_qens(
+            MultiQBranchResult(
+                0,
+                MultiQExecutionStatus.COMPLETED,
+                (MultiQFitOutcome(0, MultiQFitStatus.SUCCESS, converted),),
+            ),
+            q_bins,
+        ).points[0]
+        assert tuple(
+            (item.component, item.fwhm_mev, item.tau_ps, item.fwhm_standard_error_mev)
+            for item in before.lorentzians
+        ) == tuple(
+            (item.component, item.fwhm_mev, item.tau_ps, item.fwhm_standard_error_mev)
+            for item in after.lorentzians
+        )
+        assert before.eisf is not None and after.eisf is not None
+        assert before.eisf.value == after.eisf.value
+        assert before.eisf.standard_error == after.eisf.standard_error
 
 
 def test_standard_autofit_b0_fits_a_slightly_negative_baseline() -> None:

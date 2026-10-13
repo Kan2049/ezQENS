@@ -510,7 +510,16 @@ previous dataset's Current Result as the new dataset's Current Fit.
 
 `Fit All Q from Current Fit` accepts a Current Fit originating from either a
 Manual Run Fit or an applied AutoFit candidate; after that point both origins
-use the same Multi-Q semantics. `AutoFit All Q` instead performs fresh
+use the same Multi-Q semantics. Adoption exactly re-expresses the standard
+AutoFit Result in the editable Manual parameter topology without refitting:
+the shared Elastic/Lorentzian center becomes one center group, and a B0
+background becomes B1 with a fixed zero slope. The fitted values, uncertainty,
+evaluation and statistical evidence are retained in reindexed Manual slots;
+the original AutoFit candidate evidence remains unchanged. For independent
+selected AutoFit branches, every non-anchor Q starts with a clean default
+state of the selected branch composition, not an existing per-Q Manual setup;
+only preceding successful Results provide execution seeds. `AutoFit All Q`
+instead performs fresh
 candidate discovery only at the anchor. It uses the frozen nine-candidate
 search there, never reruns that search independently at every Q, and does not
 silently replace an absent Most Recommended result with Best Supported. A user

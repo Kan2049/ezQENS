@@ -56,9 +56,9 @@ from ezqens.resolution import (
     prepare_measured_resolution,
 )
 from ezqens.workflow import (
+    AutoFitCandidateBranchResult,
     CenterTieIdentity,
     CenterTieKind,
-    FittingMethod,
     FittingWorkspaceState,
     ManualCenterGroupState,
     ManualFitContext,
@@ -71,12 +71,17 @@ from ezqens.workflow import (
     MethodTransferOverrides,
     MultiQConstraintTransferPolicy,
     ProjectDataset,
+    ResultOrigin,
+    ResultSnapshot,
     SelectedAutoFitMultiQResult,
     SelectedAutoFitProgressEvent,
     SingleQAutoFitOutcome,
     WorkflowProject,
     active_transferable_constraints,
     add_project_dataset,
+    adopt_selected_auto_fit_branch,
+    adopt_single_q_auto_fit_candidate,
+    append_saved_result,
     apply_fitting_method,
     apply_manual_setup_to_all_groups,
     apply_resolution,
@@ -91,6 +96,7 @@ from ezqens.workflow import (
     join_parameter_tie,
     materialize_manual_model,
     open_manual_fit_draft,
+    remove_saved_result,
     resolve_manual_fit_context,
     run_and_adopt_manual_fit,
     run_manual_fit,
@@ -103,6 +109,7 @@ from ezqens.workflow import (
     update_manual_parameter,
 )
 from ezqens.workflow.manual_state import replace_parameter_intent
+from ezqens.workflow.results import _issue_result_snapshot
 
 FloatArray = npt.NDArray[np.float64]
 
@@ -1804,9 +1811,24 @@ def test_working_and_saved_method_result_lifecycles_are_independent(
         "saved method",
     )
     state = set_working_method(state, edited_method)
-    state = save_current_result(set_current_result(state, anchor), "saved result")
+    anchor_snapshot = _issue_result_snapshot(
+        anchor,
+        tuple(
+            _manual_model() if index == anchor.provenance.group_index else None
+            for index in range(len(_prepared.spectra))
+        ),
+        ResultOrigin.MANUAL_FIT,
+    )
+    state = save_current_result(
+        set_current_result(state, anchor_snapshot), "saved result"
+    )
     replacement_result = replace(anchor, fitted_model=anchor.configuration)
-    state = set_current_result(state, replacement_result)
+    replacement_snapshot = _issue_result_snapshot(
+        replacement_result,
+        anchor_snapshot.working_states,
+        ResultOrigin.MANUAL_FIT,
+    )
+    state = set_current_result(state, replacement_snapshot)
 
     assert state.saved_methods[0].method is first_method
     assert state.working_method is edited_method
@@ -1974,7 +1996,21 @@ def test_current_result_save_and_save_as_lifecycle(
     first_rerun = replace(anchor, fitted_model=anchor.configuration)
     second_rerun = replace(anchor, evaluation=anchor.evaluation)
 
-    state = set_current_result(FittingWorkspaceState(), anchor)
+    anchor_snapshot = _issue_result_snapshot(
+        anchor,
+        tuple(
+            _manual_model() if index == anchor.provenance.group_index else None
+            for index in range(len(_prepared.spectra))
+        ),
+        ResultOrigin.MANUAL_FIT,
+    )
+    first_snapshot = _issue_result_snapshot(
+        first_rerun, anchor_snapshot.working_states, ResultOrigin.MANUAL_FIT
+    )
+    second_snapshot = _issue_result_snapshot(
+        second_rerun, anchor_snapshot.working_states, ResultOrigin.MANUAL_FIT
+    )
+    state = set_current_result(FittingWorkspaceState(), anchor_snapshot)
     assert state.saved_results == ()
     assert state.associated_saved_result is None
     with pytest.raises(ValueError, match="use Save As"):
@@ -1987,7 +2023,7 @@ def test_current_result_save_and_save_as_lifecycle(
 
     state = set_current_result(
         state,
-        first_rerun,
+        first_snapshot,
         retain_saved_association=True,
     )
     assert state.current_saved_result_index == 0
@@ -2005,7 +2041,7 @@ def test_current_result_save_and_save_as_lifecycle(
 
     state = set_current_result(
         state,
-        second_rerun,
+        second_snapshot,
         retain_saved_association=True,
     )
     state = save_current_result(state)
@@ -2013,13 +2049,167 @@ def test_current_result_save_and_save_as_lifecycle(
     assert state.saved_results[0].result is first_rerun
     assert state.saved_results[1].result is second_rerun
 
-    state = set_current_result(state, anchor)
+    state = set_current_result(state, anchor_snapshot)
     assert state.current_result is anchor
     assert state.current_saved_result_index is None
     assert tuple(item.result for item in state.saved_results) == (
         first_rerun,
         second_rerun,
     )
+
+
+def test_result_snapshot_requires_exact_successful_q_state_scope(
+    multi_q_problem: tuple[
+        PreparedResolution,
+        FittingSelection,
+        tuple[SpectralModelDefinition, ...],
+        FitResult,
+    ],
+) -> None:
+    prepared, _selection, _configurations, anchor = multi_q_problem
+    group = anchor.provenance.group_index
+    states = tuple(
+        _manual_model() if index == group else None
+        for index in range(len(prepared.spectra))
+    )
+    issued = _issue_result_snapshot(anchor, states, ResultOrigin.MANUAL_FIT)
+    with pytest.raises(ValueError, match="issued by execution workflow"):
+        ResultSnapshot(anchor, states, ResultOrigin.MANUAL_FIT)
+    with pytest.raises(ValueError, match="issued by execution workflow"):
+        replace(issued, origin=ResultOrigin.MANUAL_FIT)
+    forged = object.__new__(ResultSnapshot)
+    for name in ("result", "working_states", "origin", "candidate"):
+        object.__setattr__(forged, name, getattr(issued, name))
+    with pytest.raises(ValueError, match="created at execution"):
+        set_current_result(FittingWorkspaceState(), forged)
+    with pytest.raises(ValueError, match="ResultSnapshot"):
+        FittingWorkspaceState(current=forged)
+    with pytest.raises(ValueError, match="ResultSnapshot"):
+        append_saved_result(FittingWorkspaceState(), "forged", forged)
+    with pytest.raises(ValueError, match="only its successful Q"):
+        _issue_result_snapshot(anchor, (None,) * len(states), ResultOrigin.MANUAL_FIT)
+    with pytest.raises(ValueError, match="only its successful Q"):
+        _issue_result_snapshot(
+            anchor,
+            tuple(_manual_model() for _ in states),
+            ResultOrigin.MANUAL_FIT,
+        )
+
+    outcomes = tuple(
+        MultiQFitOutcome(index, MultiQFitStatus.SUCCESS, anchor)
+        if index == group
+        else MultiQFitOutcome(index, MultiQFitStatus.NOT_RUN)
+        for index in range(len(states))
+    )
+    branch = MultiQBranchResult(group, MultiQExecutionStatus.CANCELLED, outcomes)
+    _issue_result_snapshot(branch, states, ResultOrigin.MANUAL_FIT_ALL_Q)
+    with pytest.raises(ValueError, match="exactly at successful Qs"):
+        _issue_result_snapshot(
+            branch,
+            tuple(_manual_model() for _ in states),
+            ResultOrigin.MANUAL_FIT_ALL_Q,
+        )
+    with pytest.raises(ValueError, match="exactly at successful Qs"):
+        _issue_result_snapshot(
+            branch,
+            (None,) * len(states),
+            ResultOrigin.MANUAL_FIT_ALL_Q,
+        )
+
+
+def test_workspace_append_remove_preserves_current_and_entry_identity(
+    multi_q_problem: tuple[
+        PreparedResolution,
+        FittingSelection,
+        tuple[SpectralModelDefinition, ...],
+        FitResult,
+    ],
+) -> None:
+    prepared, _selection, _configurations, anchor = multi_q_problem
+    current = _issue_result_snapshot(
+        anchor,
+        tuple(
+            _manual_model() if index == anchor.provenance.group_index else None
+            for index in range(len(prepared.spectra))
+        ),
+        ResultOrigin.MANUAL_FIT,
+    )
+    other = _issue_result_snapshot(
+        replace(anchor, fitted_model=anchor.configuration),
+        current.working_states,
+        ResultOrigin.MANUAL_FIT,
+    )
+    state = save_current_result_as(
+        set_current_result(FittingWorkspaceState(), current), "associated"
+    )
+    associated = state.saved_results[0]
+    state = append_saved_result(state, "first", other)
+    first = state.saved_results[1]
+    state = append_saved_result(state, "second", current)
+    second = state.saved_results[2]
+    assert state.current is current
+    assert state.current_saved_result_index == 0
+    assert state.saved_results == (associated, first, second)
+
+    state = remove_saved_result(state, first)
+    assert state.saved_results[0] is associated
+    assert state.saved_results[1] is second
+    assert state.current is current
+    assert state.current_saved_result_index == 0
+    with pytest.raises(ValueError, match="not in this workspace"):
+        remove_saved_result(state, first)
+    with pytest.raises(ValueError, match="not in this workspace"):
+        remove_saved_result(state, replace(second))
+
+    state = remove_saved_result(state, associated)
+    assert state.current is current
+    assert state.current_saved_result_index is None
+    assert state.saved_results == (second,)
+    state = save_current_result_as(state, "latest")
+    assert state.current_saved_result_index == 1
+    state = remove_saved_result(state, second)
+    assert state.current_saved_result_index == 0
+    assert state.saved_results[0].name == "latest"
+
+
+def test_manual_run_snapshot_is_unchanged_by_later_draft_edit(
+    multi_q_problem: tuple[
+        PreparedResolution,
+        FittingSelection,
+        tuple[SpectralModelDefinition, ...],
+        FitResult,
+    ],
+) -> None:
+    prepared, selection, _configurations, _anchor = multi_q_problem
+    project, _sample, draft = _workflow_problem(prepared, selection)
+    execution = run_and_adopt_manual_fit(project, draft, 2, max_nfev=800)
+    assert execution.success
+    assert execution.snapshot is not None
+    assert execution.adopted_draft is not None
+    snapshot = execution.snapshot
+    model = snapshot.working_states[2]
+    assert model is not None
+    reference = ParameterReference(ELASTIC_COMPONENT, ParameterFamily.AREA)
+    intent = model.parameter_intent(reference)
+    edited = update_manual_parameter(
+        execution.adopted_draft,
+        2,
+        reference,
+        ManualParameterEdit(
+            intent.current_value + 0.01,
+            intent.user_lower_limit,
+            intent.user_upper_limit,
+            intent.free,
+            intent.user_bounds_enabled,
+        ),
+    )
+    assert edited.setup(2).model is not model
+    assert snapshot.working_states[2] is model
+    assert model.parameter_intent(reference) == intent
+    state = save_current_result_as(
+        set_current_result(FittingWorkspaceState(), snapshot), "before edit"
+    )
+    assert state.saved_results[0].snapshot is snapshot
 
 
 def test_fit_all_q_rejects_missing_current_result_without_execution(
@@ -2840,30 +3030,11 @@ def test_selected_auto_candidates_create_ordered_independent_branches(
     def unexpected_auto_rerun(*_args: object, **_kwargs: object) -> object:
         raise AssertionError("selected branches must reuse one AutoFit evaluation")
 
-    captured_methods: list[FittingMethod] = []
     progress: list[SelectedAutoFitProgressEvent] = []
-
-    def record_method(
-        model: ManualModelState,
-        *,
-        context: ManualFitContext | None = None,
-        transfer_defaults: MethodTransferOptions | None = None,
-    ) -> FittingMethod:
-        method = capture_fitting_method(
-            model,
-            context=context,
-            transfer_defaults=transfer_defaults,
-        )
-        captured_methods.append(method)
-        return method
 
     monkeypatch.setattr(
         "ezqens.workflow.multi_q.run_single_q_auto_fit",
         unexpected_auto_rerun,
-    )
-    monkeypatch.setattr(
-        "ezqens.workflow.multi_q.capture_fitting_method",
-        record_method,
     )
     result = continue_selected_auto_fit_candidates(
         project,
@@ -2879,8 +3050,8 @@ def test_selected_auto_candidates_create_ordered_independent_branches(
         other_successful.candidate,
         most_recommended.candidate,
     )
-    assert len(captured_methods) == 2
-    assert captured_methods[0] is not captured_methods[1]
+    assert all(len(item.working_states) == 5 for item in result.branches)
+    assert result.branches[0].working_states is not result.branches[1].working_states
     assert [item.candidate for item in progress] == [
         *([other_successful.candidate] * 5),
         *([most_recommended.candidate] * 5),
@@ -2903,14 +3074,16 @@ def test_selected_auto_candidates_create_ordered_independent_branches(
         (other_successful, most_recommended),
         strict=True,
     ):
-        assert item.anchor_evidence.candidate == original.candidate
+        assert item.anchor_evidence is original
         assert item.anchor_evidence.fit is not None
         assert original.fit is not None
         assert item.anchor_evidence.fit.parameters == original.fit.parameters
         assert item.anchor_evidence.fit.diagnostics == original.fit.diagnostics
         branch = item.branch_result
         anchor = branch.outcome(branch.anchor_group_index).fit_result
-        assert anchor is item.anchor_evidence.fit
+        assert anchor is not None
+        assert anchor.configuration is item.anchor_evidence.fit.configuration
+        assert anchor.evaluation is item.anchor_evidence.fit.evaluation
         assert all(
             outcome.status is MultiQFitStatus.SUCCESS for outcome in branch.outcomes
         )
@@ -2932,6 +3105,293 @@ def test_selected_auto_candidates_create_ordered_independent_branches(
         second = result.branches[1].branch_result.outcome(group_index).fit_result
         assert first is not None and second is not None
         assert first is not second
+
+
+def test_selected_branch_adopts_owned_manual_states_and_ignores_stale_target_setup(
+    selected_auto_problem: tuple[
+        WorkflowProject,
+        ProjectDataset,
+        ManualFitDraft,
+        SingleQAutoFitOutcome,
+        tuple[CandidateFitResult, CandidateFitResult],
+    ],
+) -> None:
+    project, sample, draft, evaluation, evidence = selected_auto_problem
+    candidate = evidence[0].candidate
+    stale = ManualModelState(
+        background=BackgroundModel.CONSTANT,
+        b0=ManualParameterIntent(8.0, free=False),
+    )
+    draft = draft.with_model(1, stale)
+    selected = continue_selected_auto_fit_candidates(
+        project,
+        draft,
+        evaluation,
+        (candidate,),
+        fit_excluded_groups=(0, 3, 4),
+        max_nfev=800,
+    ).branches[0]
+    assert selected.anchor_evidence is evidence[0]
+    assert selected.evaluation is evaluation
+    assert not hasattr(selected, "snapshot")
+    assert selected.working_states[1] is not stale
+    assert selected.branch_result.outcome(1).status is MultiQFitStatus.SUCCESS
+    target_fit = selected.branch_result.outcome(1).fit_result
+    assert target_fit is not None
+    assert target_fit.configuration.b0 is not None
+    assert target_fit.configuration.b0.free
+
+    adopted = adopt_selected_auto_fit_branch(
+        project,
+        draft,
+        evaluation,
+        selected,
+        center_group_id="selected-center",
+    )
+    assert adopted.snapshot is not None
+    assert adopted.snapshot.result is adopted.branch_result
+    assert adopted.snapshot.origin is ResultOrigin.AUTO_FIT_BRANCH
+    with pytest.raises(ValueError, match="snapshot"):
+        replace(adopted, snapshot=cast(ResultSnapshot, None))
+    assert adopted.snapshot.candidate == candidate
+    original_auto_fit = evidence[0].fit
+    assert original_auto_fit is not None
+    with pytest.raises(ValueError, match="issued by execution workflow"):
+        ResultSnapshot(
+            original_auto_fit,
+            adopted.snapshot.working_states,
+            ResultOrigin.AUTO_FIT_SINGLE_Q,
+            candidate,
+        )
+    unissued_auto = object.__new__(ResultSnapshot)
+    object.__setattr__(unissued_auto, "result", original_auto_fit)
+    object.__setattr__(unissued_auto, "working_states", adopted.snapshot.working_states)
+    object.__setattr__(unissued_auto, "origin", ResultOrigin.AUTO_FIT_BRANCH)
+    object.__setattr__(unissued_auto, "candidate", candidate)
+    with pytest.raises(ValueError, match="created at execution"):
+        set_current_result(FittingWorkspaceState(), unissued_auto)
+    with pytest.raises(ValueError, match="ResultSnapshot"):
+        append_saved_result(FittingWorkspaceState(), "unconverted", unissued_auto)
+    with pytest.raises(ValueError, match="issued by execution workflow"):
+        replace(adopted.snapshot, result=selected.branch_result)
+    anchor_state = adopted.adopted_draft.setup(2).model
+    target_state = adopted.adopted_draft.setup(1).model
+    assert anchor_state is not None and target_state is not None
+    single = adopt_single_q_auto_fit_candidate(
+        project,
+        draft,
+        evaluation,
+        evidence[0],
+        center_group_id="selected-center",
+    )
+    assert single.success and single.adopted_draft is not None
+    assert anchor_state == single.adopted_draft.setup(2).model
+    assert single.snapshot is not None
+    assert all(
+        state is None
+        for index, state in enumerate(single.snapshot.working_states)
+        if index != 2
+    )
+    assert anchor_state.center_groups[0].group_id == "selected-center"
+    assert target_state.center_groups[0].group_id == "selected-center"
+    assert anchor_state.elastic_area is not None
+    assert anchor_state.elastic_area.user_lower_limit == 0.0
+    assert anchor_state.center_groups[0].intent.user_lower_limit is not None
+    assert anchor_state.center_groups[0].intent.user_upper_limit is not None
+    assert anchor_state.lorentzians[0].fwhm.user_lower_limit is not None
+    assert target_state.elastic_area is not None
+    assert target_state.elastic_area.user_lower_limit is None
+    assert target_state.center_groups[0].intent.user_lower_limit is None
+    assert target_state.lorentzians[0].fwhm.user_lower_limit is None
+    assert target_state.background is BackgroundModel.LINEAR
+    assert target_state.b1 == ManualParameterIntent(0.0, free=False)
+    retained_target = selected.working_states[1]
+    assert retained_target is not None
+    substituted_target = replace(
+        retained_target,
+        elastic_area=ManualParameterIntent(
+            1.0,
+            user_upper_limit=100.0,
+        ),
+    )
+    retained_states = list(selected.working_states)
+    retained_states[1] = substituted_target
+    with pytest.raises(ValueError, match="issued by execution"):
+        replace(selected, working_states=tuple(retained_states))
+    with pytest.raises(ValueError, match="issued by execution"):
+        AutoFitCandidateBranchResult(
+            selected.anchor_evidence,
+            selected.branch_result,
+            evaluation,
+            tuple(retained_states),
+        )
+    forged = object.__new__(AutoFitCandidateBranchResult)
+    for name in ("anchor_evidence", "branch_result", "evaluation", "working_states"):
+        object.__setattr__(forged, name, getattr(selected, name))
+    with pytest.raises(ValueError, match="not issued by AutoFit execution"):
+        adopt_selected_auto_fit_branch(
+            project,
+            draft,
+            evaluation,
+            forged,
+            center_group_id="selected-center",
+        )
+    assert all(
+        (state is not None) == (outcome.status is MultiQFitStatus.SUCCESS)
+        for state, outcome in zip(
+            adopted.snapshot.working_states,
+            adopted.branch_result.outcomes,
+            strict=True,
+        )
+    )
+    converted_anchor = adopted.branch_result.outcome(2).fit_result
+    assert converted_anchor is not None
+    assert converted_anchor is not evidence[0].fit
+    continued = fit_all_q_from_current(
+        project,
+        adopted.adopted_draft,
+        anchor_group_index=2,
+        current_fit=converted_anchor,
+        fit_excluded_groups=(0, 3, 4),
+        max_nfev=800,
+    )
+    retained_anchor = continued.outcome(2).fit_result
+    assert retained_anchor is not None
+    assert retained_anchor.evaluation is converted_anchor.evaluation
+    assert retained_anchor.parameters is converted_anchor.parameters
+    assert continued.outcome(1).status is MultiQFitStatus.SUCCESS
+
+    foreign = replace(evaluation, measured_energy=evaluation.measured_energy.copy())
+    with pytest.raises(ValueError, match="not owned"):
+        adopt_selected_auto_fit_branch(
+            project, draft, foreign, selected, center_group_id="selected-center"
+        )
+    changed_selection = evaluation.scientific_context.selection.with_group_range(
+        2, lower_energy=-0.5, upper_energy=0.5
+    )
+    changed_project = commit_fitting_selection(project, sample, changed_selection)
+    with pytest.raises(ValueError, match="no longer matches"):
+        adopt_selected_auto_fit_branch(
+            changed_project,
+            draft,
+            evaluation,
+            selected,
+            center_group_id="selected-center",
+        )
+
+
+def test_autofit_single_q_adoption_can_anchor_manual_fit_all_q(
+    selected_auto_problem: tuple[
+        WorkflowProject,
+        ProjectDataset,
+        ManualFitDraft,
+        SingleQAutoFitOutcome,
+        tuple[CandidateFitResult, CandidateFitResult],
+    ],
+) -> None:
+    project, _sample, draft, evaluation, evidence = selected_auto_problem
+    adopted = adopt_single_q_auto_fit_candidate(project, draft, evaluation, evidence[0])
+    assert adopted.success and adopted.fit_result is not None
+    assert adopted.adopted_draft is not None
+    branch = fit_all_q_from_current(
+        project,
+        adopted.adopted_draft,
+        anchor_group_index=2,
+        current_fit=adopted.fit_result,
+        fit_excluded_groups=(0, 3, 4),
+        max_nfev=800,
+    )
+    retained_anchor = branch.outcome(2).fit_result
+    assert retained_anchor is not None
+    assert retained_anchor.evaluation is adopted.fit_result.evaluation
+    assert retained_anchor.parameters is adopted.fit_result.parameters
+    assert branch.outcome(1).status is MultiQFitStatus.SUCCESS
+
+
+def test_selected_branch_adoption_keeps_excluded_target_setup(
+    selected_auto_problem: tuple[
+        WorkflowProject,
+        ProjectDataset,
+        ManualFitDraft,
+        SingleQAutoFitOutcome,
+        tuple[CandidateFitResult, CandidateFitResult],
+    ],
+) -> None:
+    project, _sample, draft, evaluation, evidence = selected_auto_problem
+    existing = ManualModelState(
+        background=BackgroundModel.CONSTANT,
+        b0=ManualParameterIntent(0.7, free=False),
+    )
+    draft = draft.with_model(1, existing)
+    selected = continue_selected_auto_fit_candidates(
+        project,
+        draft,
+        evaluation,
+        (evidence[0].candidate,),
+        fit_excluded_groups=(0, 1, 3, 4),
+        max_nfev=800,
+    ).branches[0]
+    assert selected.branch_result.outcome(1).status is MultiQFitStatus.EXCLUDED
+    adopted = adopt_selected_auto_fit_branch(
+        project,
+        draft,
+        evaluation,
+        selected,
+        center_group_id="selected-center",
+    )
+    assert adopted.adopted_draft.setup(1).model is existing
+    assert adopted.snapshot is not None
+    assert adopted.snapshot.working_states[1] is None
+
+
+def test_selected_branch_adoption_keeps_failed_target_setup(
+    selected_auto_problem: tuple[
+        WorkflowProject,
+        ProjectDataset,
+        ManualFitDraft,
+        SingleQAutoFitOutcome,
+        tuple[CandidateFitResult, CandidateFitResult],
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project, _sample, draft, evaluation, evidence = selected_auto_problem
+    existing = ManualModelState(
+        background=BackgroundModel.CONSTANT,
+        b0=ManualParameterIntent(-0.2, free=False),
+    )
+    draft = draft.with_model(1, existing)
+
+    def fail_target(
+        _prepared: PreparedResolution,
+        _selection: FittingSelection,
+        _group_index: int,
+        _model: SpectralModelDefinition,
+        *,
+        max_nfev: int,
+    ) -> FitResult:
+        assert max_nfev == 800
+        raise FittingError("synthetic target failure")
+
+    monkeypatch.setattr(batch_core, "fit_single_q", fail_target)
+    selected = continue_selected_auto_fit_candidates(
+        project,
+        draft,
+        evaluation,
+        (evidence[0].candidate,),
+        fit_excluded_groups=(0, 3, 4),
+        max_nfev=800,
+    ).branches[0]
+    assert selected.branch_result.outcome(1).status is MultiQFitStatus.FAILED
+    adopted = adopt_selected_auto_fit_branch(
+        project,
+        draft,
+        evaluation,
+        selected,
+        center_group_id="selected-center",
+    )
+    assert adopted.adopted_draft.setup(1).model is existing
+    assert adopted.snapshot is not None
+    assert adopted.snapshot.working_states[1] is None
 
 
 def test_selected_auto_candidates_reject_invalid_evidence_before_execution(

@@ -644,7 +644,7 @@ An incompatible target remains blocked rather than weakening a transferred
 constraint.
 
 `fit_all_q_from_current_with_adoption(...)` returns the authoritative
-`MultiQBranchResult` together with a new `ManualFitDraft`. For each successful
+`MultiQBranchResult`, a new `ManualFitDraft`, and a `ResultSnapshot`. For each successful
 non-anchor target, that draft retains the exact Manual topology and constraint
 intent used before fit materialization, with fitted Current Values adopted by
 typed optimizer-parameter references. Failed, blocked, excluded, and unrun
@@ -652,12 +652,31 @@ targets keep their prior setups, including an absent setup. This editable
 working state can later diverge from the immutable retained FitResult without
 rewriting that result. The existing branch-only workflow call remains available.
 
-`FittingWorkspaceState` distinguishes an unsaved Current Result from a Current
-Result associated with one saved in-memory snapshot. Save As appends a snapshot
+`ResultSnapshot` captures a concrete `FitResult` or `MultiQBranchResult`, one
+immutable Manual working state only for each successfully fitted Q (and `None`
+for failed, blocked, excluded, or uncovered Qs), and minimal Manual/AutoFit
+origin and candidate identity where applicable. Only Result-producing workflow
+execution/adoption issues snapshots; callers cannot construct or derive a new
+snapshot for Current or Saved. Save never reconstructs it from a later draft.
+Selected AutoFit branches are issued by their execution with the original
+evaluation-owned `CandidateFitResult` and their per-Q execution working states
+(the AutoFit-constrained anchor and clean targets). Explicit branch adoption
+validates that ownership and the current scientific context,
+then returns a converted Manual-representation branch snapshot and adopted
+draft without refitting. Failed, blocked, excluded and unrun Q setups remain
+unchanged.
+
+`FittingWorkspaceState` stores one Current `ResultSnapshot` (with a read-only
+Current Result projection) and saved named snapshot entries. It distinguishes
+an unsaved Current Result from a Current Result associated with one saved
+in-memory snapshot. Save As appends a snapshot
 and binds Current to it. A later Run may replace Current while explicitly
 retaining that association, without changing the snapshot; explicit Save then
 updates only that associated entry. Save without an association fails, while a
-later Save As always appends and rebinds. This lifecycle is in-memory only.
+later Save As always appends and rebinds. Appending a saved snapshot without
+changing Current is distinct from Save As; removing one saved entry by identity
+preserves other entries and Current, updating only the association index when
+needed. This lifecycle is in-memory only.
 
 ### 4.7 Later dynamics values — provisional
 

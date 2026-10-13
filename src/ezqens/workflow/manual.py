@@ -33,6 +33,7 @@ from ezqens.fitting import (
     ParameterReference,
     SpectralModelDefinition,
     auto_fit_single_q,
+    convert_standard_auto_fit_result_to_manual,
     fit_single_q,
     initialize_background_from_interaction,
     initialize_elastic_from_interaction,
@@ -59,6 +60,12 @@ from .project import (
     WorkflowProject,
     project_dataset,
     resolve_manual_fit_context,
+)
+from .results import (
+    ResultOrigin,
+    ResultSnapshot,
+    _is_issued_result_snapshot,
+    _issue_result_snapshot,
 )
 
 
@@ -200,6 +207,7 @@ class ManualFitExecutionOutcome:
     fit_result: FitResult | None
     adopted_draft: ManualFitDraft | None
     diagnostics: tuple[WorkflowDiagnostic, ...] = ()
+    snapshot: ResultSnapshot | None = None
 
     def __post_init__(self) -> None:
         diagnostics = tuple(self.diagnostics)
@@ -216,6 +224,12 @@ class ManualFitExecutionOutcome:
                 raise ValueError(
                     "a successful execution cannot contain error diagnostics"
                 )
+            if (
+                self.snapshot is None
+                or not _is_issued_result_snapshot(self.snapshot)
+                or self.snapshot.result is not self.fit_result
+            ):
+                raise ValueError("execution snapshot must retain its FitResult")
         elif not any(item.severity is DiagnosticSeverity.ERROR for item in diagnostics):
             raise ValueError("a failed execution requires an error diagnostic")
         object.__setattr__(self, "diagnostics", diagnostics)
@@ -1566,56 +1580,41 @@ def _manual_intent_from_configuration(
 
 def _manual_state_from_fitted_model(
     model: SpectralModelDefinition,
+    *,
+    retain_user_bounds: bool = True,
 ) -> ManualModelState:
-    """Translate typed fitted topology without labels or scientific inference."""
+    """Mirror the fitted Manual topology as editable parameter intent."""
 
-    intent = _manual_intent_from_configuration
-    background = model.background
-    b0 = intent(model.b0) if model.b0 else None
-    b1 = intent(model.b1) if model.b1 else None
-    if background is BackgroundModel.CONSTANT:
-        background = BackgroundModel.LINEAR
-        b1 = ManualParameterIntent(current_value=0.0, free=False)
-    adopted_center_groups = [
+    def intent(configuration: ParameterConfiguration) -> ManualParameterIntent:
+        if retain_user_bounds:
+            return _manual_intent_from_configuration(configuration)
+        return ManualParameterIntent(
+            current_value=configuration.initial_value,
+            free=configuration.free,
+        )
+
+    adopted_center_groups = tuple(
         ManualCenterGroupState(group.group_id, intent(group.parameter))
         for group in model.center_groups
-    ]
-    legacy_center_group: str | None = None
-    if model.energy_shift is not None:
-        legacy_center_group = _new_group_id("center")
-        adopted_center_groups.append(
-            ManualCenterGroupState(
-                legacy_center_group,
-                intent(model.energy_shift),
-            )
-        )
+    )
     return ManualModelState(
-        energy_shift=None,
+        energy_shift=intent(model.energy_shift) if model.energy_shift else None,
         elastic_area=intent(model.elastic_area) if model.elastic_area else None,
         lorentzians=tuple(
             ManualLorentzianState(
                 area=intent(component.area),
                 fwhm=intent(component.fwhm),
                 center=intent(component.center) if component.center else None,
-                center_group=(
-                    component.center_group
-                    if component.center is not None
-                    or component.center_group is not None
-                    else legacy_center_group
-                ),
+                center_group=component.center_group,
                 identity=component.identity,
             )
             for component in model.lorentzians
         ),
-        background=background,
-        b0=b0,
-        b1=b1,
-        center_groups=tuple(adopted_center_groups),
-        elastic_center_group=(
-            model.elastic_center_group
-            if model.elastic_center_group is not None or model.elastic_area is None
-            else legacy_center_group
-        ),
+        background=model.background,
+        b0=intent(model.b0) if model.b0 else None,
+        b1=intent(model.b1) if model.b1 else None,
+        center_groups=adopted_center_groups,
+        elastic_center_group=model.elastic_center_group,
         parameter_ties=tuple(
             ManualParameterTieState(
                 group.group_id,
@@ -1623,6 +1622,54 @@ def _manual_state_from_fitted_model(
                 intent(group.parameter),
             )
             for group in model.parameter_ties
+        ),
+    )
+
+
+def _manual_state_from_standard_auto_state(
+    state: ManualModelState,
+    *,
+    center_group_id: str,
+) -> ManualModelState:
+    """Convert retained standard execution intent to editable Manual topology."""
+
+    if (
+        state.elastic_area is None
+        or state.energy_shift is None
+        or state.center_groups
+        or state.parameter_ties
+        or state.elastic_center_group is not None
+        or any(
+            item.center is not None or item.center_group is not None
+            for item in state.lorentzians
+        )
+    ):
+        raise ValueError("working state is not a standard AutoFit model")
+    if not center_group_id or center_group_id != center_group_id.strip():
+        raise ValueError("center_group_id must be a canonical nonempty string")
+    shared = bool(state.lorentzians)
+    return replace(
+        state,
+        energy_shift=None if shared else state.energy_shift,
+        lorentzians=tuple(
+            replace(item, center_group=center_group_id if shared else None)
+            for item in state.lorentzians
+        ),
+        center_groups=(
+            (ManualCenterGroupState(center_group_id, state.energy_shift),)
+            if shared
+            else ()
+        ),
+        elastic_center_group=center_group_id if shared else None,
+        background=(
+            BackgroundModel.LINEAR
+            if state.background is BackgroundModel.CONSTANT
+            else state.background
+        ),
+        b1=(
+            ManualParameterIntent(0.0, free=False)
+            if state.background is BackgroundModel.CONSTANT
+            else state.b1
         ),
     )
 
@@ -1664,6 +1711,7 @@ def adopt_single_q_auto_fit_candidate(
     candidate: CandidateFitResult,
     *,
     group_index: int | None = None,
+    center_group_id: str | None = None,
 ) -> ManualFitExecutionOutcome:
     """Atomically adopt one exact successful AutoFit candidate into the draft."""
 
@@ -1719,8 +1767,7 @@ def adopt_single_q_auto_fit_candidate(
             group_index=outcome_group,
             fit_result=fit_result,
         )
-    fitted_model = fit_result.fitted_model
-    if fitted_model is None:
+    if fit_result.fitted_model is None:
         return _failed_execution(
             WorkflowDiagnosticCode.MANUAL_FIT_ADOPTION_FAILED,
             "AutoFit candidate has no fitted model",
@@ -1728,12 +1775,23 @@ def adopt_single_q_auto_fit_candidate(
             fit_result=fit_result,
         )
     try:
-        adopted_model = _manual_state_from_fitted_model(fitted_model)
+        group_id = (
+            _new_group_id("center") if center_group_id is None else center_group_id
+        )
+        converted_fit = convert_standard_auto_fit_result_to_manual(
+            fit_result,
+            center_group_id=group_id,
+        )
+        working = _manual_state_from_fitted_model(fit_result.fitted_model)
+        model = _manual_state_from_standard_auto_state(
+            working, center_group_id=group_id
+        )
         materialized = materialize_manual_setup(
             project,
-            draft.with_model(outcome_group, adopted_model),
+            draft.with_model(outcome_group, model),
             outcome_group,
         )
+        adopted_model = _adopt_manual_fit_values(model, converted_fit, materialized)
         readiness = manual_fit_readiness(
             current_context.prepared_resolution,
             current_context.selection,
@@ -1755,8 +1813,17 @@ def adopt_single_q_auto_fit_candidate(
             fit_result=fit_result,
         )
     return ManualFitExecutionOutcome(
-        fit_result,
+        converted_fit,
         draft.with_model(outcome_group, adopted_model),
+        snapshot=_issue_result_snapshot(
+            converted_fit,
+            tuple(
+                adopted_model if index == outcome_group else None
+                for index in range(len(draft.setups))
+            ),
+            ResultOrigin.AUTO_FIT_SINGLE_Q,
+            candidate.candidate,
+        ),
     )
 
 
@@ -1997,4 +2064,15 @@ def run_and_adopt_manual_fit(
             fit_result=fit_result,
         )
     adopted_draft = draft.with_model(group_index, adopted_model)
-    return ManualFitExecutionOutcome(fit_result, adopted_draft)
+    return ManualFitExecutionOutcome(
+        fit_result,
+        adopted_draft,
+        snapshot=_issue_result_snapshot(
+            fit_result,
+            tuple(
+                adopted_model if index == group_index else None
+                for index in range(len(adopted_draft.setups))
+            ),
+            ResultOrigin.MANUAL_FIT,
+        ),
+    )

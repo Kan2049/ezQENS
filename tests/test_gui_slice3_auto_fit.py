@@ -85,7 +85,9 @@ from ezqens.workflow import (
     FittingWorkspaceState,
     ManualFitDraft,
     ManualModelState,
+    ManualMultiQFitExecutionOutcome,
     ManualParameterEdit,
+    ResultOrigin,
     SelectedAutoFitMultiQResult,
     SelectedAutoFitProgressEvent,
     SingleQAutoFitOutcome,
@@ -93,6 +95,8 @@ from ezqens.workflow import (
     commit_fitting_selection,
     run_single_q_auto_fit,
 )
+from ezqens.workflow.multi_q import _issue_auto_fit_candidate_branch_result
+from ezqens.workflow.results import _issue_result_snapshot
 
 
 @pytest.fixture(scope="module")
@@ -253,7 +257,23 @@ def _candidate_branch(
                 )
             )
     branch = MultiQBranchResult(0, status, tuple(outcomes))
-    return AutoFitCandidateBranchResult(evidence, branch)
+    return _fixture_branch(evidence, branch)
+
+
+def _fixture_branch(
+    evidence: CandidateFitResult,
+    branch: MultiQBranchResult,
+) -> AutoFitCandidateBranchResult:
+    states = tuple(
+        ManualModelState(
+            energy_shift=ManualParameterIntent(0.0),
+            elastic_area=ManualParameterIntent(1.0),
+        )
+        if item.status is MultiQFitStatus.SUCCESS
+        else None
+        for item in branch.outcomes
+    )
+    return _issue_auto_fit_candidate_branch_result(evidence, branch, None, states)
 
 
 def _selected_progress_event(
@@ -753,7 +773,7 @@ def test_candidate_panels_reuse_function_semantic_colors_and_component_identity(
                 context_binding=replace(binding, group_index=group_index),
             )
         outcomes.append(MultiQFitOutcome(group_index, MultiQFitStatus.SUCCESS, fit))
-    branch = AutoFitCandidateBranchResult(
+    branch = _fixture_branch(
         branch_evidence,
         MultiQBranchResult(0, MultiQExecutionStatus.COMPLETED, tuple(outcomes)),
     )
@@ -1359,9 +1379,8 @@ def test_derived_q_selection_uses_edges_and_retains_extent_without_values(
         draft=session.draft,
     )
     _select_only(unavailable_dialog, (evidence,))
-    unavailable_dialog._executed_branches[evidence.candidate] = replace(
-        branch,
-        branch_result=excluded_branch,
+    unavailable_dialog._executed_branches[evidence.candidate] = _fixture_branch(
+        evidence, excluded_branch
     )
     unavailable_dialog._derived_results[evidence.candidate] = excluded_derived
     unavailable_dialog._sync_controls()
@@ -1711,7 +1730,7 @@ def test_nonmonotonic_q_selector_drag_maps_physical_q_to_stored_group(
         outcome, window, project=workflow, draft=session.draft
     )
     _select_only(dialog, (evidence,))
-    dialog._executed_branches[evidence.candidate] = AutoFitCandidateBranchResult(
+    dialog._executed_branches[evidence.candidate] = _fixture_branch(
         replace(evidence, fit=anchor_fit), excluded_branch
     )
     dialog._derived_results[evidence.candidate] = derived
@@ -2737,7 +2756,28 @@ def test_single_apply_and_multi_save_use_existing_result_workspace(
     window, _project, _sample, _workflow, session, _outcome, successful = (
         auto_fit_gui_problem
     )
-    branches = tuple(_candidate_branch(item, 10) for item in successful[:2])
+    raw_branches = tuple(_candidate_branch(item, 10) for item in successful[:2])
+    branches = tuple(
+        ManualMultiQFitExecutionOutcome(
+            item.branch_result,
+            session.draft,
+            _issue_result_snapshot(
+                item.branch_result,
+                tuple(
+                    ManualModelState(
+                        energy_shift=ManualParameterIntent(0.0),
+                        elastic_area=ManualParameterIntent(1.0),
+                    )
+                    if outcome.status is MultiQFitStatus.SUCCESS
+                    else None
+                    for outcome in item.branch_result.outcomes
+                ),
+                ResultOrigin.AUTO_FIT_BRANCH,
+                item.candidate,
+            ),
+        )
+        for item in raw_branches
+    )
 
     session.result_workspace = FittingWorkspaceState()
     window._retain_auto_fit_branches(session, branches[:1])
@@ -3194,8 +3234,9 @@ def test_autofit_dialog_preview_and_explicit_adoption_are_group_local(
     window._workflow_projects[project] = workflow
     window.show_auto_fit(project, first)
     assert window._active_manual_session is first_session
-    assert window._manual_fit_result is chosen.fit
-    assert window.dataset_view._manual_fit_result is chosen.fit
+    adopted_fit = window._manual_fit_result
+    assert adopted_fit is not None and adopted_fit is not chosen.fit
+    assert window.dataset_view._manual_fit_result is adopted_fit
     assert window.manual_fit_editor.title.text() == "Fitting Parameters"
     adopted_model = first_session.draft.setup(0).model
     assert adopted_model is not None
@@ -3240,8 +3281,8 @@ def test_autofit_dialog_preview_and_explicit_adoption_are_group_local(
     assert detached_model is not None
     assert detached_model.center_group_for(detached_reference) is None
     assert first_session.execution_state(0).lifecycle is ManualFitLifecycle.NEEDS_FIT
-    assert first_session.execution_state(0).fit_result is chosen.fit
-    assert window.dataset_view._manual_fit_result is chosen.fit
+    assert first_session.execution_state(0).fit_result is adopted_fit
+    assert window.dataset_view._manual_fit_result is adopted_fit
     retie_chain = window.manual_fit_editor.parameter_controls[detached_reference].chain
     assert retie_chain is not None
     retie_chain.click()
@@ -3264,8 +3305,8 @@ def test_autofit_dialog_preview_and_explicit_adoption_are_group_local(
         ),
     )
     assert first_session.execution_state(0).lifecycle is ManualFitLifecycle.NEEDS_FIT
-    assert first_session.execution_state(0).fit_result is chosen.fit
-    assert window.dataset_view._manual_fit_result is chosen.fit
+    assert first_session.execution_state(0).fit_result is adopted_fit
+    assert window.dataset_view._manual_fit_result is adopted_fit
     assert first_session.execution_state(1).fit_result is retained_result
     assert second_session.execution_state(0).fit_result is retained_result
 
