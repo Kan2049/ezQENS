@@ -55,6 +55,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ezqens.batch import MultiQBranchResult
 from ezqens.domain import (
     DiagnosticSeverity,
     ImportDiagnostic,
@@ -70,13 +71,14 @@ from ezqens.gui.masking import (
     rebind_auto_mask_state,
 )
 from ezqens.gui.theme import DEFAULT_LAYOUT_TOKENS
+from ezqens.workflow import SavedFitResult
 
 PROJECT_INDEX_ROLE = Qt.ItemDataRole.UserRole
 ITEM_KIND_ROLE = Qt.ItemDataRole.UserRole + 1
 DATASET_INDEX_ROLE = Qt.ItemDataRole.UserRole + 2
 ACTIVE_DATASET_ROLE = Qt.ItemDataRole.UserRole + 3
 Q_METHOD_INDEX_ROLE = Qt.ItemDataRole.UserRole + 4
-SAVED_RESULT_INDEX_ROLE = Qt.ItemDataRole.UserRole + 5
+SAVED_RESULT_ENTRY_ROLE = Qt.ItemDataRole.UserRole + 5
 DATASET_ID_ROLE = Qt.ItemDataRole.UserRole + 6
 Q_METHOD_MIME_TYPE = "application/x-ezqens-q-method"
 
@@ -443,7 +445,8 @@ class WorkspaceSidebar(QWidget):
     import_files_requested = Signal()
     import_folder_requested = Signal()
     dataset_open_requested = Signal(object, object)
-    saved_result_open_requested = Signal(object, object, int)
+    saved_result_open_requested = Signal(object, object, object)
+    saved_result_delete_requested = Signal(object, object, object)
     dataset_added = Signal(object, object)
     dataset_role_changed = Signal(object, object, object)
     dataset_role_change_requested = Signal(object, object, object)
@@ -486,8 +489,7 @@ class WorkspaceSidebar(QWidget):
             Callable[[ProjectState, DatasetState], bool] | None
         ) = None
         self._saved_results_resolver: (
-            Callable[[ProjectState, DatasetState], tuple[tuple[int, str, str], ...]]
-            | None
+            Callable[[ProjectState, DatasetState], tuple[SavedFitResult, ...]] | None
         ) = None
 
         title = QLabel("ezQENS")
@@ -925,9 +927,7 @@ class WorkspaceSidebar(QWidget):
 
     def set_saved_results_resolver(
         self,
-        resolver: Callable[
-            [ProjectState, DatasetState], tuple[tuple[int, str, str], ...]
-        ],
+        resolver: Callable[[ProjectState, DatasetState], tuple[SavedFitResult, ...]],
     ) -> None:
         """Read explicit saved Result identities from the owning application state."""
 
@@ -1110,11 +1110,9 @@ class WorkspaceSidebar(QWidget):
             if kind == "dataset":
                 self.dataset_open_requested.emit(project, dataset)
             else:
-                result_index = item.data(0, SAVED_RESULT_INDEX_ROLE)
-                if isinstance(result_index, int):
-                    self.saved_result_open_requested.emit(
-                        project, dataset, result_index
-                    )
+                entry = item.data(0, SAVED_RESULT_ENTRY_ROLE)
+                if isinstance(entry, SavedFitResult):
+                    self.saved_result_open_requested.emit(project, dataset, entry)
 
     def _show_context_menu(self, position: QPoint) -> None:
         item = self.tree.itemAt(position)
@@ -1153,6 +1151,19 @@ class WorkspaceSidebar(QWidget):
             menu = QMenu(self)
             action = menu.addAction("Remove from Project")
             action.triggered.connect(lambda: self._request_item_removal(item))
+            return menu
+        if item_kind == "saved_result":
+            dataset = self._dataset_for_item(item.parent())
+            entry = item.data(0, SAVED_RESULT_ENTRY_ROLE)
+            if dataset is None or not isinstance(entry, SavedFitResult):
+                return None
+            self.tree.setCurrentItem(item)
+            project = self._projects[project_index]
+            menu = QMenu(self)
+            action = menu.addAction("Delete Result")
+            action.triggered.connect(
+                lambda: self.saved_result_delete_requested.emit(project, dataset, entry)
+            )
             return menu
         if item_kind != "dataset":
             return None
@@ -1343,7 +1354,7 @@ class WorkspaceSidebar(QWidget):
             if item is not None
         }
         selected_result = (
-            current_item.data(0, SAVED_RESULT_INDEX_ROLE)
+            current_item.data(0, SAVED_RESULT_ENTRY_ROLE)
             if current_item is not None
             and current_item.data(0, ITEM_KIND_ROLE) == "saved_result"
             and current_item.data(0, PROJECT_INDEX_ROLE) == project_index
@@ -1370,7 +1381,7 @@ class WorkspaceSidebar(QWidget):
                     child = item.child(child_index)
                     if (
                         child is not None
-                        and child.data(0, SAVED_RESULT_INDEX_ROLE) == selected_result
+                        and child.data(0, SAVED_RESULT_ENTRY_ROLE) is selected_result
                     ):
                         self.tree.setCurrentItem(child)
                         break
@@ -1470,15 +1481,22 @@ class WorkspaceSidebar(QWidget):
                 load_icon(IconName.RESOLUTION, self._resolution_icon_color),
             )
         if self._saved_results_resolver is not None:
-            for result_index, name, kind in self._saved_results_resolver(
+            for entry in self._saved_results_resolver(
                 self._projects[project_index], dataset
             ):
-                child = QTreeWidgetItem([name, kind])
+                child = QTreeWidgetItem(
+                    [
+                        entry.name,
+                        "Multi-Q"
+                        if isinstance(entry.result, MultiQBranchResult)
+                        else "Single-Q",
+                    ]
+                )
                 child.setData(0, PROJECT_INDEX_ROLE, project_index)
                 child.setData(0, DATASET_INDEX_ROLE, dataset_index)
                 child.setData(0, DATASET_ID_ROLE, dataset.workflow_dataset_id)
                 child.setData(0, ITEM_KIND_ROLE, "saved_result")
-                child.setData(0, SAVED_RESULT_INDEX_ROLE, result_index)
+                child.setData(0, SAVED_RESULT_ENTRY_ROLE, entry)
                 child.setFlags(child.flags() & ~Qt.ItemFlag.ItemIsDragEnabled)
                 item.addChild(child)
         return item

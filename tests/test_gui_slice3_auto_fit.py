@@ -23,6 +23,7 @@ from PySide6.QtGui import QWheelEvent
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QDialog,
     QHBoxLayout,
     QLabel,
     QMenu,
@@ -31,7 +32,6 @@ from PySide6.QtWidgets import (
 )
 
 import ezqens.gui.auto_fit as auto_fit_module
-import ezqens.gui.main_window as main_window_module
 from ezqens.batch import (
     MultiQBranchResult,
     MultiQExecutionStatus,
@@ -51,8 +51,6 @@ from ezqens.domain import (
     SpectrumRole,
 )
 from ezqens.fitting import (
-    BACKGROUND_COMPONENT,
-    ELASTIC_COMPONENT,
     AutoFitRecommendation,
     BackgroundModel,
     CandidateFitResult,
@@ -82,21 +80,15 @@ from ezqens.gui.theme import Q_NAVIGATION_SELECTION
 from ezqens.gui.workspace import DatasetState, ProjectState
 from ezqens.workflow import (
     AutoFitCandidateBranchResult,
-    FittingWorkspaceState,
     ManualFitDraft,
     ManualModelState,
-    ManualMultiQFitExecutionOutcome,
-    ManualParameterEdit,
-    ResultOrigin,
     SelectedAutoFitMultiQResult,
     SelectedAutoFitProgressEvent,
     SingleQAutoFitOutcome,
     WorkflowProject,
-    commit_fitting_selection,
     run_single_q_auto_fit,
 )
 from ezqens.workflow.multi_q import _issue_auto_fit_candidate_branch_result
-from ezqens.workflow.results import _issue_result_snapshot
 
 
 @pytest.fixture(scope="module")
@@ -984,9 +976,7 @@ def test_executed_candidate_panels_consume_derived_api_and_reuse_cached_views(
     )
     _select_only(dialog, selected)
     assert not dialog.use_candidate_button.isEnabled()
-    assert dialog.use_candidate_button.toolTip() == (
-        "Run all checked candidates across Q before applying."
-    )
+    assert dialog.save_as_button.isEnabled()
     assert not dialog.fwhm_axes_by_candidate
     assert not dialog.eisf_axes_by_candidate
     assert dialog.fwhm_view_button.isHidden()
@@ -996,7 +986,7 @@ def test_executed_candidate_panels_consume_derived_api_and_reuse_cached_views(
     dialog._sync_controls()
     dialog._draw_comparison()
 
-    assert dialog.use_candidate_button.isEnabled()
+    assert dialog.save_as_button.isEnabled()
     assert dialog.use_candidate_button.toolTip() == ""
     assert not dialog.fwhm_view_button.isChecked()
     assert not dialog.eisf_view_button.isChecked()
@@ -1205,13 +1195,11 @@ def test_executed_candidate_panels_consume_derived_api_and_reuse_cached_views(
     assert dialog.set_candidate_checked(unexecuted_row, True)
     assert dialog.focused_candidate is active_before_check
     assert not dialog.use_candidate_button.isEnabled()
-    assert dialog.use_candidate_button.toolTip() == (
-        "Run all checked candidates across Q before applying."
-    )
+    assert dialog.save_as_button.isEnabled()
     assert unexecuted.candidate not in dialog.fwhm_axes_by_candidate
     assert unexecuted.candidate not in dialog.eisf_axes_by_candidate
     assert dialog.set_candidate_checked(unexecuted_row, False)
-    assert dialog.use_candidate_button.isEnabled()
+    assert dialog.save_as_button.isEnabled()
 
     cached_derived = dict(dialog._derived_results)
     dialog.fwhm_view_button.setChecked(False)
@@ -2603,10 +2591,10 @@ def test_selected_candidates_run_in_background_cache_and_navigate_together(
     assert not dialog.use_candidate_button.isEnabled()
     assert dialog.set_candidate_checked(not_run_row, False)
     assert dialog.progress_label.text() == "Calculated groups: 30 / 30"
-    assert dialog.use_candidate_button.text() == "Save selected results"
-    assert dialog.use_candidate_button.isEnabled()
-    dialog.use_candidate_button.click()
-    assert tuple(item.candidate for item in dialog.accepted_branches) == expected_order
+    assert dialog.save_as_button.text() == "Save As"
+    assert dialog.save_as_button.isEnabled()
+    assert tuple(item.candidate for item in dialog.executed_branches) == expected_order
+    dialog.reject()
 
 
 def test_selected_candidate_cancel_uses_core_contract_and_keeps_prefix(
@@ -2748,66 +2736,6 @@ def test_unavailable_per_q_outcome_is_not_plotted_as_success(
     assert "Total fit" in {line.get_label() for line in successful_axes.lines}
     assert "Total fit" not in {line.get_label() for line in failed_axes.lines}
     dialog.reject()
-
-
-def test_single_apply_and_multi_save_use_existing_result_workspace(
-    auto_fit_gui_problem: AutoFitGuiProblem,
-) -> None:
-    window, _project, _sample, _workflow, session, _outcome, successful = (
-        auto_fit_gui_problem
-    )
-    raw_branches = tuple(_candidate_branch(item, 10) for item in successful[:2])
-    branches = tuple(
-        ManualMultiQFitExecutionOutcome(
-            item.branch_result,
-            session.draft,
-            _issue_result_snapshot(
-                item.branch_result,
-                tuple(
-                    ManualModelState(
-                        energy_shift=ManualParameterIntent(0.0),
-                        elastic_area=ManualParameterIntent(1.0),
-                    )
-                    if outcome.status is MultiQFitStatus.SUCCESS
-                    else None
-                    for outcome in item.branch_result.outcomes
-                ),
-                ResultOrigin.AUTO_FIT_BRANCH,
-                item.candidate,
-            ),
-        )
-        for item in raw_branches
-    )
-
-    session.result_workspace = FittingWorkspaceState()
-    window._retain_auto_fit_branches(session, branches[:1])
-    assert session.result_workspace.current_result is branches[0].branch_result
-    assert session.result_workspace.saved_results == ()
-
-    session.result_workspace = FittingWorkspaceState()
-    window._retain_auto_fit_branches(session, branches)
-    assert session.result_workspace.current_result is branches[0].branch_result
-    assert tuple(
-        item.result for item in session.result_workspace.saved_results
-    ) == tuple(item.branch_result for item in branches)
-    for group_index in range(10):
-        execution = session.execution_state(group_index)
-        assert execution.lifecycle is ManualFitLifecycle.CURRENT
-        assert (
-            execution.fit_result
-            is branches[0].branch_result.outcome(group_index).fit_result
-        )
-    window._activate_manual_session(session)
-    window.dataset_view.set_current_group(1)
-    assert window._manual_fit_result is branches[0].branch_result.outcome(1).fit_result
-    assert (
-        window.dataset_view._manual_fit_result
-        is branches[0].branch_result.outcome(1).fit_result
-    )
-    saved = session.result_workspace.saved_results
-    window._invalidate_manual_session(session, (1,))
-    assert session.result_workspace.current_result is branches[0].branch_result
-    assert session.result_workspace.saved_results == saved
 
 
 def test_autofit_dialog_preview_and_explicit_adoption_are_group_local(
@@ -3168,155 +3096,28 @@ def test_autofit_dialog_preview_and_explicit_adoption_are_group_local(
     assert chosen.fit is fit_identity
     nonpositive_dialog.close()
     dialog.reject()
-    assert dialog.accepted_candidate is None
+    assert dialog.result() == QDialog.DialogCode.Rejected
     assert first_session.draft is before_focus
 
-    adoption_dialog = AutoFitCandidateDialog(outcome, window)
-    adoption_dialog.candidate_list.setCurrentRow(chosen_row)
+    adoption_dialog = window._create_auto_fit_dialog(
+        project, first, workflow, first_session.draft, outcome
+    )
+    _select_only(adoption_dialog, (chosen,))
     adoption_dialog.use_candidate_button.click()
-    assert adoption_dialog.accepted_candidate is chosen
-
-    class FakeDialog:
-        selected: CandidateFitResult | None = None
-
-        def __init__(
-            self,
-            _outcome: object,
-            _parent: object,
-            **_kwargs: object,
-        ) -> None:
-            self.accepted_candidate = self.selected
-            self.accepted_branches: tuple[AutoFitCandidateBranchResult, ...] = ()
-
-        def exec(self) -> int:
-            return 0
-
-    monkeypatch.setattr(main_window_module, "run_single_q_auto_fit", lambda *_: outcome)
-    monkeypatch.setattr(main_window_module, "AutoFitCandidateDialog", FakeDialog)
-
-    before_cancel = first_session.draft
-    window.show_auto_fit(project, first)
-    assert first_session.draft is before_cancel
-    assert first_session.execution_state(1).fit_result is retained_result
-    assert second_session.draft is second_draft
-    assert second_session.execution_state(0).fit_result is retained_result
-
-    FakeDialog.selected = chosen
-    changed_selection = outcome.scientific_context.selection.with_group_range(
-        0,
-        lower_energy=-0.4,
-        upper_energy=0.4,
-    )
-    window._workflow_projects[project] = commit_fitting_selection(
-        workflow,
-        window._workflow_dataset(workflow, first),
-        changed_selection,
-    )
-    messages: list[tuple[str, str]] = []
-    monkeypatch.setattr(
-        main_window_module,
-        "show_message_dialog",
-        lambda _parent, title, message: messages.append((title, message)),
-    )
-    stale_draft = first_session.draft
-    stale_group_zero = first_session.execution_state(0)
-    stale_lifecycle = stale_group_zero.lifecycle
-    stale_result = stale_group_zero.fit_result
-    window.show_auto_fit(project, first)
-    assert messages and messages[-1][0] == "AutoFit"
-    assert first_session.draft is stale_draft
-    assert first_session.execution_state(0).lifecycle is stale_lifecycle
-    assert first_session.execution_state(0).fit_result is stale_result
-    assert first_session.execution_state(1).fit_result is retained_result
-    assert second_session.draft is second_draft
-    assert second_session.execution_state(0).fit_result is retained_result
-
-    window._workflow_projects[project] = workflow
-    window.show_auto_fit(project, first)
-    assert window._active_manual_session is first_session
-    adopted_fit = window._manual_fit_result
-    assert adopted_fit is not None and adopted_fit is not chosen.fit
+    adopted_fit = first_session.result_workspace.current_result
+    assert isinstance(adopted_fit, FitResult)
+    assert window._manual_fit_result is adopted_fit
     assert window.dataset_view._manual_fit_result is adopted_fit
-    assert window.manual_fit_editor.title.text() == "Fitting Parameters"
+    np.testing.assert_array_equal(
+        adopted_fit.evaluation.total, chosen.fit.evaluation.total
+    )
     adopted_model = first_session.draft.setup(0).model
     assert adopted_model is not None
-    assert set(window.manual_fit_editor.parameter_controls) == set(
-        adopted_model.parameter_references()
-    )
-    slope_reference = ParameterReference(
-        BACKGROUND_COMPONENT,
-        ParameterFamily.SLOPE,
-    )
-    assert slope_reference in window.manual_fit_editor.parameter_controls
+    assert adopted_model.center_groups
     assert adopted_model.b1 == ManualParameterIntent(0.0, free=False)
     assert window.manual_fit_editor.model_label.text().endswith("B0")
-    assert adopted_model.energy_shift is None
-    assert len(adopted_model.center_groups) == 1
-    center_references = tuple(
-        reference
-        for reference in adopted_model.parameter_references()
-        if reference.family is ParameterFamily.CENTER
-    )
-    assert (
-        adopted_model.center_group_members(adopted_model.center_groups[0].group_id)
-        == center_references
-    )
-    for reference in center_references:
-        chain = window.manual_fit_editor.parameter_controls[reference].chain
-        assert chain is not None
-        assert chain.isChecked()
-        assert chain.property("tieColor") == "accent"
     assert first_session.execution_state(1).fit_result is retained_result
-    assert first_session.execution_state(1).lifecycle is ManualFitLifecycle.CURRENT
     assert second_session.draft is second_draft
     assert second_session.execution_state(0).fit_result is retained_result
-
-    detached_reference = center_references[-1]
-    detached_chain = window.manual_fit_editor.parameter_controls[
-        detached_reference
-    ].chain
-    assert detached_chain is not None
-    detached_chain.click()
-    detached_model = first_session.draft.setup(0).model
-    assert detached_model is not None
-    assert detached_model.center_group_for(detached_reference) is None
-    assert first_session.execution_state(0).lifecycle is ManualFitLifecycle.NEEDS_FIT
-    assert first_session.execution_state(0).fit_result is adopted_fit
-    assert window.dataset_view._manual_fit_result is adopted_fit
-    retie_chain = window.manual_fit_editor.parameter_controls[detached_reference].chain
-    assert retie_chain is not None
-    retie_chain.click()
-    retied_model = first_session.draft.setup(0).model
-    assert retied_model is not None
-    assert retied_model.center_group_for(detached_reference) is not None
-    assert first_session.execution_state(1).fit_result is retained_result
-    assert second_session.execution_state(0).fit_result is retained_result
-
-    area_reference = ParameterReference(ELASTIC_COMPONENT, ParameterFamily.AREA)
-    area = adopted_model.parameter_intent(area_reference)
-    window._update_manual_parameter(
-        area_reference,
-        ManualParameterEdit(
-            current_value=area.current_value + 0.01,
-            user_lower_limit=area.user_lower_limit,
-            user_upper_limit=area.user_upper_limit,
-            free=area.free,
-            user_bounds_enabled=area.user_bounds_enabled,
-        ),
-    )
-    assert first_session.execution_state(0).lifecycle is ManualFitLifecycle.NEEDS_FIT
-    assert first_session.execution_state(0).fit_result is adopted_fit
-    assert window.dataset_view._manual_fit_result is adopted_fit
-    assert first_session.execution_state(1).fit_result is retained_result
-    assert second_session.execution_state(0).fit_result is retained_result
-
-    controls = [
-        *window.findChildren(QPushButton),
-        *window.findChildren(QToolButton),
-    ]
-    control_text = {control.text() for control in controls}
-    assert not {"MultiFit", "Fit All Groups"} & control_text
-    assert window.inspector_button.text() == ""
-    assert window.manual_fit_action.text() == "Fitting Parameters…"
-    assert window.auto_fit_button.text() == "AutoFit…"
+    assert adoption_dialog.result() == QDialog.DialogCode.Accepted
     window.close()

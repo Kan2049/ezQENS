@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ezqens.batch import MultiQFitOutcome, MultiQFitStatus
+from ezqens.batch import MultiQFitOutcome
 from ezqens.fitting import (
     BACKGROUND_COMPONENT,
     ELASTIC_COMPONENT,
@@ -554,12 +554,6 @@ class ManualFitEditor(QFrame):
         self.clear_model_button.setEnabled(model is not None)
         # Editable readiness/lifecycle does not replace immutable Result truth.
         rendered_fit = fit_result
-        if result_outcome is not None:
-            rendered_fit = (
-                result_outcome.fit_result
-                if result_outcome.status is MultiQFitStatus.SUCCESS
-                else None
-            )
         self._render_status(
             readiness,
             lifecycle,
@@ -790,23 +784,7 @@ class ManualFitEditor(QFrame):
             result.configuration.parameter_references(),
             start=1,
         ):
-            try:
-                estimate = result.parameter_by_reference(reference)
-            except KeyError:
-                slope = result.configuration.b1
-                adopted_b0_slope = (
-                    reference.component == BACKGROUND_COMPONENT
-                    and reference.family is ParameterFamily.SLOPE
-                    and result.configuration.background is BackgroundModel.LINEAR
-                    and slope is not None
-                    and not slope.free
-                    and slope.initial_value == 0.0
-                    and result.fitted_model is not None
-                    and result.fitted_model.background is BackgroundModel.CONSTANT
-                )
-                if adopted_b0_slope:
-                    continue
-                raise
+            estimate = result.parameter_by_reference(reference)
             name_text = self._result_reference_label(result, reference)
             metadata = self._result_metadata.get(
                 reference, _fallback_metadata(reference)

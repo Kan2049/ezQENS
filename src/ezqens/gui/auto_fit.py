@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListView,
     QListWidget,
     QListWidgetItem,
@@ -94,6 +95,40 @@ _MAX_COMPARISON_COLUMNS = 3
 _COMPARISON_BASE_LEFT_MARGIN = 0.07
 
 type _ComparisonEntry = tuple[CandidateFitResult, FitResult | None, str]
+
+
+class ResultNamesDialog(QDialog):
+    """Collect one explicit saved name for each selected AutoFit Result."""
+
+    def __init__(self, defaults: tuple[str, ...], parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Save Results As")
+        self.name_edits = tuple(QLineEdit(name) for name in defaults)
+        layout = QVBoxLayout(self)
+        for label, edit in zip(defaults, self.name_edits, strict=True):
+            row = QHBoxLayout()
+            row.addWidget(QLabel(label))
+            row.addWidget(edit, 1)
+            layout.addLayout(row)
+            edit.textChanged.connect(self._validate_names)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        self.save_button = QPushButton("Save As")
+        self.save_button.setDefault(True)
+        self.save_button.clicked.connect(self.accept)
+        buttons.addWidget(cancel)
+        buttons.addWidget(self.save_button)
+        layout.addLayout(buttons)
+        self._validate_names()
+
+    @property
+    def names(self) -> tuple[str, ...]:
+        return tuple(edit.text() for edit in self.name_edits)
+
+    def _validate_names(self) -> None:
+        self.save_button.setEnabled(all(name.strip() for name in self.names))
 
 
 class _CandidateRow(QWidget):
@@ -287,6 +322,8 @@ class _SelectedCandidatesWorker(QObject):
 class AutoFitCandidateDialog(QDialog):
     """Compare AutoFit candidates and retain explicitly selected Q branches."""
 
+    finalization_requested = Signal(str, object)
+
     def __init__(
         self,
         outcome: SingleQAutoFitOutcome,
@@ -294,6 +331,8 @@ class AutoFitCandidateDialog(QDialog):
         *,
         project: WorkflowProject | None = None,
         draft: ManualFitDraft | None = None,
+        has_current_result: bool = False,
+        has_saved_association: bool = False,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("autoFitDialog")
@@ -304,8 +343,8 @@ class AutoFitCandidateDialog(QDialog):
         self.outcome = outcome
         self._project = project
         self._draft = draft
-        self.accepted_candidate: CandidateFitResult | None = None
-        self.accepted_branches: tuple[AutoFitCandidateBranchResult, ...] = ()
+        self.has_current_result_at_open = has_current_result
+        self.has_saved_association_at_open = has_saved_association
         self._candidates = outcome.recommendation.candidate_results
         self._lorentzian_styles_by_candidate = {
             candidate.candidate: self._anchor_lorentzian_styles(candidate)
@@ -561,13 +600,23 @@ class AutoFitCandidateDialog(QDialog):
         self.use_candidate_button = QPushButton("Apply")
         self.use_candidate_button.setObjectName("autoFitUseCandidateButton")
         self.use_candidate_button.setDefault(True)
-        self.use_candidate_button.clicked.connect(self._use_focused_candidate)
+        self.use_candidate_button.clicked.connect(
+            lambda: self._request_finalization("apply")
+        )
+        self.save_button = QPushButton("Save")
+        self.save_button.clicked.connect(lambda: self._request_finalization("save"))
+        self.save_as_button = QPushButton("Save As")
+        self.save_as_button.clicked.connect(
+            lambda: self._request_finalization("save_as")
+        )
         buttons = QHBoxLayout()
         buttons.setContentsMargins(0, 0, 0, 0)
         buttons.setSpacing(6)
         buttons.addStretch(1)
         buttons.addWidget(self.cancel_button)
         buttons.addWidget(self.use_candidate_button)
+        buttons.addWidget(self.save_button)
+        buttons.addWidget(self.save_as_button)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 14, 16, 14)
@@ -640,8 +689,6 @@ class AutoFitCandidateDialog(QDialog):
         if self._running:
             self.request_cancel()
             return
-        self.accepted_candidate = None
-        self.accepted_branches = ()
         super().reject()
 
     def closeEvent(self, event: QCloseEvent) -> None:
@@ -785,30 +832,27 @@ class AutoFitCandidateDialog(QDialog):
         self.run_selected_button.setEnabled(
             has_execution_context and bool(pending) and not self._running
         )
-        if not has_execution_context:
-            candidate = self.focused_candidate
-            self.use_candidate_button.setText("Use Candidate")
-            self.use_candidate_button.setEnabled(
-                not self._running and candidate is not None and candidate.success
-            )
-        else:
-            self.use_candidate_button.setText(
-                "Save selected results" if len(checked) > 1 else "Apply"
-            )
-            finalization_ready = (
-                bool(checked)
-                and not self._running
-                and all(item.candidate in self._executed_branches for item in checked)
-            )
-            self.use_candidate_button.setEnabled(finalization_ready)
-            self.use_candidate_button.setToolTip(
-                "Run all checked candidates across Q before applying."
-                if checked
-                and any(
-                    item.candidate not in self._executed_branches for item in checked
-                )
-                else ""
-            )
+        single = len(checked) == 1
+        ready = has_execution_context and bool(checked) and not self._running
+        self.use_candidate_button.setVisible(
+            not self.has_current_result_at_open and len(checked) < 2
+        )
+        self.use_candidate_button.setEnabled(
+            ready and single and not self.has_current_result_at_open
+        )
+        self.save_button.setVisible(
+            self.has_current_result_at_open and len(checked) < 2
+        )
+        self.save_button.setEnabled(
+            ready
+            and single
+            and self.has_current_result_at_open
+            and self.has_saved_association_at_open
+        )
+        self.save_as_button.setVisible(
+            self.has_current_result_at_open or len(checked) > 1
+        )
+        self.save_as_button.setEnabled(ready)
         executed_checked = sum(
             item.candidate in self._executed_branches for item in checked
         )
@@ -1948,30 +1992,28 @@ class AutoFitCandidateDialog(QDialog):
         else:
             self.reject()
 
-    def _selected_executed_branches(
-        self,
-    ) -> tuple[AutoFitCandidateBranchResult, ...]:
-        checked = self.checked_candidates
-        if not checked or any(
-            item.candidate not in self._executed_branches for item in checked
-        ):
-            return ()
-        return tuple(self._executed_branches[item.candidate] for item in checked)
-
-    def _use_focused_candidate(self) -> None:
-        if self._project is None or self._draft is None:
-            candidate = self.focused_candidate
-            if candidate is None or not candidate.success:
-                return
-            self.accepted_candidate = candidate
-            self.accept()
+    def _request_finalization(self, action: str) -> None:
+        button = {
+            "apply": self.use_candidate_button,
+            "save": self.save_button,
+            "save_as": self.save_as_button,
+        }[action]
+        if not button.isEnabled() or button.isHidden():
             return
-        branches = self._selected_executed_branches()
-        if not branches:
-            return
-        self.accepted_branches = branches
-        self.accepted_candidate = branches[0].anchor_evidence
-        self.accept()
+        # Only exact evaluation evidence owns a branch; model labels/codes are
+        # not a scientific correspondence rule.
+        selections = tuple(
+            next(
+                (
+                    branch
+                    for branch in self._executed_branches.values()
+                    if branch.anchor_evidence is candidate
+                ),
+                candidate,
+            )
+            for candidate in self.checked_candidates
+        )
+        self.finalization_requested.emit(action, selections)
 
     def _capture_view_state(self) -> None:
         if self.spectrum_axes is not None:

@@ -450,9 +450,31 @@ lifecycle rather than permanently different result types.
 
 A Result belongs to concrete data and fitting scope. Editing a reusable Method
 must not silently rewrite an existing Result. Re-running an edited Current Fit
-replaces the application's Current Result; only explicit `Save as New Fit`
-retains an additional Result. Method Save and Save as New Method follow the
-analogous workflow.
+replaces Current without rewriting a saved snapshot. Save overwrites only the
+entry associated with Current; Save As appends a snapshot and associates Current
+with it. Method Save and Save as New Method follow the analogous workflow.
+
+AutoFit finalizes each checked selection independently: a candidate not executed
+across Q uses its original Single-Q evaluation evidence; an executed candidate
+uses its complete execution-issued Multi-Q branch record. Mixed selections
+retain those respective scopes.
+
+AutoFit dialog actions use the Result state captured when the dialog opened.
+With exactly one checked candidate and no Current Result, offer Apply. With one
+checked candidate and an existing Current, offer Save and Save As; Save is
+disabled if Current had no associated saved entry. With two or more checked
+candidates, offer Save As only. Results produced inside the dialog do not change
+these opening-state rules.
+
+AutoFit Apply installs the selected snapshot as Current together with the
+workflow-adopted Manual draft and per-Q execution state, then closes the dialog.
+Save performs that adoption and overwrites Current's associated saved entry,
+retaining the association, then closes. AutoFit Save As uses one editable name
+per selection, defaulting to its existing candidate display label and requiring
+non-empty names. It appends all selected snapshots atomically while leaving
+Current, its association, the Manual draft, and per-Q state unchanged; the dialog
+stays open and Workspace history updates immediately. Adoption failure changes
+none of that application state. Names have no uniqueness requirement.
 
 The former `.qensfit` project-container proposal is not a permanent contract.
 The final container format and extension remain unresolved until persistence

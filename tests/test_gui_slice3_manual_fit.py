@@ -74,7 +74,7 @@ from ezqens.gui.manual_fit_all_q import (
 )
 from ezqens.gui.theme import indicator_tokens_for, tokens_for
 from ezqens.gui.workspace import (
-    SAVED_RESULT_INDEX_ROLE,
+    SAVED_RESULT_ENTRY_ROLE,
     DatasetAnalysisState,
     DatasetState,
     ProjectState,
@@ -4771,7 +4771,9 @@ def test_fit_all_q_blocked_outcome_keeps_its_own_diagnostic(
             ResultOrigin.MANUAL_FIT_ALL_Q,
         ),
     )
-    window._project_branch_into_manual_session(session, branch)
+    snapshot = session.result_workspace.current
+    assert snapshot is not None
+    window._project_current_snapshot(session, snapshot)
     window.dataset_view.set_current_group(1)
 
     assert session.draft is draft
@@ -4838,7 +4840,9 @@ def test_fit_all_q_other_target_statuses_follow_branch_outcome(
             ResultOrigin.MANUAL_FIT_ALL_Q,
         ),
     )
-    window._project_branch_into_manual_session(session, branch)
+    snapshot = session.result_workspace.current
+    assert snapshot is not None
+    window._project_current_snapshot(session, snapshot)
     window.dataset_view.set_current_group(1)
 
     assert session.draft is draft
@@ -4937,7 +4941,7 @@ def test_fit_all_q_async_navigation_status_and_result_save_lifecycle(
     result_item = _saved_tree_item(_dataset_tree_item(window, project, sample_state), 0)
     assert (result_item.text(0), result_item.text(1)) == ("Across Q", "Multi-Q")
     window.workspace._on_item_double_clicked(result_item, 0)
-    assert session.viewed_saved_result_index == 0
+    assert session.viewed_saved_result is session.result_workspace.saved_results[0]
     assert session.result_workspace.current_result is branch
     assert window.dataset_view.fit_status_descriptions == ("Success", "Success")
     window._run_manual_fit()
@@ -4974,7 +4978,7 @@ def test_saved_result_workspace_nodes_follow_explicit_save_lifecycle(
     assert dataset_item.isExpanded()
     result_a = _saved_tree_item(dataset_item, 0)
     assert (result_a.text(0), result_a.text(1)) == ("Result A", "Single-Q")
-    assert result_a.data(0, SAVED_RESULT_INDEX_ROLE) == 0
+    assert result_a.data(0, SAVED_RESULT_ENTRY_ROLE) is saved_a
 
     window._run_manual_fit()
     second_fit = session.result_workspace.current_result
@@ -4996,12 +5000,9 @@ def test_saved_result_workspace_nodes_follow_explicit_save_lifecycle(
         "Result B",
     ]
     assert [
-        _saved_tree_item(dataset_item, i).data(0, SAVED_RESULT_INDEX_ROLE)
+        _saved_tree_item(dataset_item, i).data(0, SAVED_RESULT_ENTRY_ROLE)
         for i in range(2)
-    ] == [
-        0,
-        1,
-    ]
+    ] == list(session.result_workspace.saved_results)
     assert session.result_workspace.current_saved_result_index == 1
     assert session.result_workspace.saved_results[0].result is second_fit
 
@@ -5012,7 +5013,7 @@ def test_saved_result_workspace_nodes_follow_explicit_save_lifecycle(
     window.workspace.tree.setCurrentItem(saved_item)
     assert session.result_workspace.current_result is current_fit
     window.workspace._on_item_double_clicked(saved_item, 0)
-    assert session.viewed_saved_result_index == 0
+    assert session.viewed_saved_result is session.result_workspace.saved_results[0]
     assert session.result_workspace.current_result is current_fit
     assert session.result_workspace.saved_results[0].result is second_fit
     assert window.dataset_view._manual_fit_result is second_fit
@@ -5023,7 +5024,7 @@ def test_saved_result_workspace_nodes_follow_explicit_save_lifecycle(
     window.workspace._on_item_double_clicked(
         _dataset_tree_item(window, project, sample), 0
     )
-    assert session.viewed_saved_result_index is None
+    assert session.viewed_saved_result is None
     assert window.dataset_view._manual_fit_result is current_fit
     assert window._open_dataset is sample
     window.close()
@@ -5044,7 +5045,7 @@ def test_saved_result_does_not_overlay_changed_resolution_context(
     window.workspace._on_item_double_clicked(
         _saved_tree_item(_dataset_tree_item(window, project, sample), 0), 0
     )
-    assert session.viewed_saved_result_index == 0
+    assert session.viewed_saved_result is session.result_workspace.saved_results[0]
     assert window.dataset_view._manual_fit_result is saved.result
     resolution = next(
         item
@@ -5059,7 +5060,7 @@ def test_saved_result_does_not_overlay_changed_resolution_context(
         ),
     )
     window.workspace._replace_dataset(project, resolution, changed)
-    assert session.viewed_saved_result_index is None
+    assert session.viewed_saved_result is None
     assert window.dataset_view._manual_fit_result is None
     assert session.result_workspace.saved_results[0] is saved
     assert _dataset_tree_item(window, project, sample).childCount() == 1
@@ -5073,7 +5074,7 @@ def test_saved_result_does_not_overlay_changed_resolution_context(
         _saved_tree_item(_dataset_tree_item(window, project, sample), 0), 0
     )
     assert messages and "earlier scientific context" in messages[0]
-    assert session.viewed_saved_result_index is None
+    assert session.viewed_saved_result is None
     assert session.result_workspace.saved_results[0] is saved
     window.close()
 
@@ -5093,7 +5094,7 @@ def test_open_saved_result_is_dismissed_by_q_replacement(
     window.workspace._on_item_double_clicked(
         _saved_tree_item(_dataset_tree_item(window, project, sample), 0), 0
     )
-    assert session.viewed_saved_result_index == 0
+    assert session.viewed_saved_result is session.result_workspace.saved_results[0]
 
     updated = window.workspace.assign_q_bins(
         project,
@@ -5101,7 +5102,7 @@ def test_open_saved_result_is_dismissed_by_q_replacement(
         QBins.from_q_values((0.45, 0.65)),
     )
     assert updated is not None
-    assert session.viewed_saved_result_index is None
+    assert session.viewed_saved_result is None
     assert window.dataset_view._manual_fit_result is None
     assert session.result_workspace.saved_results[0] is saved
     assert _saved_tree_item(_dataset_tree_item(window, project, updated), 0).text(
@@ -5125,13 +5126,13 @@ def test_saved_result_history_survives_sample_role_change(
     window.workspace._on_item_double_clicked(
         _saved_tree_item(_dataset_tree_item(window, project, sample), 0), 0
     )
-    assert session.viewed_saved_result_index == 0
+    assert session.viewed_saved_result is session.result_workspace.saved_results[0]
 
     re_roled = window.change_dataset_role(project, sample, SpectrumRole.RESOLUTION)
     assert re_roled is not None
     assert session is window._manual_sessions[(project, sample.workflow_dataset_id)]
     assert not session.draft_available
-    assert session.viewed_saved_result_index is None
+    assert session.viewed_saved_result is None
     assert session.result_workspace.saved_results == (saved,)
     assert session.result_workspace.current_result is None
     assert window._active_manual_session is None
@@ -5150,7 +5151,7 @@ def test_saved_result_history_survives_sample_role_change(
         _saved_tree_item(_dataset_tree_item(window, project, re_roled), 0), 0
     )
     assert messages and "earlier scientific context" in messages[0]
-    assert session.viewed_saved_result_index is None
+    assert session.viewed_saved_result is None
     assert session.result_workspace.saved_results[0] is saved
     restored = window.change_dataset_role(project, re_roled, SpectrumRole.SAMPLE)
     assert restored is not None
