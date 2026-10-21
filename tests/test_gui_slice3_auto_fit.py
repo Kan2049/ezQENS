@@ -3104,7 +3104,9 @@ def test_autofit_dialog_preview_and_explicit_adoption_are_group_local(
     )
     _select_only(adoption_dialog, (chosen,))
     adoption_dialog.use_candidate_button.click()
-    adopted_fit = first_session.result_workspace.current_result
+    current_result = first_session.result_workspace.current_result
+    assert current_result is not None
+    adopted_fit = current_result.point(0).fit_result
     assert isinstance(adopted_fit, FitResult)
     assert window._manual_fit_result is adopted_fit
     assert window.dataset_view._manual_fit_result is adopted_fit

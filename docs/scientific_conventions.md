@@ -281,6 +281,22 @@ uncertainty is explicitly unavailable rather than zero. Structurally exact
 elastic-only and Lorentzian-only EISF values likewise carry no estimated
 statistical uncertainty.
 
+For a unified per-Q Result, derived values are computed independently from each
+context-valid fitted Q; stale-context and derived-excluded Qs contribute no
+derived values. Evidence is current exactly when that Q's measured points,
+representative Q, fitting range/effective exclusions, prepared-resolution
+content/acceptance provenance, and energy unit equal the retained fit-time
+values. Aligned NaNs follow exact measured-point correspondence semantics.
+Runtime object identity and changes to other Qs do not determine scientific
+validity. A saved Result of the same stable Sample and Q-group count can always
+be loaded; changed inputs retain the fit evidence and working state while
+making the affected Q need refitting and unavailable for derivation.
+FWHM and relaxation-time series link only identical stable
+Lorentzian identities across Q, even when other model components differ. The
+EISF denominator uses every fitted Lorentzian at that Q. An EISF series includes
+Qs with an elastic component; no cross-Q composition matching or reconstruction
+is performed. Branch-only `derive_qens` retains its existing branch contract.
+
 ## 6. Default fitting method
 
 The default optimizer is `scipy.optimize.least_squares`. For data value
@@ -543,6 +559,20 @@ Component identities and Lorentzian numbering follow the anchor model through
 the branch. The workflow does not automatically relabel components by FWHM,
 area, or another matching heuristic. Ambiguous decomposition retains identity
 and exposes existing fit/identifiability limitations.
+
+At AutoFit adoption into the unified Current Result, fixed standard candidate
+Lorentzian identifiers are replaced by fresh identities; one selected branch
+uses those identities consistently across its Q fits. A Single-Q AutoFit
+adoption at a Q with an existing fit of the same elastic/background/Lorentzian
+composition inherits its one-Lorentzian identity, or pairs two Lorentzians by
+their fitted FWHM order (narrower to narrower) with explicit pairing provenance.
+An exact equality of the two FWHMs in either fit makes width pairing ambiguous:
+fresh identities are assigned without a pairing mark or near-equality threshold.
+Other compositions receive fresh identities. A user swap exchanges two
+Lorentzian identities at one fitted Q exactly, including typed references,
+evaluation-component labels, and editable state; it changes no fitted values,
+errors, covariance, statistics, or curves. Neither adoption nor derivation
+re-pairs components across Q by position, width, or value.
 
 Per-Q execution states are `SUCCESS`, `FAILED`, `BLOCKED`, `EXCLUDED`, and
 `NOT_RUN`; branch states include `COMPLETED` and `CANCELLED`. Completed results

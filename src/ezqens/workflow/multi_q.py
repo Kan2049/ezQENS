@@ -6,6 +6,7 @@ import math
 from collections.abc import Callable, Collection, Sequence
 from dataclasses import InitVar, dataclass, field, replace
 from enum import StrEnum
+from uuid import uuid4
 
 import numpy as np
 
@@ -16,6 +17,7 @@ from ezqens.batch import (
     MultiQFitStatus,
     execute_multi_q_branch,
 )
+from ezqens.derived import DerivedUnifiedQENSResult, derive_unified_qens
 from ezqens.domain import QBins
 from ezqens.fitting import (
     ELASTIC_COMPONENT,
@@ -31,6 +33,7 @@ from ezqens.fitting import (
     SpectralModelDefinition,
     StandardModelCandidate,
     convert_standard_auto_fit_result_to_manual,
+    relabel_fit_components,
 )
 from ezqens.preprocessing import EdgePaddingDetectionResult, FittingSelection
 from ezqens.resolution import PreparedResolution
@@ -53,12 +56,21 @@ from .manual_state import (
     materialize_manual_model,
     replace_parameter_intent,
 )
-from .project import ManualFitContext, WorkflowProject, resolve_manual_fit_context
+from .project import (
+    ManualFitContext,
+    WorkflowProject,
+    resolve_manual_fit_context,
+)
 from .results import (
+    IdentityMark,
     ResultOrigin,
     ResultSnapshot,
+    UnifiedResult,
     _is_issued_result_snapshot,
     _issue_result_snapshot,
+    _relabel_manual_state,
+    _replace_result_point,
+    fit_evidence_is_current,
 )
 
 
@@ -1097,18 +1109,184 @@ class SavedFittingMethod:
     method: FittingMethod
 
 
+_SAVED_ENTRY_ISSUER = object()
+_WORKING_COPY_ISSUER = object()
+
+
+@dataclass(frozen=True, slots=True)
+class ResultWorkingCopy:
+    """One item's Result and separate editable, possibly unfitted parameters."""
+
+    snapshot: ResultSnapshot | None
+    draft_states: tuple[ManualModelState | None, ...]
+    sample_identity: tuple[str, str]
+    _issuer: InitVar[object | None] = None
+    _issued: object = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self, _issuer: object | None) -> None:
+        if _issuer is not _WORKING_COPY_ISSUER:
+            raise ValueError("working copies must be issued by the workflow")
+        states = tuple(self.draft_states)
+        if any(
+            item is not None and not isinstance(item, ManualModelState)
+            for item in states
+        ):
+            raise ValueError("working copy requires Manual parameter states")
+        if self.snapshot is not None:
+            if not _is_issued_result_snapshot(self.snapshot):
+                raise ValueError("working copy requires an issued ResultSnapshot")
+            if (
+                len(states) != self.snapshot.result.total_count
+                or self.sample_identity != self.snapshot.result.sample_identity
+            ):
+                raise ValueError(
+                    "working copy must match its Result Sample and Q groups"
+                )
+        if len(self.sample_identity) != 2 or any(
+            not isinstance(value, str) or not value.strip()
+            for value in self.sample_identity
+        ):
+            raise ValueError("working copy requires its Project/Sample identity")
+        object.__setattr__(self, "draft_states", states)
+        object.__setattr__(self, "_issued", _WORKING_COPY_ISSUER)
+
+    @property
+    def has_result(self) -> bool:
+        return self.snapshot is not None
+
+    @property
+    def modified(self) -> bool:
+        return self.has_result
+
+    @property
+    def has_draft_edits(self) -> bool:
+        baseline = (
+            (None,) * len(self.draft_states)
+            if self.snapshot is None
+            else self.snapshot.working_states
+        )
+        return any(
+            current is not fitted
+            for current, fitted in zip(self.draft_states, baseline, strict=True)
+        )
+
+
+def _issue_working_copy(
+    snapshot: ResultSnapshot | None,
+    draft_states: tuple[ManualModelState | None, ...],
+    sample_identity: tuple[str, str],
+) -> ResultWorkingCopy:
+    return ResultWorkingCopy(
+        snapshot, draft_states, sample_identity, _issuer=_WORKING_COPY_ISSUER
+    )
+
+
+def _is_issued_working_copy(value: object) -> bool:
+    return (
+        isinstance(value, ResultWorkingCopy)
+        and getattr(value, "_issued", None) is _WORKING_COPY_ISSUER
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class SavedFitResult:
     name: str
     snapshot: ResultSnapshot
+    best: bool = False
+    draft_states: tuple[ManualModelState | None, ...] | None = None
+    modified_copy: ResultWorkingCopy | None = None
+    _issuer: InitVar[object | None] = None
+    _issued: object = field(init=False, repr=False, compare=False)
+    _saved_copy: ResultWorkingCopy = field(init=False, repr=False, compare=False)
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, _issuer: object | None) -> None:
+        if _issuer is not _SAVED_ENTRY_ISSUER:
+            raise ValueError("saved entries must be issued by the workflow")
+        if not isinstance(self.name, str) or not self.name.strip():
+            raise ValueError("saved Result name must be nonempty")
         if not _is_issued_result_snapshot(self.snapshot):
             raise ValueError("saved Result requires an execution snapshot")
+        if not isinstance(self.best, bool):
+            raise ValueError("best mark must be boolean")
+        states = (
+            self.snapshot.working_states
+            if self.draft_states is None
+            else tuple(self.draft_states)
+        )
+        saved_copy = _issue_working_copy(
+            self.snapshot, states, self.snapshot.result.sample_identity
+        )
+        modified = self.modified_copy
+        if modified is not None and (
+            not _is_issued_working_copy(modified)
+            or modified.snapshot is None
+            or modified.sample_identity != saved_copy.sample_identity
+            or len(modified.draft_states) != len(states)
+        ):
+            raise ValueError("modified copy must belong to the saved Result's Sample")
+        object.__setattr__(self, "draft_states", states)
+        object.__setattr__(self, "_saved_copy", saved_copy)
+        object.__setattr__(self, "_issued", _SAVED_ENTRY_ISSUER)
 
     @property
-    def result(self) -> FitResult | MultiQBranchResult:
+    def result(self) -> UnifiedResult:
         return self.snapshot.result
+
+    @property
+    def working_copy(self) -> ResultWorkingCopy:
+        return self._saved_copy if self.modified_copy is None else self.modified_copy
+
+    @property
+    def has_result(self) -> bool:
+        return True
+
+    @property
+    def modified(self) -> bool:
+        return self.working_copy.snapshot is not self.snapshot
+
+    @property
+    def has_draft_edits(self) -> bool:
+        return self.working_copy.has_draft_edits
+
+
+def _issue_saved_result(
+    name: str,
+    snapshot: ResultSnapshot,
+    *,
+    best: bool = False,
+    draft_states: tuple[ManualModelState | None, ...] | None = None,
+    modified_copy: ResultWorkingCopy | None = None,
+) -> SavedFitResult:
+    return SavedFitResult(
+        name,
+        snapshot,
+        best,
+        draft_states,
+        modified_copy,
+        _issuer=_SAVED_ENTRY_ISSUER,
+    )
+
+
+def _copy_saved_result(
+    entry: SavedFitResult,
+    *,
+    name: str | None = None,
+    best: bool | None = None,
+) -> SavedFitResult:
+    return _issue_saved_result(
+        entry.name if name is None else name,
+        entry.snapshot,
+        best=entry.best if best is None else best,
+        draft_states=entry.draft_states,
+        modified_copy=entry.modified_copy,
+    )
+
+
+def _is_issued_saved_result(entry: object) -> bool:
+    return (
+        isinstance(entry, SavedFitResult)
+        and getattr(entry, "_issued", None) is _SAVED_ENTRY_ISSUER
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1116,46 +1294,150 @@ class FittingWorkspaceState:
     """Minimal in-memory working/saved Method and Result lifecycle."""
 
     working_method: FittingMethod | None = None
-    current: ResultSnapshot | None = None
     saved_methods: tuple[SavedFittingMethod, ...] = ()
     saved_results: tuple[SavedFitResult, ...] = ()
-    current_saved_result_index: int | None = None
+    untitled: ResultWorkingCopy | None = None
+    active_item: SavedFitResult | ResultWorkingCopy | None = None
 
     def __post_init__(self) -> None:
-        if self.current is not None and not _is_issued_result_snapshot(self.current):
-            raise ValueError("Current must be a ResultSnapshot")
         object.__setattr__(self, "saved_methods", tuple(self.saved_methods))
         saved_results = tuple(self.saved_results)
-        if any(
-            not isinstance(item, SavedFitResult)
-            or not _is_issued_result_snapshot(item.snapshot)
-            for item in saved_results
-        ):
+        if any(not _is_issued_saved_result(item) for item in saved_results):
             raise ValueError("saved Results must be named snapshots")
+        if sum(item.best for item in saved_results) > 1:
+            raise ValueError("a Dataset may have at most one Best Result")
         object.__setattr__(self, "saved_results", saved_results)
-        index = self.current_saved_result_index
-        if index is None:
-            return
-        if self.current is None:
-            raise ValueError("a saved-Result association requires a current Result")
-        if isinstance(index, bool) or not isinstance(index, int):
-            raise ValueError("current_saved_result_index must be an integer or None")
-        if index < 0 or index >= len(self.saved_results):
-            raise ValueError("current_saved_result_index is out of range")
+        if self.untitled is not None and not _is_issued_working_copy(self.untitled):
+            raise ValueError("untitled item must be issued by the workflow")
+        active = self.active_item
+        if active is not None and not (
+            any(active is entry for entry in saved_results)
+            or active is self.untitled
+            and _is_issued_working_copy(active)
+        ):
+            raise ValueError("active item must belong to this workspace")
+        if self.untitled is not None and active is not self.untitled:
+            raise ValueError("an untitled item must be active")
+        copies = [entry.working_copy for entry in saved_results]
+        if self.untitled is not None:
+            copies.append(self.untitled)
+        if copies and any(
+            item.sample_identity != copies[0].sample_identity for item in copies
+        ):
+            raise ValueError("workspace items must share one Project/Sample")
 
     @property
     def associated_saved_result(self) -> SavedFitResult | None:
         """Return the saved snapshot associated with Current, when one exists."""
 
-        if self.current_saved_result_index is None:
-            return None
-        return self.saved_results[self.current_saved_result_index]
+        return (
+            self.active_item if isinstance(self.active_item, SavedFitResult) else None
+        )
 
     @property
-    def current_result(self) -> FitResult | MultiQBranchResult | None:
+    def current_saved_result_index(self) -> int | None:
+        return next(
+            (
+                index
+                for index, entry in enumerate(self.saved_results)
+                if entry is self.active_item
+            ),
+            None,
+        )
+
+    @property
+    def active_working_copy(self) -> ResultWorkingCopy | None:
+        active = self.active_item
+        return active.working_copy if isinstance(active, SavedFitResult) else active
+
+    @property
+    def current(self) -> ResultSnapshot | None:
+        copy = self.active_working_copy
+        return None if copy is None else copy.snapshot
+
+    @property
+    def current_result(self) -> UnifiedResult | None:
         """Read-only projection of the Current snapshot's scientific Result."""
 
         return None if self.current is None else self.current.result
+
+    @property
+    def best_saved_result(self) -> SavedFitResult | None:
+        return next((item for item in self.saved_results if item.best), None)
+
+
+class ResultDisplayStatus(StrEnum):
+    FITTED_CURRENT = "fitted_current"
+    NEEDS_FIT = "needs_fit"
+    FAILED = "failed"
+    BLOCKED = "blocked"
+    EXCLUDED = "excluded"
+    NOT_FITTED = "not_fitted"
+
+
+def result_q_display_status(
+    state: FittingWorkspaceState,
+    draft: ManualFitDraft,
+    group_index: int,
+    context: ManualFitContext | None,
+) -> ResultDisplayStatus:
+    """Derive status from Current, exact draft identity and active Q context."""
+
+    model = draft.setup(group_index).model
+    current = state.current
+    if current is None:
+        return (
+            ResultDisplayStatus.NEEDS_FIT
+            if model is not None
+            else ResultDisplayStatus.NOT_FITTED
+        )
+    point = current.result.point(group_index)
+    if point.status is MultiQFitStatus.SUCCESS:
+        if point.working_state is not model or context is None:
+            return ResultDisplayStatus.NEEDS_FIT
+        fit = point.fit_result
+        assert fit is not None
+        if current.result.sample_identity != (
+            context.project_id,
+            context.sample.dataset_id,
+        ) or not fit_evidence_is_current(fit, context, group_index):
+            return ResultDisplayStatus.NEEDS_FIT
+        return ResultDisplayStatus.FITTED_CURRENT
+    return {
+        MultiQFitStatus.FAILED: ResultDisplayStatus.FAILED,
+        MultiQFitStatus.BLOCKED: ResultDisplayStatus.BLOCKED,
+        MultiQFitStatus.EXCLUDED: ResultDisplayStatus.EXCLUDED,
+        MultiQFitStatus.NOT_RUN: (
+            ResultDisplayStatus.NEEDS_FIT
+            if model is not None
+            else ResultDisplayStatus.NOT_FITTED
+        ),
+    }[point.status]
+
+
+def derive_result_in_context(
+    snapshot: ResultSnapshot,
+    q_bins: QBins,
+    contexts: Sequence[ManualFitContext | None],
+) -> DerivedUnifiedQENSResult:
+    """Derive each Q only when its own stored fit matches active science."""
+
+    if not _is_issued_result_snapshot(snapshot) or len(contexts) != len(
+        snapshot.result.points
+    ):
+        raise ValueError("derivation requires an issued Result and one context per Q")
+    valid: list[bool] = []
+    for point, context in zip(snapshot.result.points, contexts, strict=True):
+        fit = point.fit_result
+        if fit is None or context is None:
+            valid.append(False)
+            continue
+        valid.append(
+            snapshot.result.sample_identity
+            == (context.project_id, context.sample.dataset_id)
+            and fit_evidence_is_current(fit, context, point.outcome.group_index)
+        )
+    return derive_unified_qens(snapshot.result, q_bins, context_valid=valid)
 
 
 def set_working_method(
@@ -1165,22 +1447,138 @@ def set_working_method(
     return replace(state, working_method=method)
 
 
+def _replace_saved_entry(
+    state: FittingWorkspaceState, entry: SavedFitResult, updated: SavedFitResult
+) -> FittingWorkspaceState:
+    if not any(item is entry for item in state.saved_results):
+        raise ValueError("saved Result entry is not in this workspace")
+    return replace(
+        state,
+        saved_results=tuple(
+            updated if item is entry else item for item in state.saved_results
+        ),
+        active_item=updated if state.active_item is entry else state.active_item,
+    )
+
+
+def _store_working_copy(
+    state: FittingWorkspaceState, copy: ResultWorkingCopy
+) -> FittingWorkspaceState:
+    active = state.active_item
+    if isinstance(active, SavedFitResult):
+        return _replace_saved_entry(
+            state,
+            active,
+            _issue_saved_result(
+                active.name,
+                active.snapshot,
+                best=active.best,
+                draft_states=active.draft_states,
+                modified_copy=copy,
+            ),
+        )
+    return replace(state, untitled=copy, active_item=copy)
+
+
+def update_working_draft(
+    state: FittingWorkspaceState, draft: ManualFitDraft
+) -> FittingWorkspaceState:
+    """Cache parameter edits on the active item without changing fitted evidence."""
+
+    states = tuple(setup.model for setup in draft.setups)
+    current = state.active_working_copy
+    identity = (draft.project_id, draft.sample_id)
+    if current is not None:
+        if current.sample_identity != identity or len(current.draft_states) != len(
+            states
+        ):
+            raise ValueError("draft belongs to another Sample or Q topology")
+        if all(
+            before is after
+            for before, after in zip(current.draft_states, states, strict=True)
+        ):
+            return state
+    return _store_working_copy(
+        state, _issue_working_copy(state.current, states, identity)
+    )
+
+
+def active_manual_draft(
+    state: FittingWorkspaceState, template: ManualFitDraft
+) -> ManualFitDraft:
+    """Install the active item's cached parameters, or raw/empty analysis state."""
+
+    copy = state.active_working_copy
+    states = (None,) * len(template.setups) if copy is None else copy.draft_states
+    if copy is not None and (
+        copy.sample_identity != (template.project_id, template.sample_id)
+        or len(states) != len(template.setups)
+    ):
+        raise ValueError("active item belongs to another Sample or Q topology")
+    draft = template
+    for index, model in enumerate(states):
+        if draft.setup(index).model is not model:
+            draft = draft.with_model(index, model)
+    return draft
+
+
 def set_current_result(
     state: FittingWorkspaceState,
     snapshot: ResultSnapshot,
     *,
-    retain_saved_association: bool = False,
+    draft: ManualFitDraft | None = None,
 ) -> FittingWorkspaceState:
-    if not isinstance(retain_saved_association, bool):
-        raise ValueError("retain_saved_association must be boolean")
+    """Replace the Result only on the active item; create untitled when absent."""
+
     if not _is_issued_result_snapshot(snapshot):
         raise ValueError("Current must be a ResultSnapshot created at execution")
-    return replace(
+    states = (
+        snapshot.working_states
+        if draft is None
+        else tuple(setup.model for setup in draft.setups)
+    )
+    if draft is not None and snapshot.result.sample_identity != (
+        draft.project_id,
+        draft.sample_id,
+    ):
+        raise ValueError("Result belongs to another Sample")
+    return _store_working_copy(
+        state, _issue_working_copy(snapshot, states, snapshot.result.sample_identity)
+    )
+
+
+def replace_current_q_result(
+    state: FittingWorkspaceState,
+    snapshot: ResultSnapshot,
+    *,
+    draft: ManualFitDraft | None = None,
+) -> FittingWorkspaceState:
+    """Adopt one Single-Q fit without downgrading other fitted Qs in Current."""
+
+    if not _is_issued_result_snapshot(snapshot):
+        raise ValueError("Single-Q adoption requires an issued snapshot")
+    fitted = [
+        point
+        for point in snapshot.result.points
+        if point.status is MultiQFitStatus.SUCCESS
+    ]
+    if len(fitted) != 1:
+        raise ValueError("Single-Q adoption requires exactly one fitted Q")
+    current = state.current
+    if current is not None:
+        if current.result.total_count != snapshot.result.total_count:
+            raise ValueError("Single-Q Result Q topology differs from Current")
+        if current.result.sample_identity != snapshot.result.sample_identity:
+            raise ValueError("Single-Q Result belongs to another Sample")
+        snapshot = _replace_result_point(current, fitted[0])
+    if draft is not None:
+        return set_current_result(state, snapshot, draft=draft)
+    copy = state.active_working_copy
+    states = list(snapshot.working_states if copy is None else copy.draft_states)
+    states[fitted[0].outcome.group_index] = fitted[0].working_state
+    return _store_working_copy(
         state,
-        current=snapshot,
-        current_saved_result_index=(
-            state.current_saved_result_index if retain_saved_association else None
-        ),
+        _issue_working_copy(snapshot, tuple(states), snapshot.result.sample_identity),
     )
 
 
@@ -1198,40 +1596,56 @@ def save_current_result(
     state: FittingWorkspaceState,
     name: str | None = None,
 ) -> FittingWorkspaceState:
-    """Save Current into its associated snapshot, or Save As when named.
-
-    The optional name preserves the established named-call behavior as Save As.
-    An unnamed call is the explicit Save operation and requires an association.
-    """
+    """Save the active Result; an untitled Result requires a name."""
 
     if name is not None:
         return save_current_result_as(state, name)
-    if state.current is None:
+    current = state.current
+    if current is None:
         raise ValueError("there is no current Result to save")
-    index = state.current_saved_result_index
-    if index is None:
-        raise ValueError("the current Result is not associated; use Save As")
-    saved_results = list(state.saved_results)
-    saved_results[index] = SavedFitResult(
-        saved_results[index].name,
-        state.current,
+    active = state.associated_saved_result
+    if active is None:
+        raise ValueError("untitled Result requires a name; use Save As")
+    return _replace_saved_entry(
+        state,
+        active,
+        _issue_saved_result(
+            active.name,
+            current,
+            best=active.best,
+            draft_states=active.working_copy.draft_states,
+        ),
     )
-    return replace(state, saved_results=tuple(saved_results))
 
 
 def save_current_result_as(
     state: FittingWorkspaceState,
     name: str,
 ) -> FittingWorkspaceState:
-    """Append an immutable Current snapshot and associate Current with it."""
+    """Save active fitted evidence as a new clean entry and clear its source copy."""
 
     if state.current is None:
         raise ValueError("there is no current Result to save")
-    saved = SavedFitResult(name, state.current)
+    copy = state.active_working_copy
+    assert copy is not None
+    saved = _issue_saved_result(name, state.current, draft_states=copy.draft_states)
+    active = state.associated_saved_result
+    if active is not None and active.modified_copy is not None:
+        state = _replace_saved_entry(
+            state,
+            active,
+            _issue_saved_result(
+                active.name,
+                active.snapshot,
+                best=active.best,
+                draft_states=active.draft_states,
+            ),
+        )
     return replace(
         state,
         saved_results=(*state.saved_results, saved),
-        current_saved_result_index=len(state.saved_results),
+        untitled=None,
+        active_item=saved,
     )
 
 
@@ -1246,7 +1660,7 @@ def append_saved_result(
         raise ValueError("saved entry requires a ResultSnapshot")
     return replace(
         state,
-        saved_results=(*state.saved_results, SavedFitResult(name, snapshot)),
+        saved_results=(*state.saved_results, _issue_saved_result(name, snapshot)),
     )
 
 
@@ -1254,7 +1668,7 @@ def remove_saved_result(
     state: FittingWorkspaceState,
     entry: SavedFitResult,
 ) -> FittingWorkspaceState:
-    """Remove one exact entry, retaining Current and other entry identities."""
+    """Remove one entry and its copy; removing the active entry leaves raw data."""
 
     index = next(
         (
@@ -1266,17 +1680,241 @@ def remove_saved_result(
     )
     if index is None:
         raise ValueError("saved Result entry is not in this workspace")
-    associated = state.current_saved_result_index
     return replace(
         state,
         saved_results=state.saved_results[:index] + state.saved_results[index + 1 :],
-        current_saved_result_index=(
-            None
-            if associated == index
-            else associated - 1
-            if associated is not None and associated > index
-            else associated
+        active_item=None if state.active_item is entry else state.active_item,
+    )
+
+
+def rename_saved_result(
+    state: FittingWorkspaceState,
+    entry: SavedFitResult,
+    name: str,
+) -> FittingWorkspaceState:
+    """Rename one entry by identity without changing Current or association."""
+
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("saved Result name must be nonempty")
+    index = next(
+        (index for index, item in enumerate(state.saved_results) if item is entry),
+        None,
+    )
+    if index is None:
+        raise ValueError("saved Result entry is not in this workspace")
+    return _replace_saved_entry(state, entry, _copy_saved_result(entry, name=name))
+
+
+def set_best_saved_result(
+    state: FittingWorkspaceState,
+    entry: SavedFitResult | None,
+) -> FittingWorkspaceState:
+    """Mark at most one existing entry Best; None clears the mark."""
+
+    if entry is not None and not any(item is entry for item in state.saved_results):
+        raise ValueError("Best Result entry is not in this workspace")
+    for item in state.saved_results:
+        if item.best != (item is entry):
+            state = _replace_saved_entry(
+                state, item, _copy_saved_result(item, best=item is entry)
+            )
+    return state
+
+
+def has_unsaved_result_changes(
+    state: FittingWorkspaceState,
+    draft: ManualFitDraft | None = None,
+) -> bool:
+    """Combined convenience query; item queries distinguish Result and draft work."""
+
+    if unsaved_result_items(state) or draft_edit_items(state):
+        return True
+    if draft is None:
+        return False
+    copy = state.active_working_copy
+    states = (None,) * len(draft.setups) if copy is None else copy.draft_states
+    return len(states) != len(draft.setups) or any(
+        setup.model is not stored
+        for setup, stored in zip(draft.setups, states, strict=True)
+    )
+
+
+def unsaved_result_items(
+    state: FittingWorkspaceState,
+) -> tuple[SavedFitResult | ResultWorkingCopy, ...]:
+    """Close-prompt items: unsaved untitled Result and entries with modified copies."""
+
+    return (
+        *(
+            (state.untitled,)
+            if state.untitled is not None and state.untitled.has_result
+            else ()
         ),
+        *(entry for entry in state.saved_results if entry.modified_copy is not None),
+    )
+
+
+def draft_edit_items(
+    state: FittingWorkspaceState,
+) -> tuple[SavedFitResult | ResultWorkingCopy, ...]:
+    """Report cached parameters that have not been fitted, separately from Results."""
+
+    return (
+        *(
+            (state.untitled,)
+            if state.untitled is not None and state.untitled.has_draft_edits
+            else ()
+        ),
+        *(entry for entry in state.saved_results if entry.has_draft_edits),
+    )
+
+
+def _require_discard_consent(
+    state: FittingWorkspaceState, discard_untitled: bool
+) -> None:
+    if not isinstance(discard_untitled, bool):
+        raise ValueError("discard_untitled must be boolean")
+    if (
+        state.untitled is not None
+        and state.untitled.has_result
+        and not discard_untitled
+    ):
+        raise ValueError("discard consent is required for the untitled Result")
+
+
+def _retain_outgoing_draft(
+    state: FittingWorkspaceState, draft: ManualFitDraft
+) -> FittingWorkspaceState:
+    copy = state.active_working_copy
+    if copy is not None and len(copy.draft_states) != len(draft.setups):
+        if copy.sample_identity != (draft.project_id, draft.sample_id):
+            raise ValueError("draft belongs to another Sample")
+        # A regrouped draft cannot describe edits to the historical item.
+        # Retain that item's existing copy rather than rewriting its Q topology.
+        return state
+    return update_working_draft(state, draft)
+
+
+def load_saved_result(
+    state: FittingWorkspaceState,
+    draft: ManualFitDraft,
+    entry: SavedFitResult,
+    context: ManualFitContext | None = None,
+    *,
+    discard_untitled: bool = False,
+) -> tuple[FittingWorkspaceState, ManualFitDraft]:
+    """Open an entry's working copy, retaining edits on the outgoing saved entry."""
+
+    index = next(
+        (index for index, item in enumerate(state.saved_results) if item is entry),
+        None,
+    )
+    if index is None:
+        raise ValueError("saved Result entry is not in this workspace")
+    incoming = entry.snapshot.result
+    count = incoming.total_count
+    sample_identity = incoming.sample_identity
+    if count != len(draft.setups):
+        raise ValueError("saved Result Q topology differs from active Sample")
+    if (
+        sample_identity != (draft.project_id, draft.sample_id)
+        or context is not None
+        and sample_identity != (context.project_id, context.sample.dataset_id)
+    ):
+        raise ValueError("saved Result belongs to another Sample")
+    _require_discard_consent(state, discard_untitled)
+    state = _retain_outgoing_draft(state, draft)
+    entry = state.saved_results[index]
+    state = replace(state, untitled=None, active_item=entry)
+    return state, active_manual_draft(state, draft)
+
+
+def fresh_analysis(
+    state: FittingWorkspaceState,
+    draft: ManualFitDraft,
+    *,
+    discard_untitled: bool = False,
+) -> tuple[FittingWorkspaceState, ManualFitDraft]:
+    """Start an empty untitled item; retain saved working copies on their entries."""
+
+    _require_discard_consent(state, discard_untitled)
+    state = _retain_outgoing_draft(state, draft)
+    copy = _issue_working_copy(
+        None, (None,) * len(draft.setups), (draft.project_id, draft.sample_id)
+    )
+    state = replace(state, untitled=copy, active_item=copy)
+    return state, active_manual_draft(state, draft)
+
+
+def revert_saved_result(
+    state: FittingWorkspaceState, draft: ManualFitDraft, entry: SavedFitResult
+) -> tuple[FittingWorkspaceState, ManualFitDraft]:
+    """Drop modifications and restore the saved Result and whole draft baseline."""
+
+    active = state.active_item is entry
+    updated = _issue_saved_result(
+        entry.name,
+        entry.snapshot,
+        best=entry.best,
+        draft_states=entry.draft_states,
+    )
+    state = _replace_saved_entry(state, entry, updated)
+    return state, active_manual_draft(state, draft) if active else draft
+
+
+def swap_current_lorentzian_identities(
+    state: FittingWorkspaceState,
+    draft: ManualFitDraft,
+    group_index: int,
+    first: ComponentIdentity,
+    second: ComponentIdentity,
+) -> tuple[FittingWorkspaceState, ManualFitDraft]:
+    """Relabel exactly two fitted components at one Q without refitting."""
+
+    if state.current is None or first == second:
+        raise ValueError("swap requires two distinct identities in Current")
+    point = state.current.result.point(group_index)
+    fit = point.fit_result
+    working = point.working_state
+    draft_model = draft.setup(group_index).model
+    if fit is None or working is None or draft_model is None:
+        raise ValueError("swap requires fitted Q and editable Manual state")
+    fitted = fit.fitted_model
+    if fitted is None or {first, second} - {
+        item.identity for item in fitted.lorentzians
+    }:
+        raise ValueError("swap identities must belong to the fitted Q")
+    mapping = {item.identity: item.identity for item in fitted.lorentzians}
+    mapping.update({first: second, second: first})
+    if {first, second} - {item.identity for item in draft_model.lorentzians}:
+        raise ValueError("draft topology no longer matches the fitted identities")
+    relabeled_fit = relabel_fit_components(fit, mapping)
+    relabeled_working = _relabel_manual_state(working, mapping)
+    relabeled_draft = (
+        relabeled_working
+        if draft_model is working
+        else _relabel_manual_state(draft_model, mapping)
+    )
+    updated = replace(
+        point,
+        outcome=replace(point.outcome, fit_result=relabeled_fit),
+        working_state=relabeled_working,
+        identity_marks=(*point.identity_marks, IdentityMark.USER_SWAP),
+    )
+    current = _replace_result_point(state.current, updated)
+    return (
+        _store_working_copy(
+            state,
+            _issue_working_copy(
+                current,
+                tuple(
+                    setup.model
+                    for setup in draft.with_model(group_index, relabeled_draft).setups
+                ),
+                current.result.sample_identity,
+            ),
+        ),
+        draft.with_model(group_index, relabeled_draft),
     )
 
 
@@ -1861,9 +2499,11 @@ class ManualMultiQFitExecutionOutcome:
             raise ValueError("adopted_draft must be a ManualFitDraft")
         if len(self.adopted_draft.setups) != len(self.branch_result.outcomes):
             raise ValueError("adopted Manual setups must match the branch Q groups")
-        if (
-            not _is_issued_result_snapshot(self.snapshot)
-            or self.snapshot.result is not self.branch_result
+        if not _is_issued_result_snapshot(self.snapshot) or any(
+            not self.snapshot.result.point(item.group_index)._matches_execution_outcome(
+                item
+            )
+            for item in self.branch_result.outcomes
         ):
             raise ValueError("branch execution snapshot must retain its branch Result")
 
@@ -1921,10 +2561,13 @@ def _execute_fit_all_q_from_current(
     if not current_fit.diagnostics.optimizer_success:
         raise ValueError("Fit to all Q requires a successful current Result")
     context = _resolved_context(project, draft, anchor_group_index)
-    current_fit = _result_in_active_context(
+    if not fit_evidence_is_current(current_fit, context, anchor_group_index):
+        raise ValueError("Current Result does not belong to the active context")
+    current_fit = replace(
         current_fit,
-        context,
-        anchor_group_index,
+        context_binding=FitContextBinding(
+            context.prepared_resolution, context.selection, anchor_group_index
+        ),
     )
     source = draft.setup(anchor_group_index).model
     if source is None:
@@ -2082,6 +2725,7 @@ def fit_all_q_from_current_with_adoption(
                 for item in branch.outcomes
             ),
             ResultOrigin.MANUAL_FIT_ALL_Q,
+            sample_identity=(draft.project_id, draft.sample_id),
         ),
     )
 
@@ -2276,6 +2920,12 @@ def adopt_selected_auto_fit_branch(
     adopted = draft
     converted_outcomes: list[MultiQFitOutcome] = []
     snapshot_states: list[ManualModelState | None] = [None] * len(draft.setups)
+    anchor_fit = selected_branch.anchor_evidence.fit
+    assert anchor_fit is not None
+    identities = {
+        item.identity: ComponentIdentity(ComponentFamily.LORENTZIAN, uuid4().hex)
+        for item in anchor_fit.configuration.lorentzians
+    }
     for branch_outcome in selected_branch.branch_result.outcomes:
         if branch_outcome.status is not MultiQFitStatus.SUCCESS:
             converted_outcomes.append(branch_outcome)
@@ -2290,6 +2940,8 @@ def adopt_selected_auto_fit_branch(
             active_fit,
             center_group_id=center_group_id,
         )
+        if identities:
+            converted_fit = relabel_fit_components(converted_fit, identities)
         converted_outcomes.append(replace(branch_outcome, fit_result=converted_fit))
         working = selected_branch.working_states[branch_outcome.group_index]
         if working is None:
@@ -2297,6 +2949,8 @@ def adopt_selected_auto_fit_branch(
         model = _manual_state_from_standard_auto_state(
             working, center_group_id=center_group_id
         )
+        if identities:
+            model = _relabel_manual_state(model, identities)
         materialized = materialize_manual_model(
             model,
             context.prepared_resolution,
@@ -2316,6 +2970,7 @@ def adopt_selected_auto_fit_branch(
         tuple(snapshot_states),
         ResultOrigin.AUTO_FIT_BRANCH,
         selected_branch.candidate,
+        sample_identity=(draft.project_id, draft.sample_id),
     )
     return ManualMultiQFitExecutionOutcome(converted_branch, adopted, snapshot)
 

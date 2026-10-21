@@ -652,12 +652,24 @@ targets keep their prior setups, including an absent setup. This editable
 working state can later diverge from the immutable retained FitResult without
 rewriting that result. The existing branch-only workflow call remains available.
 
-`ResultSnapshot` captures a concrete `FitResult` or `MultiQBranchResult`, one
-immutable Manual working state only for each successfully fitted Q (and `None`
-for failed, blocked, excluded, or uncovered Qs), and minimal Manual/AutoFit
-origin and candidate identity where applicable. Only Result-producing workflow
-execution/adoption issues snapshots; callers cannot construct or derive a new
-snapshot for Current or Saved. Save never reconstructs it from a later draft.
+`ResultSnapshot` contains one immutable `UnifiedResult` for the Sample: an ordered
+`QResult` for every Q, with `SUCCESS`, `FAILED`, `BLOCKED`, `EXCLUDED`, or
+`NOT_RUN` status, a fitted `FitResult` only at successful Qs, and the exact Manual
+working-state object at fit time only for successful Qs. Per-Q origin records
+Manual Fit, Manual Fit to all Q, Single-Q AutoFit adoption, or selected AutoFit
+branch adoption; an AutoFit candidate is retained where applicable. The Result
+reports fitted count out of total Q count and a status breakdown. A
+`MultiQBranchResult` remains an execution output and becomes this same per-Q
+Result at adoption. Only Result-producing workflow execution/adoption issues
+snapshots; callers cannot construct or derive one for Current or Saved. Save
+never reconstructs fit-time working state from a later draft.
+Non-fitted Qs contain no `FitResult`, including within their retained outcome.
+Only status, failure reason/readiness diagnostics, and scalar optimizer status
+and message are retained for failure display and the workspace breakdown.
+Full unsuccessful optimizer output remains in the execution branch, outside
+the unified snapshot. The Result also retains the stable Project/Sample
+identity; changing immutable dataset objects does not create a new Sample
+identity.
 Selected AutoFit branches are issued by their execution with the original
 evaluation-owned `CandidateFitResult` and their per-Q execution working states
 (the AutoFit-constrained anchor and clean targets). Explicit branch adoption
@@ -666,17 +678,81 @@ then returns a converted Manual-representation branch snapshot and adopted
 draft without refitting. Failed, blocked, excluded and unrun Q setups remain
 unchanged.
 
-`FittingWorkspaceState` stores one Current `ResultSnapshot` (with a read-only
-Current Result projection) and saved named snapshot entries. It distinguishes
-an unsaved Current Result from a Current Result associated with one saved
-in-memory snapshot. Save As appends a snapshot
-and binds Current to it. A later Run may replace Current while explicitly
-retaining that association, without changing the snapshot; explicit Save then
-updates only that associated entry. Save without an association fails, while a
-later Save As always appends and rebinds. Appending a saved snapshot without
-changing Current is distinct from Save As; removing one saved entry by identity
-preserves other entries and Current, updating only the association index when
-needed. This lifecycle is in-memory only.
+`FittingWorkspaceState` is per Dataset. It stores ordered saved named entries,
+at most one separate untitled `ResultWorkingCopy`, and the active item (a saved
+entry by identity, the untitled item, or none for raw data). Each saved entry
+may retain one modified working copy on itself; a copy contains an optional
+Result snapshot and separate per-Q draft parameter states. Current and the
+Manual draft project the active item's working copy, or the saved Result and
+stored states when that entry has no modified copy. Switching Datasets retains
+each Dataset's workspace. Untitled items are never appended to saved entries.
+An entry stores the whole Fitting Parameters draft baseline, including setups
+at unfitted Qs. This baseline is separate from snapshot fit-time working states,
+which exist only at successful Qs and remain immutable fit evidence. All items
+share one stable Project/Sample identity, but historical entries may have
+different Q-group counts after regrouping. Q-count alignment is enforced within
+each snapshot/working copy, not across the workspace.
+A successful Single-Q Manual Run or AutoFit adoption replaces only its Q in
+Current; a complete Manual or selected-AutoFit Multi-Q adoption replaces all Q.
+These operations, draft edits, and identity swaps update only the active item's
+copy; a fit without an active item creates untitled work. Failed Manual Run
+leaves Current unchanged. A Q is fitted-current only while
+its draft references that exact fit-time working-state object and its active
+scientific inputs are equal by value. `fit_evidence_is_current(...)` compares
+only that Q's ordered measured energy/intensity/uncertainty values (including
+aligned NaNs), representative Q, fitting range and effective exclusion mask,
+prepared-resolution content and acceptance provenance, and energy unit.
+`FitResult.context_binding` immutably retains those fit-time inputs. Re-created
+equal objects remain current, and changing another Q has no effect. Edited or
+non-current fitted Qs need refitting and non-current evidence is omitted from
+derived values. Fit-to-all-Q requires a current anchor under this same rule;
+strict running-execution and AutoFit-adoption guards are separate.
+
+Working-copy transitions are immutable and atomic:
+
+- `load_saved_result(...)` opens the entry's retained copy, leaving any outgoing
+  saved entry's modifications on that entry. It installs all cached per-Q draft
+  states, including clearing absent setups. `fresh_analysis(...)` instead opens
+  a new empty untitled item. Either operation refuses to discard an outgoing
+  untitled item holding a Result unless `discard_untitled=True` is explicit.
+  Draft-only untitled work contains no Result and does not require that consent.
+- `save_current_result(...)` overwrites the active saved entry's Result and
+  whole draft baseline from its working copy, then clears that modified copy.
+  Repeated Save retains this baseline, including unfitted setups. Untitled work
+  requires a name and follows Save As.
+  `save_current_result_as(..., name)` appends a new clean active saved entry;
+  its Result and draft baseline come from the active working copy. The source
+  saved entry drops only its modified copy and retains its stored baseline, or
+  the source untitled item is cleared. Unfitted draft parameters are saved as
+  parameter setups, never written into fit evidence by either Save operation.
+- `revert_saved_result(...)` discards that entry's modifications and returns
+  its parameters to the entry's stored draft baseline, not snapshot fit-time
+  states; if active, Current/draft return to the saved Result and baseline too.
+  `append_saved_result(...)` appends executed/adopted
+  Results (e.g. checked AutoFit selections) without changing the active item.
+- Removal drops the entry and its copy; removing the active entry leaves no
+  active item. Rename and Best preserve copies, active association, and order.
+  Operations target saved entries by identity; at most one is marked Best.
+
+Per-item `has_result`, Result-level `modified`, and `has_draft_edits` distinguish
+fitted evidence from parameters edited since fitting. `unsaved_result_items`
+lists the untitled item when it holds a Result and all saved entries retaining
+a modified copy; `draft_edit_items` separately lists cached, unfitted parameter
+edits (including draft-only work). Such edits are not saveable as fit evidence.
+Active item, Best entry and saved-entry order are directly queryable. There is
+no automatic outgoing cache entry and no `cached_unsaved` saved-entry type.
+
+Load rejects only a different stable Project/Sample identity or Q-group count.
+Historical entries with a different group count remain visible but cannot be
+loaded into the current Sample topology. They do not block fresh analysis or
+draft updates for the regrouped Sample; their own cached states are retained.
+Changed Q assignment, measured inputs, selection, or Resolution do not prevent
+loading: evidence remains, retained working states are installed, and affected
+Qs show needs-fit and have no available derived values. The same value-based
+per-Q validity rule applies to every active copy, including restored modified
+work. Execution-time/adoption context guards remain strict and separate. This
+lifecycle is in-memory only, not durable project persistence; GUI prompts,
+naming and default-view preferences remain application concerns.
 
 ### 4.7 Later dynamics values — provisional
 

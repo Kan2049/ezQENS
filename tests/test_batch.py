@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Sequence
-from dataclasses import replace
+from dataclasses import fields, is_dataclass, replace
 from types import SimpleNamespace
 from typing import cast
 
@@ -22,6 +22,7 @@ from ezqens.batch import (
     execute_multi_q_branch,
 )
 from ezqens.convolution import build_convolution_plan
+from ezqens.derived import DerivedPointStatus, derive_unified_qens
 from ezqens.domain import QBins, ReducedDataset, Spectrum, SpectrumRole
 from ezqens.fitting import (
     BACKGROUND_COMPONENT,
@@ -60,10 +61,12 @@ from ezqens.workflow import (
     CenterTieIdentity,
     CenterTieKind,
     FittingWorkspaceState,
+    IdentityMark,
     ManualCenterGroupState,
     ManualFitContext,
     ManualFitDraft,
     ManualLorentzianState,
+    ManualModelMaterialization,
     ManualModelState,
     ManualParameterEdit,
     ManualParameterTieState,
@@ -71,12 +74,18 @@ from ezqens.workflow import (
     MethodTransferOverrides,
     MultiQConstraintTransferPolicy,
     ProjectDataset,
+    QResult,
+    ResultDisplayStatus,
     ResultOrigin,
     ResultSnapshot,
+    ResultWorkingCopy,
+    SavedFitResult,
     SelectedAutoFitMultiQResult,
     SelectedAutoFitProgressEvent,
     SingleQAutoFitOutcome,
+    UnifiedResult,
     WorkflowProject,
+    active_manual_draft,
     active_transferable_constraints,
     add_project_dataset,
     adopt_selected_auto_fit_branch,
@@ -91,27 +100,55 @@ from ezqens.workflow import (
     continue_selected_auto_fit_candidates,
     create_parameter_tie,
     create_project,
+    derive_result_in_context,
+    draft_edit_items,
     fit_all_q_from_current,
     fit_all_q_from_current_with_adoption,
+    fit_evidence_is_current,
+    fresh_analysis,
+    has_unsaved_result_changes,
     join_parameter_tie,
+    load_saved_result,
     materialize_manual_model,
     open_manual_fit_draft,
     remove_saved_result,
+    rename_saved_result,
+    replace_current_q_result,
+    replace_project_dataset,
     resolve_manual_fit_context,
+    result_q_display_status,
+    revert_saved_result,
     run_and_adopt_manual_fit,
     run_manual_fit,
     run_single_q_auto_fit,
     save_current_result,
     save_current_result_as,
     save_working_method,
+    set_best_saved_result,
     set_current_result,
     set_working_method,
+    swap_current_lorentzian_identities,
+    unsaved_result_items,
     update_manual_parameter,
+    update_working_draft,
 )
 from ezqens.workflow.manual_state import replace_parameter_intent
-from ezqens.workflow.results import _issue_result_snapshot
+from ezqens.workflow.results import _issue_result_snapshot as _issue_snapshot
 
 FloatArray = npt.NDArray[np.float64]
+
+
+def _issue_result_snapshot(
+    result: FitResult | MultiQBranchResult,
+    working_states: tuple[ManualModelState | None, ...],
+    origin: ResultOrigin,
+    candidate: StandardModelCandidate | None = None,
+    *,
+    sample_identity: tuple[str, str] = ("batch-project", "sample"),
+) -> ResultSnapshot:
+    return _issue_snapshot(
+        result, working_states, origin, candidate, sample_identity=sample_identity
+    )
 
 
 def _gaussian(energy: FloatArray, sigma: float) -> FloatArray:
@@ -1832,9 +1869,12 @@ def test_working_and_saved_method_result_lifecycles_are_independent(
 
     assert state.saved_methods[0].method is first_method
     assert state.working_method is edited_method
-    assert state.saved_results[0].result is anchor
-    assert state.current_result is replacement_result
-    assert state.current_saved_result_index is None
+    group = anchor.provenance.group_index
+    assert state.saved_results[0].result.point(group).fit_result is anchor
+    assert state.current_result is not None
+    assert state.current_result.point(group).fit_result is replacement_result
+    assert state.current_saved_result_index == 0
+    assert state.saved_results[0].modified
 
 
 def _s5_constraint_model() -> ManualModelState:
@@ -2019,40 +2059,43 @@ def test_current_result_save_and_save_as_lifecycle(
     state = save_current_result_as(state, "first snapshot")
     assert state.current_saved_result_index == 0
     assert state.associated_saved_result is state.saved_results[0]
-    assert state.saved_results[0].result is anchor
+    group = anchor.provenance.group_index
+    assert state.saved_results[0].result.point(group).fit_result is anchor
 
     state = set_current_result(
         state,
         first_snapshot,
-        retain_saved_association=True,
     )
     assert state.current_saved_result_index == 0
-    assert state.saved_results[0].result is anchor
+    assert state.saved_results[0].result.point(group).fit_result is anchor
     state = save_current_result(state)
     assert len(state.saved_results) == 1
     assert state.saved_results[0].name == "first snapshot"
-    assert state.saved_results[0].result is first_rerun
+    assert state.saved_results[0].result.point(group).fit_result is first_rerun
 
     state = save_current_result_as(state, "second snapshot")
     assert state.current_saved_result_index == 1
     assert len(state.saved_results) == 2
-    assert state.saved_results[0].result is first_rerun
-    assert state.saved_results[1].result is first_rerun
+    assert state.saved_results[0].result.point(group).fit_result is first_rerun
+    assert state.saved_results[1].result.point(group).fit_result is first_rerun
 
     state = set_current_result(
         state,
         second_snapshot,
-        retain_saved_association=True,
     )
     state = save_current_result(state)
     assert len(state.saved_results) == 2
-    assert state.saved_results[0].result is first_rerun
-    assert state.saved_results[1].result is second_rerun
+    assert state.saved_results[0].result.point(group).fit_result is first_rerun
+    assert state.saved_results[1].result.point(group).fit_result is second_rerun
 
     state = set_current_result(state, anchor_snapshot)
-    assert state.current_result is anchor
-    assert state.current_saved_result_index is None
-    assert tuple(item.result for item in state.saved_results) == (
+    assert state.current_result is not None
+    assert state.current_result.point(group).fit_result is anchor
+    assert state.current_saved_result_index == 1
+    assert state.saved_results[1].modified
+    assert tuple(
+        item.result.point(group).fit_result for item in state.saved_results
+    ) == (
         first_rerun,
         second_rerun,
     )
@@ -2074,16 +2117,16 @@ def test_result_snapshot_requires_exact_successful_q_state_scope(
     )
     issued = _issue_result_snapshot(anchor, states, ResultOrigin.MANUAL_FIT)
     with pytest.raises(ValueError, match="issued by execution workflow"):
-        ResultSnapshot(anchor, states, ResultOrigin.MANUAL_FIT)
+        ResultSnapshot(issued.result)
     with pytest.raises(ValueError, match="issued by execution workflow"):
-        replace(issued, origin=ResultOrigin.MANUAL_FIT)
+        replace(issued, result=issued.result)
     forged = object.__new__(ResultSnapshot)
-    for name in ("result", "working_states", "origin", "candidate"):
+    for name in ("result",):
         object.__setattr__(forged, name, getattr(issued, name))
     with pytest.raises(ValueError, match="created at execution"):
         set_current_result(FittingWorkspaceState(), forged)
-    with pytest.raises(ValueError, match="ResultSnapshot"):
-        FittingWorkspaceState(current=forged)
+    with pytest.raises(ValueError, match="active item"):
+        FittingWorkspaceState(active_item=cast(ResultWorkingCopy, forged))
     with pytest.raises(ValueError, match="ResultSnapshot"):
         append_saved_result(FittingWorkspaceState(), "forged", forged)
     with pytest.raises(ValueError, match="only its successful Q"):
@@ -2158,14 +2201,20 @@ def test_workspace_append_remove_preserves_current_and_entry_identity(
     assert state.current_saved_result_index == 0
     with pytest.raises(ValueError, match="not in this workspace"):
         remove_saved_result(state, first)
+    with pytest.raises(ValueError, match="issued by the workflow"):
+        replace(second)
+    same_content_other_entry = append_saved_result(
+        FittingWorkspaceState(), "second", current
+    ).saved_results[0]
     with pytest.raises(ValueError, match="not in this workspace"):
-        remove_saved_result(state, replace(second))
+        remove_saved_result(state, same_content_other_entry)
 
     state = remove_saved_result(state, associated)
-    assert state.current is current
+    assert state.current is None
+    assert state.active_item is None
     assert state.current_saved_result_index is None
     assert state.saved_results == (second,)
-    state = save_current_result_as(state, "latest")
+    state = save_current_result_as(set_current_result(state, current), "latest")
     assert state.current_saved_result_index == 1
     state = remove_saved_result(state, second)
     assert state.current_saved_result_index == 0
@@ -3149,7 +3198,10 @@ def test_selected_branch_adopts_owned_manual_states_and_ignores_stale_target_set
         center_group_id="selected-center",
     )
     assert adopted.snapshot is not None
-    assert adopted.snapshot.result is adopted.branch_result
+    assert all(
+        adopted.snapshot.result.point(item.group_index).outcome is item
+        for item in adopted.branch_result.outcomes
+    )
     assert adopted.snapshot.origin is ResultOrigin.AUTO_FIT_BRANCH
     with pytest.raises(ValueError, match="snapshot"):
         replace(adopted, snapshot=cast(ResultSnapshot, None))
@@ -3157,23 +3209,15 @@ def test_selected_branch_adopts_owned_manual_states_and_ignores_stale_target_set
     original_auto_fit = evidence[0].fit
     assert original_auto_fit is not None
     with pytest.raises(ValueError, match="issued by execution workflow"):
-        ResultSnapshot(
-            original_auto_fit,
-            adopted.snapshot.working_states,
-            ResultOrigin.AUTO_FIT_SINGLE_Q,
-            candidate,
-        )
+        ResultSnapshot(adopted.snapshot.result)
     unissued_auto = object.__new__(ResultSnapshot)
-    object.__setattr__(unissued_auto, "result", original_auto_fit)
-    object.__setattr__(unissued_auto, "working_states", adopted.snapshot.working_states)
-    object.__setattr__(unissued_auto, "origin", ResultOrigin.AUTO_FIT_BRANCH)
-    object.__setattr__(unissued_auto, "candidate", candidate)
+    object.__setattr__(unissued_auto, "result", adopted.snapshot.result)
     with pytest.raises(ValueError, match="created at execution"):
         set_current_result(FittingWorkspaceState(), unissued_auto)
     with pytest.raises(ValueError, match="ResultSnapshot"):
         append_saved_result(FittingWorkspaceState(), "unconverted", unissued_auto)
     with pytest.raises(ValueError, match="issued by execution workflow"):
-        replace(adopted.snapshot, result=selected.branch_result)
+        replace(adopted.snapshot, result=cast(UnifiedResult, selected.branch_result))
     anchor_state = adopted.adopted_draft.setup(2).model
     target_state = adopted.adopted_draft.setup(1).model
     assert anchor_state is not None and target_state is not None
@@ -3185,7 +3229,13 @@ def test_selected_branch_adopts_owned_manual_states_and_ignores_stale_target_set
         center_group_id="selected-center",
     )
     assert single.success and single.adopted_draft is not None
-    assert anchor_state == single.adopted_draft.setup(2).model
+    single_state = single.adopted_draft.setup(2).model
+    assert single_state is not None
+    assert anchor_state.background is single_state.background
+    assert anchor_state.b0 == single_state.b0
+    assert tuple((item.area, item.fwhm) for item in anchor_state.lorentzians) == tuple(
+        (item.area, item.fwhm) for item in single_state.lorentzians
+    )
     assert single.snapshot is not None
     assert all(
         state is None
@@ -3392,6 +3442,1507 @@ def test_selected_branch_adoption_keeps_failed_target_setup(
     assert adopted.adopted_draft.setup(1).model is existing
     assert adopted.snapshot is not None
     assert adopted.snapshot.working_states[1] is None
+
+
+def test_unified_result_single_q_replacement_preserves_other_fitted_qs(
+    multi_q_problem: tuple[
+        PreparedResolution,
+        FittingSelection,
+        tuple[SpectralModelDefinition, ...],
+        FitResult,
+    ],
+) -> None:
+    prepared, selection, configurations, anchor = multi_q_problem
+    states = tuple(
+        _manual_model(background=BackgroundModel.CONSTANT) if index == 2 else None
+        for index in range(len(prepared.spectra))
+    )
+    first = _issue_result_snapshot(anchor, states, ResultOrigin.MANUAL_FIT)
+    state = set_current_result(FittingWorkspaceState(), first)
+    target = fit_single_q(prepared, selection, 1, configurations[1])
+    target_model = _manual_model(background=BackgroundModel.CONSTANT)
+    second = _issue_result_snapshot(
+        target,
+        tuple(target_model if index == 1 else None for index in range(len(states))),
+        ResultOrigin.MANUAL_FIT,
+    )
+    state = replace_current_q_result(state, second)
+    current = state.current
+    assert current is not None
+    assert current.result.fitted_count == 2
+    assert current.result.total_count == 5
+    assert current.result.point(2).fit_result is anchor
+    assert current.result.point(1).fit_result is target
+    assert current.result.point(1).working_state is target_model
+    assert dict(current.result.status_counts)[MultiQFitStatus.SUCCESS] == 2
+
+    project, _sample, draft = _workflow_problem(prepared, selection)
+    draft = draft.with_model(1, target_model).with_model(2, states[2])
+    context = resolve_manual_fit_context(project, project.datasets[0], 1).context
+    assert context is not None
+    assert (
+        result_q_display_status(state, draft, 1, context)
+        is ResultDisplayStatus.FITTED_CURRENT
+    )
+    edited = draft.with_model(1, replace(target_model, b0=ManualParameterIntent(0.2)))
+    assert (
+        result_q_display_status(state, edited, 1, context)
+        is ResultDisplayStatus.NEEDS_FIT
+    )
+    assert has_unsaved_result_changes(state, draft)
+    saved = save_current_result_as(state, "baseline")
+    matching = draft
+    for group_index in (0, 3, 4):
+        matching = matching.with_model(group_index, None)
+    assert not has_unsaved_result_changes(saved, matching)
+    changed = replace(
+        context,
+        selection=context.selection.with_group_range(
+            1, lower_energy=-0.4, upper_energy=0.4
+        ),
+    )
+    assert (
+        result_q_display_status(saved, draft, 1, changed)
+        is ResultDisplayStatus.NEEDS_FIT
+    )
+
+
+@pytest.fixture
+def two_fitted_qs(
+    multi_q_problem: tuple[
+        PreparedResolution,
+        FittingSelection,
+        tuple[SpectralModelDefinition, ...],
+        FitResult,
+    ],
+) -> tuple[WorkflowProject, ProjectDataset, ManualFitDraft, FittingWorkspaceState]:
+    prepared, selection, _configurations, _anchor = multi_q_problem
+    project, sample, draft = _workflow_problem(prepared, selection)
+    for index in (0, 3, 4):
+        draft = draft.with_model(index, None)
+    state = FittingWorkspaceState()
+    for index in (2, 1):
+        executed = run_and_adopt_manual_fit(project, draft, index)
+        assert executed.success and executed.snapshot is not None
+        assert executed.adopted_draft is not None
+        draft = executed.adopted_draft
+        state = replace_current_q_result(state, executed.snapshot)
+    return project, sample, draft, state
+
+
+def _contexts_for(
+    project: WorkflowProject, sample: ProjectDataset
+) -> tuple[ManualFitContext | None, ...]:
+    return tuple(
+        resolve_manual_fit_context(project, sample, index).context
+        for index in range(len(sample.dataset.spectra))
+    )
+
+
+def test_per_q_validity_range_change_preserves_other_q_and_anchor(
+    two_fitted_qs: tuple[
+        WorkflowProject, ProjectDataset, ManualFitDraft, FittingWorkspaceState
+    ],
+) -> None:
+    project, sample, draft, state = two_fitted_qs
+    contexts = _contexts_for(project, sample)
+    original = contexts[1]
+    assert original is not None and state.current is not None
+    changed = original.selection.with_group_range(
+        1, lower_energy=-0.4, upper_energy=0.4
+    )
+    project = commit_fitting_selection(project, sample, changed)
+    contexts = _contexts_for(project, sample)
+    assert (
+        result_q_display_status(state, draft, 1, contexts[1])
+        is ResultDisplayStatus.NEEDS_FIT
+    )
+    assert (
+        result_q_display_status(state, draft, 2, contexts[2])
+        is ResultDisplayStatus.FITTED_CURRENT
+    )
+    q_bins = sample.dataset.q_bins
+    assert q_bins is not None
+    derived = derive_result_in_context(state.current, q_bins, contexts)
+    assert derived.point(1).derivation_status is DerivedPointStatus.BLOCKED
+    assert derived.point(2).derivation_status is DerivedPointStatus.AVAILABLE
+    anchor = state.current.result.point(2).fit_result
+    assert anchor is not None
+    continued = fit_all_q_from_current(
+        project, draft, anchor_group_index=2, current_fit=anchor
+    )
+    retained = continued.outcome(2).fit_result
+    assert retained is not None
+    np.testing.assert_array_equal(retained.evaluation.total, anchor.evaluation.total)
+    with pytest.raises(ValueError, match="active context"):
+        fit_all_q_from_current(
+            project,
+            draft,
+            anchor_group_index=1,
+            current_fit=state.current.result.point(1).fit_result,
+        )
+
+
+def test_per_q_merge_load_and_working_copy_restore_after_q_replacement(
+    two_fitted_qs: tuple[
+        WorkflowProject, ProjectDataset, ManualFitDraft, FittingWorkspaceState
+    ],
+) -> None:
+    project, sample, draft, state = two_fitted_qs
+    assert state.current is not None
+    fit_q2 = state.current.result.point(2).fit_result
+    assert fit_q2 is not None
+    state = set_current_result(
+        FittingWorkspaceState(),
+        _issue_result_snapshot(
+            fit_q2,
+            tuple(draft.setup(2).model if index == 2 else None for index in range(5)),
+            ResultOrigin.MANUAL_FIT,
+        ),
+    )
+    state = save_current_result_as(state, "before Q replacement")
+    state = append_saved_result(state, "second", state.saved_results[0].snapshot)
+    old_current = state.current
+    assert old_current is not None
+    edited = draft.with_model(0, _manual_model())
+    context = _contexts_for(project, sample)[2]
+    assert context is not None
+    state, draft = load_saved_result(state, edited, state.saved_results[1], context)
+    cached = state.saved_results[0]
+    assert cached.modified_copy is not None
+    assert len(state.saved_results) == 2
+    q_bins = sample.dataset.q_bins
+    assert q_bins is not None
+    new_q = QBins.from_q_values(q_bins.q_values + 0.0125)
+    project, sample = replace_project_dataset(
+        project, sample, sample.dataset.assign_q_bins(new_q)
+    )
+    resolution = project.datasets[1]
+    project, _resolution = replace_project_dataset(
+        project, resolution, resolution.dataset.assign_q_bins(new_q)
+    )
+    draft = draft.with_model(1, _manual_model(background=BackgroundModel.CONSTANT))
+    executed = run_and_adopt_manual_fit(project, draft, 1)
+    assert executed.success and executed.snapshot is not None
+    assert executed.adopted_draft is not None
+    draft = executed.adopted_draft
+    state = replace_current_q_result(state, executed.snapshot)
+    assert state.current is not None
+    assert state.current.result.point(2) is old_current.result.point(2)
+    state = save_current_result_as(state, "merged")
+    contexts = _contexts_for(project, sample)
+    context = contexts[1]
+    assert context is not None
+    loaded, restored = load_saved_result(state, draft, state.saved_results[-1], context)
+    assert (
+        result_q_display_status(loaded, restored, 1, contexts[1])
+        is ResultDisplayStatus.FITTED_CURRENT
+    )
+    assert (
+        result_q_display_status(loaded, restored, 2, contexts[2])
+        is ResultDisplayStatus.NEEDS_FIT
+    )
+    assert loaded.current is not None
+    derived = derive_result_in_context(loaded.current, new_q, contexts)
+    assert derived.point(1).derivation_status is DerivedPointStatus.AVAILABLE
+    assert derived.point(2).derivation_status is DerivedPointStatus.BLOCKED
+    loaded, restored = load_saved_result(loaded, restored, cached, context)
+    assert loaded.current is old_current
+    assert restored.setup(0).model is edited.setup(0).model
+    assert (
+        result_q_display_status(loaded, restored, 2, contexts[2])
+        is ResultDisplayStatus.NEEDS_FIT
+    )
+
+
+def test_load_retains_evidence_after_resolution_change_and_rejects_other_sample(
+    two_fitted_qs: tuple[
+        WorkflowProject, ProjectDataset, ManualFitDraft, FittingWorkspaceState
+    ],
+) -> None:
+    project, sample, draft, state = two_fitted_qs
+    state = save_current_result_as(state, "original")
+    entry = state.saved_results[0]
+    assert entry.snapshot is not None
+    resolution = project.datasets[1]
+    replaced = replace(
+        resolution.dataset,
+        spectra=tuple(
+            replace(spectrum, intensity=spectrum.intensity * 1.02)
+            for spectrum in resolution.dataset.spectra
+        ),
+    )
+    project, _resolution = replace_project_dataset(project, resolution, replaced)
+    contexts = _contexts_for(project, sample)
+    context = contexts[2]
+    assert context is not None
+    loaded, restored = load_saved_result(state, draft, entry, context)
+    assert loaded.current is entry.snapshot and loaded.current is not None
+    for index in (1, 2):
+        assert restored.setup(index).model is entry.snapshot.working_states[index]
+        assert loaded.current.result.point(index).fit_result is not None
+        assert (
+            result_q_display_status(loaded, restored, index, contexts[index])
+            is ResultDisplayStatus.NEEDS_FIT
+        )
+    q_bins = sample.dataset.q_bins
+    assert q_bins is not None
+    derived = derive_result_in_context(loaded.current, q_bins, contexts)
+    assert all(
+        derived.point(index).derivation_status is DerivedPointStatus.BLOCKED
+        for index in (1, 2)
+    )
+    foreign_context = replace(
+        context, sample=replace(sample, dataset_id="another-sample")
+    )
+    foreign_draft = replace(draft, sample_id="another-sample")
+    with pytest.raises(ValueError, match="another Sample"):
+        load_saved_result(state, foreign_draft, entry, foreign_context)
+    assert entry.snapshot is not None
+    foreign = _issue_result_snapshot(
+        cast(FitResult, entry.snapshot.result.point(2).fit_result),
+        tuple(
+            entry.snapshot.working_states[index] if index == 2 else None
+            for index in range(5)
+        ),
+        ResultOrigin.MANUAL_FIT,
+        sample_identity=(draft.project_id, "another-sample"),
+    )
+    with pytest.raises(ValueError, match="another Sample"):
+        replace_current_q_result(state, foreign)
+
+
+def test_value_equal_recreated_context_is_current(
+    two_fitted_qs: tuple[
+        WorkflowProject, ProjectDataset, ManualFitDraft, FittingWorkspaceState
+    ],
+) -> None:
+    project, sample, draft, state = two_fitted_qs
+    assert state.current is not None
+    old_context = _contexts_for(project, sample)[2]
+    assert old_context is not None
+    copies = []
+    for entry in project.datasets:
+        dataset = replace(
+            entry.dataset,
+            spectra=tuple(
+                replace(
+                    spectrum,
+                    energy=spectrum.energy.copy(),
+                    intensity=spectrum.intensity.copy(),
+                    uncertainty=spectrum.uncertainty.copy(),
+                )
+                for spectrum in entry.dataset.spectra
+            ),
+        )
+        project, replacement = replace_project_dataset(project, entry, dataset)
+        copies.append(replacement)
+    sample = copies[0]
+    contexts = _contexts_for(project, sample)
+    context = contexts[2]
+    assert context is not None
+    assert context.selection is not old_context.selection
+    assert context.prepared_resolution is not old_context.prepared_resolution
+    assert context.sample.dataset is not old_context.sample.dataset
+    fit = state.current.result.point(2).fit_result
+    assert fit is not None and fit_evidence_is_current(fit, context, 2)
+    assert (
+        result_q_display_status(state, draft, 2, context)
+        is ResultDisplayStatus.FITTED_CURRENT
+    )
+    q_bins = sample.dataset.q_bins
+    assert q_bins is not None
+    derived = derive_result_in_context(state.current, q_bins, contexts)
+    assert derived.point(1).derivation_status is DerivedPointStatus.AVAILABLE
+    assert derived.point(2).derivation_status is DerivedPointStatus.AVAILABLE
+
+
+@pytest.mark.parametrize(
+    "changed_input",
+    ("energy", "intensity", "uncertainty", "mask", "q", "kernel", "acceptance"),
+)
+def test_scientific_input_changes_affect_only_their_q(
+    two_fitted_qs: tuple[
+        WorkflowProject, ProjectDataset, ManualFitDraft, FittingWorkspaceState
+    ],
+    changed_input: str,
+) -> None:
+    project, sample, draft, state = two_fitted_qs
+    assert state.current is not None
+    original = _contexts_for(project, sample)[1]
+    assert original is not None
+    measured = original.sample.dataset
+    resolution = original.resolution.dataset
+    if changed_input in ("energy", "intensity", "uncertainty"):
+        spectra = list(measured.spectra)
+        spectrum = spectra[1]
+        values = {
+            "energy": spectrum.energy,
+            "intensity": spectrum.intensity,
+            "uncertainty": spectrum.uncertainty,
+        }[changed_input].copy()
+        values[len(values) // 3] += 1e-6
+        if changed_input == "energy":
+            spectra[1] = replace(spectrum, energy=values)
+        elif changed_input == "intensity":
+            spectra[1] = replace(spectrum, intensity=values)
+        else:
+            spectra[1] = replace(spectrum, uncertainty=values)
+        measured = replace(measured, spectra=tuple(spectra))
+    elif changed_input == "q":
+        q_bins = measured.q_bins
+        assert q_bins is not None
+        values = q_bins.q_values.copy()
+        values[1] += 0.0125
+        q_bins = QBins.from_q_values(values)
+        measured = measured.assign_q_bins(q_bins)
+        resolution = resolution.assign_q_bins(q_bins)
+    elif changed_input == "kernel":
+        spectra = list(resolution.spectra)
+        spectrum = spectra[1]
+        spectra[1] = replace(spectrum, intensity=spectrum.intensity * 1.02)
+        resolution = replace(resolution, spectra=tuple(spectra))
+    prepared = prepare_measured_resolution(
+        measured,
+        resolution,
+        acceptance_decisions={
+            1: ResolutionAcceptance(ResolutionAcceptanceDecision.KEEP, confirmed=True)
+        }
+        if changed_input == "acceptance"
+        else None,
+    )
+    selection = replace(
+        original.selection, dataset=measured, padding=prepared.sample_padding
+    )
+    if changed_input == "mask":
+        mask = selection.manual_exclusion_mask(1).copy()
+        mask[len(mask) // 3] = True
+        selection = selection.with_group_manual_exclusion(1, mask)
+    contexts = tuple(
+        replace(
+            original,
+            sample=replace(original.sample, dataset=measured),
+            resolution=replace(original.resolution, dataset=resolution),
+            selection=selection,
+            prepared_resolution=prepared,
+            group_index=index,
+            group_identity=measured.spectra[index].group_label,
+        )
+        for index in range(5)
+    )
+    assert (
+        result_q_display_status(state, draft, 1, contexts[1])
+        is ResultDisplayStatus.NEEDS_FIT
+    )
+    assert (
+        result_q_display_status(state, draft, 2, contexts[2])
+        is ResultDisplayStatus.FITTED_CURRENT
+    )
+    q_bins = measured.q_bins
+    assert q_bins is not None
+    derived = derive_result_in_context(state.current, q_bins, contexts)
+    assert derived.point(1).derivation_status is DerivedPointStatus.BLOCKED
+    assert derived.point(2).derivation_status is DerivedPointStatus.AVAILABLE
+
+
+def test_unified_workspace_working_copy_rename_and_best_by_identity(
+    multi_q_problem: tuple[
+        PreparedResolution,
+        FittingSelection,
+        tuple[SpectralModelDefinition, ...],
+        FitResult,
+    ],
+) -> None:
+    prepared, selection, _configurations, anchor = multi_q_problem
+    project, sample, draft = _workflow_problem(prepared, selection)
+    fitted = draft.setup(2).model
+    assert fitted is not None
+    draft = draft.with_model(2, fitted)
+    snapshot = _issue_result_snapshot(
+        anchor,
+        tuple(fitted if index == 2 else None for index in range(len(draft.setups))),
+        ResultOrigin.MANUAL_FIT,
+    )
+    state = save_current_result_as(
+        set_current_result(FittingWorkspaceState(), snapshot), "A"
+    )
+    first = state.saved_results[0]
+    with pytest.raises(ValueError, match="issued by the workflow"):
+        SavedFitResult("forged", snapshot)
+    with pytest.raises(ValueError, match="issued by the workflow"):
+        replace(first, name="forged")
+    state = append_saved_result(state, "A", snapshot)
+    second = state.saved_results[1]
+    state = set_best_saved_result(state, second)
+    assert state.best_saved_result is not None
+    assert state.best_saved_result.snapshot is snapshot
+    best = state.best_saved_result
+    state = rename_saved_result(state, best, "renamed")
+    assert state.saved_results[0] is first
+    assert state.saved_results[1].name == "renamed"
+    assert state.best_saved_result is state.saved_results[1]
+    edited = draft.with_model(1, _manual_model())
+    assert has_unsaved_result_changes(state, edited)
+    context = resolve_manual_fit_context(project, sample, 2).context
+    assert context is not None
+    loaded, restored = load_saved_result(state, edited, state.saved_results[1], context)
+    assert loaded.current is snapshot
+    assert loaded.current_saved_result_index == 1
+    assert len(loaded.saved_results) == 2
+    cached = loaded.saved_results[0]
+    assert cached.name == "A"
+    assert cached.modified_copy is not None
+    assert cached.modified_copy.draft_states[1] is edited.setup(1).model
+    assert restored.setup(1).model is None
+    loaded, restored = load_saved_result(loaded, restored, cached, context)
+    assert restored.setup(1).model is edited.setup(1).model
+    loaded = remove_saved_result(loaded, loaded.saved_results[1])
+    assert loaded.current_saved_result_index == 0
+    assert loaded.best_saved_result is None
+    newer = _issue_result_snapshot(
+        anchor,
+        tuple(fitted if index == 2 else None for index in range(len(draft.setups))),
+        ResultOrigin.MANUAL_FIT,
+    )
+    saved_after_fit = save_current_result(set_current_result(loaded, newer))
+    assert saved_after_fit.associated_saved_result is not None
+    assert saved_after_fit.associated_saved_result.snapshot is newer
+    assert saved_after_fit.associated_saved_result.draft_states == newer.working_states
+    assert saved_after_fit.associated_saved_result.modified_copy is None
+
+
+def test_draft_only_untitled_is_separate_from_saved_results(
+    multi_q_problem: tuple[
+        PreparedResolution,
+        FittingSelection,
+        tuple[SpectralModelDefinition, ...],
+        FitResult,
+    ],
+) -> None:
+    prepared, selection, _configurations, anchor = multi_q_problem
+    project, sample, draft = _workflow_problem(prepared, selection)
+    fitted = draft.setup(2).model
+    assert fitted is not None
+    snapshot = _issue_result_snapshot(
+        anchor,
+        tuple(fitted if index == 2 else None for index in range(len(draft.setups))),
+        ResultOrigin.MANUAL_FIT,
+    )
+    state = append_saved_result(FittingWorkspaceState(), "fitted", snapshot)
+    edited = draft.with_model(1, _manual_model())
+    state = update_working_draft(state, edited)
+    untitled = state.untitled
+    assert untitled is not None and not untitled.has_result
+    assert untitled.has_draft_edits
+    assert state.active_item is untitled
+    assert len(state.saved_results) == 1
+    assert unsaved_result_items(state) == ()
+    assert draft_edit_items(state) == (untitled,)
+    context = resolve_manual_fit_context(project, sample, 2).context
+    assert context is not None
+    loaded, restored = load_saved_result(state, edited, state.saved_results[0], context)
+    assert loaded.current is snapshot
+    assert loaded.untitled is None
+    assert len(loaded.saved_results) == 1
+    assert restored.setup(1).model is None
+    assert not has_unsaved_result_changes(loaded, restored)
+    saved = save_current_result(loaded)
+    assert saved.associated_saved_result is not None
+    assert saved.associated_saved_result.modified_copy is None
+
+
+@pytest.fixture
+def workspace_problem(
+    multi_q_problem: tuple[
+        PreparedResolution,
+        FittingSelection,
+        tuple[SpectralModelDefinition, ...],
+        FitResult,
+    ],
+) -> tuple[ManualFitDraft, ResultSnapshot]:
+    prepared, selection, _configurations, anchor = multi_q_problem
+    _project, _sample, draft = _workflow_problem(prepared, selection)
+    for index in (0, 1, 3, 4):
+        draft = draft.with_model(index, None)
+    snapshot = _issue_result_snapshot(
+        anchor,
+        tuple(setup.model for setup in draft.setups),
+        ResultOrigin.MANUAL_FIT,
+    )
+    return draft, snapshot
+
+
+def test_open_switch_keeps_result_and_draft_copies_on_each_saved_entry(
+    workspace_problem: tuple[ManualFitDraft, ResultSnapshot],
+) -> None:
+    draft, snapshot = workspace_problem
+    state = save_current_result_as(
+        set_current_result(FittingWorkspaceState(), snapshot), "first"
+    )
+    state = append_saved_result(state, "second", snapshot)
+    newer = _issue_result_snapshot(
+        cast(FitResult, snapshot.result.point(2).fit_result),
+        snapshot.working_states,
+        ResultOrigin.MANUAL_FIT,
+    )
+    state = set_current_result(state, newer)
+    edited = draft.with_model(1, _manual_model())
+    state, second_draft = load_saved_result(state, edited, state.saved_results[1])
+    first = state.saved_results[0]
+    copy = first.modified_copy
+    assert copy is not None and copy.snapshot is newer
+    assert first.modified and first.has_draft_edits
+    assert copy.draft_states[1] is edited.setup(1).model
+    assert len(state.saved_results) == 2
+    assert state.current is snapshot and second_draft.setup(1).model is None
+    assert state.active_item is state.saved_results[1]
+
+    state, restored = load_saved_result(state, second_draft, first)
+    assert state.current is newer
+    assert state.saved_results[0].modified_copy is copy
+    assert restored.setup(1).model is edited.setup(1).model
+    assert active_manual_draft(state, second_draft) == restored
+    assert unsaved_result_items(state) == (state.saved_results[0],)
+
+
+@pytest.mark.parametrize("operation", ["open", "fresh"])
+def test_untitled_result_requires_explicit_discard_consent(
+    workspace_problem: tuple[ManualFitDraft, ResultSnapshot], operation: str
+) -> None:
+    draft, snapshot = workspace_problem
+    state = append_saved_result(FittingWorkspaceState(), "saved", snapshot)
+    state = set_current_result(state, snapshot)
+    untitled = state.untitled
+    assert untitled is not None and untitled.has_result and untitled.modified
+    assert state.active_item is untitled
+    assert unsaved_result_items(state) == (untitled,)
+    with pytest.raises(ValueError, match="discard consent"):
+        if operation == "open":
+            load_saved_result(state, draft, state.saved_results[0])
+        else:
+            fresh_analysis(state, draft)
+    assert state.untitled is untitled and state.current is snapshot
+    if operation == "open":
+        updated, restored = load_saved_result(
+            state, draft, state.saved_results[0], discard_untitled=True
+        )
+        assert updated.untitled is None
+        assert updated.active_item is updated.saved_results[0]
+        assert updated.current is snapshot
+        assert restored.setup(2).model is snapshot.working_states[2]
+    else:
+        updated, restored = fresh_analysis(state, draft, discard_untitled=True)
+        assert updated.untitled is not None
+        assert updated.active_item is updated.untitled
+        assert not updated.untitled.has_result
+        assert updated.current is None
+        assert all(setup.model is None for setup in restored.setups)
+    assert len(updated.saved_results) == 1
+    assert unsaved_result_items(updated) == ()
+
+
+def test_save_as_moves_untitled_and_resets_modified_saved_source(
+    workspace_problem: tuple[ManualFitDraft, ResultSnapshot],
+) -> None:
+    draft, snapshot = workspace_problem
+    state = set_current_result(FittingWorkspaceState(), snapshot)
+    assert state.untitled is not None
+    with pytest.raises(ValueError, match="requires a name"):
+        save_current_result(state)
+    state = save_current_result(state, "first")
+    assert state.untitled is None
+    assert state.active_item is state.saved_results[0]
+    assert not state.saved_results[0].modified
+    assert state.saved_results[0].modified_copy is None
+    newer = _issue_result_snapshot(
+        cast(FitResult, snapshot.result.point(2).fit_result),
+        snapshot.working_states,
+        ResultOrigin.MANUAL_FIT,
+    )
+    edited = draft.with_model(1, _manual_model())
+    state = set_current_result(state, newer, draft=edited)
+    assert state.saved_results[0].modified
+    state = save_current_result_as(state, "second")
+    assert tuple(entry.name for entry in state.saved_results) == ("first", "second")
+    assert state.saved_results[0].snapshot is snapshot
+    assert state.saved_results[0].modified_copy is None
+    assert not state.saved_results[0].has_draft_edits
+    assert state.active_item is state.saved_results[1]
+    assert state.current is newer
+    assert not state.saved_results[1].modified
+    assert state.saved_results[1].has_draft_edits
+    assert state.saved_results[1].working_copy.draft_states[1] is edited.setup(1).model
+    # Unfitted parameters are cached outside, never written into fitted evidence.
+    assert newer.working_states[1] is None
+
+
+def test_save_overwrites_result_but_does_not_save_unfitted_parameters_into_result(
+    workspace_problem: tuple[ManualFitDraft, ResultSnapshot],
+) -> None:
+    draft, snapshot = workspace_problem
+    state = save_current_result_as(
+        set_current_result(FittingWorkspaceState(), snapshot), "saved"
+    )
+    state = set_best_saved_result(state, state.saved_results[0])
+    newer = _issue_result_snapshot(
+        cast(FitResult, snapshot.result.point(2).fit_result),
+        snapshot.working_states,
+        ResultOrigin.MANUAL_FIT,
+    )
+    state = set_current_result(state, newer)
+    edited = draft.with_model(1, _manual_model())
+    state = update_working_draft(state, edited)
+    state = save_current_result(state)
+    entry = state.saved_results[0]
+    assert state.active_item is entry and state.current is newer
+    assert entry.best and entry.snapshot is newer and not entry.modified
+    assert entry.modified_copy is None
+    assert entry.has_draft_edits
+    assert unsaved_result_items(state) == ()
+    assert draft_edit_items(state) == (entry,)
+    assert entry.working_copy.draft_states[1] is edited.setup(1).model
+    assert entry.snapshot.working_states[1] is None
+
+
+@pytest.mark.parametrize("modified", [False, True])
+@pytest.mark.parametrize("transition", ["revert", "save_as"])
+def test_saved_draft_baseline_survives_revert_save_as_and_repeated_save(
+    workspace_problem: tuple[ManualFitDraft, ResultSnapshot],
+    modified: bool,
+    transition: str,
+) -> None:
+    draft, snapshot = workspace_problem
+    baseline = draft.with_model(1, _manual_model())
+    baseline_states = tuple(setup.model for setup in baseline.setups)
+    state = save_current_result_as(
+        set_current_result(FittingWorkspaceState(), snapshot, draft=baseline), "A"
+    )
+    for _ in range(2):
+        state = save_current_result(state)
+        entry = state.saved_results[0]
+        assert entry.draft_states == baseline_states
+        assert entry.modified_copy is None
+        assert entry.snapshot is snapshot
+        assert entry.snapshot.working_states[1] is None
+
+    working_draft = baseline
+    if modified:
+        working_draft = baseline.with_model(
+            1, _manual_model(background=BackgroundModel.LINEAR)
+        ).with_model(0, _manual_model())
+        state = update_working_draft(state, working_draft)
+        assert state.saved_results[0].modified_copy is not None
+    entry = state.saved_results[0]
+    if transition == "revert":
+        state, restored = revert_saved_result(state, working_draft, entry)
+        assert restored.setup(1).model is baseline.setup(1).model
+        assert restored.setup(0).model is None
+        assert state.active_item is state.saved_results[0]
+    else:
+        state = save_current_result_as(state, "B")
+        assert state.active_item is state.saved_results[1]
+        assert state.saved_results[1].draft_states == tuple(
+            setup.model for setup in working_draft.setups
+        )
+        assert state.saved_results[1].snapshot is snapshot
+        assert state.saved_results[1].modified_copy is None
+        if not modified:
+            assert state.saved_results[0] is entry
+    assert state.saved_results[0].draft_states == baseline_states
+    assert state.saved_results[0].modified_copy is None
+    assert state.saved_results[0].snapshot is snapshot
+    assert snapshot.result.point(1).fit_result is None
+    assert snapshot.working_states[1] is None
+
+
+def test_save_updates_draft_baseline_and_revert_keeps_latest_saved_setup(
+    workspace_problem: tuple[ManualFitDraft, ResultSnapshot],
+) -> None:
+    draft, snapshot = workspace_problem
+    state = save_current_result_as(
+        set_current_result(FittingWorkspaceState(), snapshot), "A"
+    )
+    baseline = draft.with_model(1, _manual_model())
+    state = update_working_draft(state, baseline)
+    for _ in range(2):
+        state = save_current_result(state)
+        assert state.saved_results[0].draft_states is not None
+        assert state.saved_results[0].draft_states[1] is baseline.setup(1).model
+        assert state.saved_results[0].modified_copy is None
+    edited = baseline.with_model(1, None)
+    state = update_working_draft(state, edited)
+    state, restored = revert_saved_result(state, edited, state.saved_results[0])
+    assert restored.setup(1).model is baseline.setup(1).model
+    assert state.current is snapshot
+    assert snapshot.working_states[1] is None
+
+
+@pytest.mark.parametrize("active_history", [False, True])
+def test_regrouping_allows_fresh_analysis_with_historical_saved_result(
+    multi_q_problem: tuple[
+        PreparedResolution,
+        FittingSelection,
+        tuple[SpectralModelDefinition, ...],
+        FitResult,
+    ],
+    active_history: bool,
+) -> None:
+    prepared, selection, _configurations, anchor = multi_q_problem
+    project, sample, draft = _workflow_problem(prepared, selection)
+    snapshot = _issue_result_snapshot(
+        anchor,
+        tuple(draft.setup(2).model if index == 2 else None for index in range(5)),
+        ResultOrigin.MANUAL_FIT,
+    )
+    state = append_saved_result(FittingWorkspaceState(), "five Qs", snapshot)
+    if active_history:
+        state, draft = load_saved_result(state, draft, state.saved_results[0])
+    historical = state.saved_results[0]
+    q_bins = sample.dataset.q_bins
+    assert q_bins is not None
+    project, sample = replace_project_dataset(
+        project,
+        sample,
+        replace(
+            sample.dataset,
+            spectra=sample.dataset.spectra[:3],
+            q_bins=QBins.from_q_values(q_bins.q_values[:3]),
+        ),
+    )
+    regrouped = open_manual_fit_draft(project, sample)
+    assert len(regrouped.setups) == 3
+    state, empty = fresh_analysis(state, regrouped)
+    assert state.untitled is not None and len(state.untitled.draft_states) == 3
+    assert all(setup.model is None for setup in empty.setups)
+    edited = empty.with_model(0, _manual_model())
+    state = update_working_draft(state, edited)
+    assert state.active_working_copy is not None
+    assert state.active_working_copy.draft_states[0] is edited.setup(0).model
+    assert state.saved_results == (historical,)
+    assert historical.snapshot.result.total_count == 5
+    with pytest.raises(ValueError, match="Q topology differs"):
+        load_saved_result(state, edited, historical)
+    assert state.active_item is state.untitled
+    with pytest.raises(ValueError, match="another Sample"):
+        update_working_draft(state, replace(edited, sample_id="different-sample"))
+    with pytest.raises(ValueError, match="match its Result Sample and Q groups"):
+        set_current_result(FittingWorkspaceState(), snapshot, draft=regrouped)
+
+
+def test_regrouped_draft_update_without_active_item_keeps_historical_entry(
+    workspace_problem: tuple[ManualFitDraft, ResultSnapshot],
+) -> None:
+    draft, snapshot = workspace_problem
+    state = append_saved_result(FittingWorkspaceState(), "five Qs", snapshot)
+    historical = state.saved_results[0]
+    regrouped = replace(draft, setups=draft.setups[:3])
+    state = update_working_draft(state, regrouped)
+    assert state.untitled is not None and len(state.untitled.draft_states) == 3
+    assert state.saved_results == (historical,)
+    with pytest.raises(ValueError, match="Q topology differs"):
+        load_saved_result(state, regrouped, historical)
+
+
+def test_revert_saved_result_restores_active_and_leaves_other_active_work_alone(
+    workspace_problem: tuple[ManualFitDraft, ResultSnapshot],
+) -> None:
+    draft, snapshot = workspace_problem
+    state = save_current_result_as(
+        set_current_result(FittingWorkspaceState(), snapshot), "saved"
+    )
+    newer = _issue_result_snapshot(
+        cast(FitResult, snapshot.result.point(2).fit_result),
+        snapshot.working_states,
+        ResultOrigin.MANUAL_FIT,
+    )
+    edited = draft.with_model(1, _manual_model())
+    state = set_current_result(state, newer, draft=edited)
+    state, restored = revert_saved_result(state, edited, state.saved_results[0])
+    assert state.current is snapshot
+    assert restored.setup(1).model is None
+    assert state.saved_results[0].modified_copy is None
+    assert not has_unsaved_result_changes(state, restored)
+
+    state = set_current_result(state, newer, draft=edited)
+    state, empty = fresh_analysis(state, edited)
+    untitled = state.untitled
+    assert untitled is not None
+    state, unchanged = revert_saved_result(state, empty, state.saved_results[0])
+    assert state.active_item is untitled and unchanged is empty
+    assert state.saved_results[0].modified_copy is None
+
+
+def test_unsaved_and_draft_queries_cover_inactive_modified_entries_and_untitled(
+    workspace_problem: tuple[ManualFitDraft, ResultSnapshot],
+) -> None:
+    draft, snapshot = workspace_problem
+    state = save_current_result_as(
+        set_current_result(FittingWorkspaceState(), snapshot), "saved"
+    )
+    edited = draft.with_model(1, _manual_model())
+    state = update_working_draft(state, edited)
+    entry = state.saved_results[0]
+    assert entry.has_result and not entry.modified and entry.has_draft_edits
+    state, empty = fresh_analysis(state, edited)
+    assert state.saved_results[0] is entry
+    assert state.untitled is not None and not state.untitled.has_result
+    assert unsaved_result_items(state) == (entry,)
+    assert draft_edit_items(state) == (entry,)
+    state = set_current_result(state, snapshot)
+    untitled = state.untitled
+    assert untitled is not None
+    assert unsaved_result_items(state) == (untitled, entry)
+    assert draft_edit_items(state) == (entry,)
+    assert has_unsaved_result_changes(state)
+    state = remove_saved_result(state, entry)
+    assert state.active_item is untitled and state.current is snapshot
+    assert unsaved_result_items(state) == (untitled,)
+    assert draft_edit_items(state) == ()
+    assert all(setup.model is None for setup in empty.setups)
+
+
+def test_rename_best_and_append_preserve_active_modified_working_copy(
+    workspace_problem: tuple[ManualFitDraft, ResultSnapshot],
+) -> None:
+    draft, snapshot = workspace_problem
+    state = save_current_result_as(
+        set_current_result(FittingWorkspaceState(), snapshot), "first"
+    )
+    edited = draft.with_model(1, _manual_model())
+    state = update_working_draft(state, edited)
+    copy = state.active_working_copy
+    active = state.active_item
+    state = append_saved_result(state, "second", snapshot)
+    assert state.active_item is active and state.active_working_copy is copy
+    state = rename_saved_result(state, state.saved_results[0], "renamed")
+    assert state.active_item is state.saved_results[0]
+    assert state.active_working_copy is copy
+    state = set_best_saved_result(state, state.saved_results[0])
+    assert state.active_item is state.best_saved_result
+    assert state.active_working_copy is copy
+    state = set_best_saved_result(state, state.saved_results[1])
+    assert state.active_item is state.saved_results[0]
+    assert state.active_working_copy is copy
+    assert tuple(entry.name for entry in state.saved_results) == ("renamed", "second")
+    assert tuple(entry.best for entry in state.saved_results) == (False, True)
+    state = remove_saved_result(state, state.saved_results[0])
+    assert state.active_item is None and state.current is None
+    assert state.untitled is None
+    assert all(
+        setup.model is None for setup in active_manual_draft(state, edited).setups
+    )
+
+
+def test_working_copy_issuance_and_per_dataset_retention(
+    workspace_problem: tuple[ManualFitDraft, ResultSnapshot],
+) -> None:
+    draft, snapshot = workspace_problem
+    first = set_current_result(FittingWorkspaceState(), snapshot)
+    copy = first.untitled
+    assert copy is not None
+    with pytest.raises(ValueError, match="issued by the workflow"):
+        ResultWorkingCopy(snapshot, snapshot.working_states, copy.sample_identity)
+    with pytest.raises(ValueError, match="issued by the workflow"):
+        replace(copy, snapshot=None)
+    second_draft = replace(draft, sample_id="different-sample")
+    second, empty = fresh_analysis(FittingWorkspaceState(), second_draft)
+    second = update_working_draft(second, empty.with_model(1, _manual_model()))
+    assert second.current is None
+    assert active_manual_draft(second, second_draft).setup(1).model is not None
+    assert first.current is snapshot and first.untitled is copy
+    assert active_manual_draft(first, draft).setup(2).model is draft.setup(2).model
+    with pytest.raises(ValueError, match="another Sample"):
+        active_manual_draft(first, second_draft)
+
+
+def test_open_saved_working_copies_preserves_per_q_display_validity(
+    two_fitted_qs: tuple[
+        WorkflowProject, ProjectDataset, ManualFitDraft, FittingWorkspaceState
+    ],
+) -> None:
+    project, sample, draft, state = two_fitted_qs
+    state = save_current_result_as(state, "first")
+    assert state.current is not None
+    state = append_saved_result(state, "second", state.current)
+    model = draft.setup(1).model
+    assert model is not None
+    edited = draft.with_model(
+        1, replace(model, elastic_area=ManualParameterIntent(0.75))
+    )
+    state = update_working_draft(state, edited)
+    contexts = _contexts_for(project, sample)
+    assert (
+        result_q_display_status(state, edited, 1, contexts[1])
+        is ResultDisplayStatus.NEEDS_FIT
+    )
+    assert (
+        result_q_display_status(state, edited, 2, contexts[2])
+        is ResultDisplayStatus.FITTED_CURRENT
+    )
+    state, clean_draft = load_saved_result(state, edited, state.saved_results[1])
+    assert all(
+        result_q_display_status(state, clean_draft, index, contexts[index])
+        is ResultDisplayStatus.FITTED_CURRENT
+        for index in (1, 2)
+    )
+    state, restored = load_saved_result(state, clean_draft, state.saved_results[0])
+    assert restored.setup(1).model is edited.setup(1).model
+    assert (
+        result_q_display_status(state, restored, 1, contexts[1])
+        is ResultDisplayStatus.NEEDS_FIT
+    )
+    assert (
+        result_q_display_status(state, restored, 2, contexts[2])
+        is ResultDisplayStatus.FITTED_CURRENT
+    )
+
+
+def test_unified_identity_swap_is_exact_and_derived_series_follow_identity(
+    multi_q_problem: tuple[
+        PreparedResolution,
+        FittingSelection,
+        tuple[SpectralModelDefinition, ...],
+        FitResult,
+    ],
+) -> None:
+    prepared, selection, _configurations, anchor = multi_q_problem
+    project, _sample, draft = _workflow_problem(prepared, selection)
+    model = draft.setup(2).model
+    assert model is not None
+    snapshot = _issue_result_snapshot(
+        anchor,
+        tuple(model if index == 2 else None for index in range(len(draft.setups))),
+        ResultOrigin.MANUAL_FIT,
+    )
+    state = save_current_result_as(
+        set_current_result(FittingWorkspaceState(), snapshot), "before swap"
+    )
+    state, draft = swap_current_lorentzian_identities(state, draft, 2, L1, L2)
+    assert state.current is not None
+    assert state.saved_results[0].snapshot is snapshot
+    assert has_unsaved_result_changes(state, draft)
+    point = state.current.result.point(2)
+    swapped = point.fit_result
+    assert swapped is not None
+    assert swapped.fitted_model is not None
+    swapped_draft = draft.setup(2).model
+    assert swapped_draft is not None
+    assert point.identity_marks == (IdentityMark.USER_SWAP,)
+    assert tuple(item.identity for item in swapped.fitted_model.lorentzians) == (
+        L2,
+        L1,
+    )
+    assert tuple(item.identity for item in swapped_draft.lorentzians) == (
+        L2,
+        L1,
+    )
+    assert swapped.statistics is anchor.statistics
+    np.testing.assert_array_equal(swapped.evaluation.total, anchor.evaluation.total)
+    np.testing.assert_array_equal(swapped.raw_residuals, anchor.raw_residuals)
+    np.testing.assert_array_equal(swapped.covariance, anchor.covariance)
+    for before, after in ((L1, L2), (L2, L1)):
+        for family in (ParameterFamily.AREA, ParameterFamily.FWHM):
+            original = anchor.parameter_by_reference(ParameterReference(before, family))
+            relabeled = swapped.parameter_by_reference(
+                ParameterReference(after, family)
+            )
+            assert relabeled.value == original.value
+            assert relabeled.standard_error == original.standard_error
+            assert relabeled.free == original.free
+        np.testing.assert_array_equal(
+            swapped.evaluation.component_curve(after),
+            anchor.evaluation.component_curve(before),
+        )
+    assert (
+        swapped.parameter_by_reference(
+            ParameterReference(L2, ParameterFamily.FWHM)
+        ).value
+        == anchor.parameter_by_reference(
+            ParameterReference(L1, ParameterFamily.FWHM)
+        ).value
+    )
+    q_bins = prepared.sample_dataset.q_bins
+    assert q_bins is not None
+    derived = derive_unified_qens(
+        state.current.result, q_bins, context_valid=(False, False, True, False, False)
+    )
+    assert derived.point(2).derivation_status is DerivedPointStatus.AVAILABLE
+    assert derived.lorentzian_series(L2)[2] is not None
+    assert derived.lorentzian_series(L1)[2] is not None
+    assert derived.point(1).derivation_status is DerivedPointStatus.NOT_APPLICABLE
+
+
+def test_unified_derivation_links_identity_across_mixed_compositions(
+    multi_q_problem: tuple[
+        PreparedResolution,
+        FittingSelection,
+        tuple[SpectralModelDefinition, ...],
+        FitResult,
+    ],
+) -> None:
+    prepared, selection, configurations, anchor = multi_q_problem
+    q_bins = prepared.sample_dataset.q_bins
+    assert q_bins is not None
+    two_state = _manual_model(background=BackgroundModel.CONSTANT)
+    one_state = replace(two_state, lorentzians=two_state.lorentzians[:1])
+    one_config = replace(
+        configurations[1], lorentzians=configurations[1].lorentzians[:1]
+    )
+    one_fit = fit_single_q(prepared, selection, 1, one_config)
+    first = _issue_result_snapshot(
+        anchor,
+        tuple(two_state if index == 2 else None for index in range(5)),
+        ResultOrigin.MANUAL_FIT,
+    )
+    second = _issue_result_snapshot(
+        one_fit,
+        tuple(one_state if index == 1 else None for index in range(5)),
+        ResultOrigin.MANUAL_FIT,
+    )
+    state = replace_current_q_result(
+        set_current_result(FittingWorkspaceState(), first), second
+    )
+    assert state.current is not None
+    result = state.current.result
+    derived = derive_unified_qens(
+        result, q_bins, context_valid=(False, True, True, False, False)
+    )
+    assert derived.point(1).derivation_status is DerivedPointStatus.AVAILABLE
+    assert derived.point(2).derivation_status is DerivedPointStatus.AVAILABLE
+    assert derived.lorentzian_series(L1)[1] is not None
+    assert derived.lorentzian_series(L1)[2] is not None
+    assert derived.lorentzian_series(L2)[1] is None
+    assert derived.lorentzian_series(L2)[2] is not None
+    assert derived.eisf_series[1] is not None
+    assert derived.eisf_series[2] is not None
+    assert len(derived.eisf_series[1].quasielastic_areas) == 1
+    assert len(derived.eisf_series[2].quasielastic_areas) == 2
+
+    stale = derive_unified_qens(
+        result, q_bins, context_valid=(False, False, True, False, False)
+    )
+    assert stale.point(1).derivation_status is DerivedPointStatus.BLOCKED
+    excluded_points = list(result.points)
+    excluded_points[2] = replace(
+        excluded_points[2],
+        outcome=replace(excluded_points[2].outcome, derived_result_excluded=True),
+    )
+    excluded = derive_unified_qens(
+        replace(result, points=tuple(excluded_points)),
+        q_bins,
+        context_valid=(False, True, True, False, False),
+    )
+    assert excluded.point(2).derivation_status is DerivedPointStatus.EXCLUDED
+    assert excluded.lorentzian_series(L2)[2] is None
+
+
+def test_autofit_adoption_identity_inherit_width_pair_and_fresh_runs(
+    selected_auto_problem: tuple[
+        WorkflowProject,
+        ProjectDataset,
+        ManualFitDraft,
+        SingleQAutoFitOutcome,
+        tuple[CandidateFitResult, CandidateFitResult],
+    ],
+) -> None:
+    project, _sample, draft, evaluation, evidence = selected_auto_problem
+    adopted_by_candidate: dict[StandardModelCandidate, ResultSnapshot] = {}
+    for candidate in evidence:
+        first = adopt_single_q_auto_fit_candidate(
+            project, draft, evaluation, candidate, center_group_id="group"
+        )
+        independent = adopt_single_q_auto_fit_candidate(
+            project, draft, evaluation, candidate, center_group_id="group"
+        )
+        assert first.success and independent.success
+        assert first.snapshot is not None and independent.snapshot is not None
+        adopted_by_candidate[candidate.candidate] = first.snapshot
+        first_fit = first.fit_result
+        independent_fit = independent.fit_result
+        assert first_fit is not None and independent_fit is not None
+        first_model = first_fit.fitted_model
+        independent_model = independent_fit.fitted_model
+        assert first_model is not None and independent_model is not None
+        first_ids = {item.identity for item in first_model.lorentzians}
+        independent_ids = {item.identity for item in independent_model.lorentzians}
+        assert first_ids.isdisjoint(independent_ids)
+        assert all(
+            not item.component_id.startswith("standard_lorentzian_")
+            for item in first_ids
+        )
+
+        paired = adopt_single_q_auto_fit_candidate(
+            project,
+            draft,
+            evaluation,
+            candidate,
+            center_group_id="group",
+            current=first.snapshot,
+        )
+        assert paired.success and paired.fit_result is not None
+        assert paired.snapshot is not None
+        paired_model = paired.fit_result.fitted_model
+        paired_fit = paired.fit_result
+        assert paired_model is not None
+        assert {item.identity for item in paired_model.lorentzians} == first_ids
+        if len(first_ids) == 2:
+            assert paired.snapshot.result.point(2).identity_marks == (
+                IdentityMark.PAIRED_BY_WIDTH,
+            )
+
+            def width(fit: FitResult, identity: ComponentIdentity) -> float:
+                return fit.parameter_by_reference(
+                    ParameterReference(identity, ParameterFamily.FWHM)
+                ).value
+
+            for old, new in zip(
+                sorted(
+                    first_model.lorentzians,
+                    key=lambda item: width(first_fit, item.identity),
+                ),
+                sorted(
+                    paired_model.lorentzians,
+                    key=lambda item: width(paired_fit, item.identity),
+                ),
+                strict=True,
+            ):
+                assert old.identity == new.identity
+        else:
+            assert paired.snapshot.result.point(2).identity_marks == ()
+
+    two, one = evidence
+    cross_composition = adopt_single_q_auto_fit_candidate(
+        project,
+        draft,
+        evaluation,
+        one,
+        center_group_id="group",
+        current=adopted_by_candidate[two.candidate],
+    )
+    assert cross_composition.success and cross_composition.fit_result is not None
+    assert cross_composition.snapshot is not None
+    old_fit = adopted_by_candidate[two.candidate].result.point(2).fit_result
+    assert old_fit is not None and old_fit.fitted_model is not None
+    assert cross_composition.fit_result.fitted_model is not None
+    assert {item.identity for item in old_fit.fitted_model.lorentzians}.isdisjoint(
+        item.identity for item in cross_composition.fit_result.fitted_model.lorentzians
+    )
+    assert cross_composition.snapshot.result.point(2).identity_marks == ()
+
+    branch = continue_selected_auto_fit_candidates(
+        project, draft, evaluation, (evidence[0].candidate,), max_nfev=800
+    ).branches[0]
+    adopted_branch = adopt_selected_auto_fit_branch(
+        project, draft, evaluation, branch, center_group_id="branch-group"
+    )
+    ids_by_q = []
+    for outcome in adopted_branch.branch_result.outcomes:
+        fit = outcome.fit_result
+        if fit is not None:
+            assert fit.fitted_model is not None
+            ids_by_q.append({item.identity for item in fit.fitted_model.lorentzians})
+    assert ids_by_q and all(ids == ids_by_q[0] for ids in ids_by_q)
+    assert ids_by_q[0].isdisjoint(first_ids)
+    assert adopted_branch.snapshot is not None
+    branch_current = set_current_result(
+        FittingWorkspaceState(), adopted_branch.snapshot
+    )
+    single = adopt_single_q_auto_fit_candidate(
+        project,
+        draft,
+        evaluation,
+        evidence[1],
+        center_group_id="post-branch-single",
+        current=branch_current.current,
+    )
+    assert single.success and single.snapshot is not None
+    merged = replace_current_q_result(branch_current, single.snapshot)
+    assert merged.current is not None
+    assert merged.current.result.point(2).fit_result is single.fit_result
+    assert any(
+        point.fit_result is not None
+        for index, point in enumerate(adopted_branch.snapshot.result.points)
+        if index != 2
+    )
+    for index in (0, 1, 3, 4):
+        assert merged.current.result.point(
+            index
+        ) is adopted_branch.snapshot.result.point(index)
+
+
+@pytest.mark.parametrize("tied_side", ("previous", "new", "both"))
+def test_exact_width_ties_adopt_fresh_identities(
+    selected_auto_problem: tuple[
+        WorkflowProject,
+        ProjectDataset,
+        ManualFitDraft,
+        SingleQAutoFitOutcome,
+        tuple[CandidateFitResult, CandidateFitResult],
+    ],
+    tied_side: str,
+) -> None:
+    project, _sample, draft, evaluation, evidence = selected_auto_problem
+    candidate = evidence[0]
+    assert candidate.fit is not None
+    context = evaluation.scientific_context
+    config = replace(
+        candidate.fit.configuration,
+        lorentzians=tuple(
+            replace(
+                component, fwhm=replace(component.fwhm, initial_value=0.2, free=False)
+            )
+            for component in candidate.fit.configuration.lorentzians
+        ),
+    )
+    tied_fit = fit_single_q(context.prepared_resolution, context.selection, 2, config)
+    tied = CandidateFitResult(candidate.candidate, tied_fit)
+    tied_evaluation = _single_q_auto_outcome(context, (tied,), most_recommended=tied)
+    previous = adopt_single_q_auto_fit_candidate(
+        project,
+        draft,
+        tied_evaluation if tied_side in ("previous", "both") else evaluation,
+        tied if tied_side in ("previous", "both") else candidate,
+        center_group_id="exact-tie",
+    )
+    assert previous.success and previous.snapshot is not None
+    current = adopt_single_q_auto_fit_candidate(
+        project,
+        draft,
+        tied_evaluation if tied_side in ("new", "both") else evaluation,
+        tied if tied_side in ("new", "both") else candidate,
+        current=previous.snapshot,
+        center_group_id="exact-tie",
+    )
+    assert current.success and current.snapshot is not None
+    old_fit = previous.fit_result
+    new_fit = current.fit_result
+    assert old_fit is not None and old_fit.fitted_model is not None
+    assert new_fit is not None and new_fit.fitted_model is not None
+    assert {item.identity for item in old_fit.fitted_model.lorentzians}.isdisjoint(
+        item.identity for item in new_fit.fitted_model.lorentzians
+    )
+    assert current.snapshot.result.point(2).identity_marks == ()
+
+
+def test_three_lorentzian_swap_preserves_tie_and_exact_evidence(
+    multi_q_problem: tuple[
+        PreparedResolution,
+        FittingSelection,
+        tuple[SpectralModelDefinition, ...],
+        FitResult,
+    ],
+) -> None:
+    prepared, selection, _configs, _anchor = multi_q_problem
+    project, _sample, draft = _workflow_problem(prepared, selection)
+    model = draft.setup(2).model
+    assert model is not None
+    third = ComponentIdentity(ComponentFamily.LORENTZIAN, "third")
+    model = replace(
+        model,
+        lorentzians=(
+            *model.lorentzians,
+            ManualLorentzianState(
+                area=ManualParameterIntent(0.1, 0.0, 2.0),
+                fwhm=ManualParameterIntent(0.6, 1e-6, 1.0),
+                identity=third,
+            ),
+        ),
+    )
+    draft = draft.with_model(2, model)
+    draft = create_parameter_tie(
+        draft,
+        2,
+        (ParameterReference(L1, ParameterFamily.AREA),),
+        source_member=ParameterReference(L1, ParameterFamily.AREA),
+        tie_group_id="area-chain",
+    )
+    draft = join_parameter_tie(
+        draft, 2, "area-chain", ParameterReference(third, ParameterFamily.AREA)
+    )
+    executed = run_and_adopt_manual_fit(project, draft, 2)
+    assert executed.success and executed.snapshot is not None
+    assert executed.adopted_draft is not None and executed.fit_result is not None
+    before = executed.fit_result
+    state, swapped_draft = swap_current_lorentzian_identities(
+        set_current_result(FittingWorkspaceState(), executed.snapshot),
+        executed.adopted_draft,
+        2,
+        L1,
+        L2,
+    )
+    assert state.current is not None
+    after = state.current.result.point(2).fit_result
+    assert after is not None and after.fitted_model is not None
+    mapping = {L1: L2, L2: L1, third: third}
+    for parameter in before.parameters:
+        reference = parameter.references[0]
+        relabeled = replace(
+            reference, component=mapping.get(reference.component, reference.component)
+        )
+        actual = after.parameter_by_reference(relabeled)
+        assert actual.value == parameter.value
+        assert actual.standard_error == parameter.standard_error
+        assert actual.free == parameter.free
+    np.testing.assert_array_equal(after.covariance, before.covariance)
+    np.testing.assert_array_equal(after.correlation, before.correlation)
+    np.testing.assert_array_equal(after.raw_residuals, before.raw_residuals)
+    np.testing.assert_array_equal(
+        after.standardized_residuals, before.standardized_residuals
+    )
+    np.testing.assert_array_equal(after.evaluation.total, before.evaluation.total)
+    for old, new in mapping.items():
+        np.testing.assert_array_equal(
+            after.evaluation.component_curve(new),
+            before.evaluation.component_curve(old),
+        )
+    assert after.statistics is before.statistics
+    assert after.diagnostics is before.diagnostics
+    assert set(after.fitted_model.parameter_ties[0].members) == {
+        ParameterReference(L2, ParameterFamily.AREA),
+        ParameterReference(third, ParameterFamily.AREA),
+    }
+    working = swapped_draft.setup(2).model
+    assert working is not None
+    assert set(working.parameter_ties[0].members) == set(
+        after.fitted_model.parameter_ties[0].members
+    )
+
+
+def test_unified_non_fitted_qs_contain_no_nested_fit_result(
+    selected_auto_problem: tuple[
+        WorkflowProject,
+        ProjectDataset,
+        ManualFitDraft,
+        SingleQAutoFitOutcome,
+        tuple[CandidateFitResult, CandidateFitResult],
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project, _sample, draft, evaluation, evidence = selected_auto_problem
+    original = fit_single_q
+
+    def unsuccessful(
+        prepared: PreparedResolution,
+        selection: FittingSelection,
+        group: int,
+        model: SpectralModelDefinition,
+        *,
+        max_nfev: int,
+    ) -> FitResult:
+        fit = original(prepared, selection, group, model, max_nfev=max_nfev)
+        return replace(
+            fit,
+            diagnostics=replace(
+                fit.diagnostics,
+                optimizer_success=False,
+                optimizer_status=0,
+                optimizer_message="maximum evaluations reached",
+            ),
+        )
+
+    def materialize_with_blocker(
+        model: ManualModelState,
+        prepared: PreparedResolution,
+        selection: FittingSelection,
+        group_index: int,
+    ) -> ManualModelMaterialization:
+        if group_index == 3:
+            raise ValueError("target model unavailable")
+        return materialize_manual_model(model, prepared, selection, group_index)
+
+    def contains_fit_result(value: object) -> bool:
+        if isinstance(value, FitResult):
+            return True
+        if is_dataclass(value) and not isinstance(value, type):
+            return any(
+                contains_fit_result(getattr(value, item.name)) for item in fields(value)
+            )
+        if isinstance(value, dict):
+            return any(
+                contains_fit_result(item) for pair in value.items() for item in pair
+            )
+        if isinstance(value, (tuple, list)):
+            return any(contains_fit_result(item) for item in value)
+        return False
+
+    monkeypatch.setattr(batch_core, "fit_single_q", unsuccessful)
+    monkeypatch.setattr(
+        multi_q_workflow, "materialize_manual_model", materialize_with_blocker
+    )
+    selected = continue_selected_auto_fit_candidates(
+        project, draft, evaluation, (evidence[0].candidate,), fit_excluded_groups=(0,)
+    ).branches[0]
+    adopted = adopt_selected_auto_fit_branch(
+        project, draft, evaluation, selected, center_group_id="failed-evidence"
+    )
+    for point in adopted.snapshot.result.points:
+        if point.status is MultiQFitStatus.SUCCESS:
+            assert point.fit_result is not None
+            assert point.working_state is not None
+            assert point.outcome is adopted.branch_result.outcome(
+                point.outcome.group_index
+            )
+        else:
+            assert point.fit_result is None and point.working_state is None
+            assert point.outcome.fit_result is None
+            assert not contains_fit_result(point)
+    failed = adopted.snapshot.result.point(1)
+    assert failed.status is MultiQFitStatus.FAILED
+    original_failure = selected.branch_result.outcome(1)
+    assert original_failure.fit_result is not None
+    assert (
+        original_failure.fit_result.configuration.background is BackgroundModel.CONSTANT
+    )
+    assert adopted.branch_result.outcome(1) is original_failure
+    assert failed.outcome.error_type == original_failure.error_type
+    assert failed.outcome.error_message == original_failure.error_message
+    assert failed.outcome.diagnostics == original_failure.diagnostics
+    assert (
+        failed.optimizer_status
+        == original_failure.fit_result.diagnostics.optimizer_status
+        == 0
+    )
+    assert failed.optimizer_message == "maximum evaluations reached"
+    for projected in (
+        QResult(original_failure),
+        replace(failed, outcome=original_failure),
+    ):
+        assert not contains_fit_result(projected)
+        assert projected.optimizer_status == failed.optimizer_status
+        assert projected.optimizer_message == failed.optimizer_message
+    blocked = adopted.snapshot.result.point(3)
+    assert blocked.status is MultiQFitStatus.BLOCKED
+    assert blocked.outcome.diagnostics
+    assert blocked.outcome.diagnostics == selected.branch_result.outcome(3).diagnostics
+    context = evaluation.scientific_context
+    anchor = evidence[0].fit
+    assert anchor is not None
+    anchor = replace(
+        anchor,
+        context_binding=FitContextBinding(
+            context.prepared_resolution, context.selection, 2
+        ),
+    )
+    for cancelled in (False, True):
+
+        def cancel(value: bool = cancelled) -> bool:
+            return value
+
+        branch = execute_multi_q_branch(
+            context.prepared_resolution,
+            context.selection,
+            (None,) * 5,
+            anchor_group_index=2,
+            anchor_fit=anchor,
+            fit_excluded_groups=(0,),
+            cancel_requested=cancel,
+        )
+        for outcome in branch.outcomes:
+            if outcome.status is not MultiQFitStatus.SUCCESS:
+                projected = QResult(outcome)
+                assert projected.fit_result is None
+                assert projected.outcome.fit_result is None
+                assert not contains_fit_result(projected)
 
 
 def test_selected_auto_candidates_reject_invalid_evidence_before_execution(

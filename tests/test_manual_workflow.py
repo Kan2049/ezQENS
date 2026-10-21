@@ -276,7 +276,7 @@ def test_single_q_autofit_adopts_typed_fitted_candidate_without_label_parsing() 
     assert adoption.success
     assert adoption.fit_result is not chosen.fit
     assert adoption.snapshot is not None
-    assert adoption.snapshot.result is adoption.fit_result
+    assert adoption.snapshot.result.point(0).fit_result is adoption.fit_result
     assert adoption.adopted_draft is not None
     adopted = adoption.adopted_draft.setup(0).model
     assert adopted is not None
@@ -304,8 +304,10 @@ def test_single_q_autofit_adopts_typed_fitted_candidate_without_label_parsing() 
     )
     assert adopted.elastic_area is not None
     assert adopted.elastic_area.user_lower_limit == 0.0
-    assert tuple(item.identity for item in adopted.lorentzians) == tuple(
-        item.identity for item in fitted.lorentzians
+    assert len(adopted.lorentzians) == len(fitted.lorentzians)
+    assert all(
+        not item.identity.component_id.startswith("standard_lorentzian_")
+        for item in adopted.lorentzians
     )
     assert all(item.area.user_lower_limit == 0.0 for item in adopted.lorentzians)
     assert all(

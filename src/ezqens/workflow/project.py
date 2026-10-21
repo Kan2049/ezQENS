@@ -13,6 +13,7 @@ from ezqens.domain import (
     DiagnosticSeverity,
     QRebinSpecification,
     ReducedDataset,
+    Spectrum,
     SpectrumRole,
 )
 from ezqens.preprocessing import (
@@ -384,15 +385,24 @@ def measured_point_correspondence_exactly_unchanged(
     if len(original.spectra) != len(replacement.spectra):
         return False
     for before, after in zip(original.spectra, replacement.spectra, strict=True):
-        if (
-            before.group_index != after.group_index
-            or before.group_label != after.group_label
-            or not _same_array(before.energy, after.energy)
-            or not _same_array(before.intensity, after.intensity)
-            or not _same_array(before.uncertainty, after.uncertainty)
-        ):
+        if not measured_spectrum_points_exactly_unchanged(before, after):
             return False
     return True
+
+
+def measured_spectrum_points_exactly_unchanged(
+    original: Spectrum,
+    replacement: Spectrum,
+) -> bool:
+    """Compare one ordered measured group, including aligned invalid values."""
+
+    return (
+        original.group_index == replacement.group_index
+        and original.group_label == replacement.group_label
+        and _same_array(original.energy, replacement.energy)
+        and _same_array(original.intensity, replacement.intensity)
+        and _same_array(original.uncertainty, replacement.uncertainty)
+    )
 
 
 def _rebind_fractional_coverage(

@@ -40,6 +40,7 @@ from ezqens.fitting import (
     initialize_lorentzian_from_interaction,
     manual_fit_readiness,
     preview_manual_model,
+    relabel_fit_components,
 )
 
 from .manual_state import (
@@ -62,10 +63,13 @@ from .project import (
     resolve_manual_fit_context,
 )
 from .results import (
+    IdentityMark,
     ResultOrigin,
     ResultSnapshot,
     _is_issued_result_snapshot,
     _issue_result_snapshot,
+    _mark_result_point,
+    _relabel_manual_state,
 )
 
 
@@ -227,7 +231,10 @@ class ManualFitExecutionOutcome:
             if (
                 self.snapshot is None
                 or not _is_issued_result_snapshot(self.snapshot)
-                or self.snapshot.result is not self.fit_result
+                or self.snapshot.result.point(
+                    self.fit_result.provenance.group_index
+                ).fit_result
+                is not self.fit_result
             ):
                 raise ValueError("execution snapshot must retain its FitResult")
         elif not any(item.severity is DiagnosticSeverity.ERROR for item in diagnostics):
@@ -1712,6 +1719,7 @@ def adopt_single_q_auto_fit_candidate(
     *,
     group_index: int | None = None,
     center_group_id: str | None = None,
+    current: ResultSnapshot | None = None,
 ) -> ManualFitExecutionOutcome:
     """Atomically adopt one exact successful AutoFit candidate into the draft."""
 
@@ -1786,6 +1794,58 @@ def adopt_single_q_auto_fit_candidate(
         model = _manual_state_from_standard_auto_state(
             working, center_group_id=group_id
         )
+        old_fit = (
+            current.result.point(outcome_group).fit_result
+            if current is not None and _is_issued_result_snapshot(current)
+            else None
+        )
+        old_model = None if old_fit is None else old_fit.fitted_model
+        new_model = converted_fit.fitted_model
+        assert new_model is not None
+        same_composition = (
+            old_model is not None
+            and (old_model.elastic_area is not None)
+            == (new_model.elastic_area is not None)
+            and old_model.background is new_model.background
+            and len(old_model.lorentzians) == len(new_model.lorentzians)
+        )
+        old_components = () if old_model is None else old_model.lorentzians
+        new_components = new_model.lorentzians
+        paired_by_width = False
+        identities = {
+            item.identity: ComponentIdentity(ComponentFamily.LORENTZIAN, uuid4().hex)
+            for item in new_components
+        }
+        if same_composition and len(new_components) == 1:
+            identities = {new_components[0].identity: old_components[0].identity}
+        elif same_composition and len(new_components) == 2 and old_fit is not None:
+
+            def width_order(fit: FitResult) -> tuple[ComponentIdentity, ...] | None:
+                fitted = fit.fitted_model
+                assert fitted is not None
+                widths = tuple(
+                    (
+                        fit.parameter_by_reference(
+                            ParameterReference(item.identity, ParameterFamily.FWHM)
+                        ).value,
+                        item.identity,
+                    )
+                    for item in fitted.lorentzians
+                )
+                if widths[0][0] == widths[1][0]:
+                    return None
+                return tuple(
+                    identity for _, identity in sorted(widths, key=lambda pair: pair[0])
+                )
+
+            new_order = width_order(converted_fit)
+            old_order = width_order(old_fit)
+            if new_order is not None and old_order is not None:
+                identities = dict(zip(new_order, old_order, strict=True))
+                paired_by_width = True
+        if identities:
+            converted_fit = relabel_fit_components(converted_fit, identities)
+            model = _relabel_manual_state(model, identities)
         materialized = materialize_manual_setup(
             project,
             draft.with_model(outcome_group, model),
@@ -1812,18 +1872,24 @@ def adopt_single_q_auto_fit_candidate(
             group_index=outcome_group,
             fit_result=fit_result,
         )
+    snapshot = _issue_result_snapshot(
+        converted_fit,
+        tuple(
+            adopted_model if index == outcome_group else None
+            for index in range(len(draft.setups))
+        ),
+        ResultOrigin.AUTO_FIT_SINGLE_Q,
+        candidate.candidate,
+        sample_identity=(draft.project_id, draft.sample_id),
+    )
+    if paired_by_width:
+        snapshot = _mark_result_point(
+            snapshot, outcome_group, IdentityMark.PAIRED_BY_WIDTH
+        )
     return ManualFitExecutionOutcome(
         converted_fit,
         draft.with_model(outcome_group, adopted_model),
-        snapshot=_issue_result_snapshot(
-            converted_fit,
-            tuple(
-                adopted_model if index == outcome_group else None
-                for index in range(len(draft.setups))
-            ),
-            ResultOrigin.AUTO_FIT_SINGLE_Q,
-            candidate.candidate,
-        ),
+        snapshot=snapshot,
     )
 
 
@@ -2074,5 +2140,6 @@ def run_and_adopt_manual_fit(
                 for index in range(len(adopted_draft.setups))
             ),
             ResultOrigin.MANUAL_FIT,
+            sample_identity=(draft.project_id, draft.sample_id),
         ),
     )

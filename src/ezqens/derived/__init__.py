@@ -5,6 +5,7 @@ from ezqens.derived.core import (
     DerivedPointStatus,
     DerivedQENSPoint,
     DerivedQENSResult,
+    DerivedUnifiedQENSResult,
     DerivedValueStatus,
     DerivedWarning,
     DerivedWarningCode,
@@ -12,6 +13,7 @@ from ezqens.derived.core import (
     LorentzianDerivedQuantity,
     StatisticalUncertaintyStatus,
     derive_qens,
+    derive_unified_qens,
 )
 
 __all__ = [
@@ -19,6 +21,7 @@ __all__ = [
     "DerivedPointStatus",
     "DerivedQENSPoint",
     "DerivedQENSResult",
+    "DerivedUnifiedQENSResult",
     "DerivedValueStatus",
     "DerivedWarning",
     "DerivedWarningCode",
@@ -26,4 +29,5 @@ __all__ = [
     "LorentzianDerivedQuantity",
     "StatisticalUncertaintyStatus",
     "derive_qens",
+    "derive_unified_qens",
 ]

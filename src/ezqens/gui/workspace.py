@@ -55,7 +55,6 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ezqens.batch import MultiQBranchResult
 from ezqens.domain import (
     DiagnosticSeverity,
     ImportDiagnostic,
@@ -71,7 +70,7 @@ from ezqens.gui.masking import (
     rebind_auto_mask_state,
 )
 from ezqens.gui.theme import DEFAULT_LAYOUT_TOKENS
-from ezqens.workflow import SavedFitResult
+from ezqens.workflow import ResultOrigin, SavedFitResult
 
 PROJECT_INDEX_ROLE = Qt.ItemDataRole.UserRole
 ITEM_KIND_ROLE = Qt.ItemDataRole.UserRole + 1
@@ -1488,7 +1487,14 @@ class WorkspaceSidebar(QWidget):
                     [
                         entry.name,
                         "Multi-Q"
-                        if isinstance(entry.result, MultiQBranchResult)
+                        if any(
+                            point.origin
+                            in (
+                                ResultOrigin.MANUAL_FIT_ALL_Q,
+                                ResultOrigin.AUTO_FIT_BRANCH,
+                            )
+                            for point in entry.result.points
+                        )
                         else "Single-Q",
                     ]
                 )

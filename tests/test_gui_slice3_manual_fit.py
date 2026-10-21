@@ -92,6 +92,7 @@ from ezqens.workflow import (
     ManualParameterTieState,
     MultiQConstraintTransferPolicy,
     ResultOrigin,
+    UnifiedResult,
     WorkflowDiagnostic,
     WorkflowDiagnosticCode,
     WorkflowProject,
@@ -123,7 +124,32 @@ def _mock_multi_q_execution(
     return ManualMultiQFitExecutionOutcome(
         branch,
         draft,
-        _issue_result_snapshot(branch, states, ResultOrigin.MANUAL_FIT_ALL_Q),
+        _issue_result_snapshot(
+            branch,
+            states,
+            ResultOrigin.MANUAL_FIT_ALL_Q,
+            sample_identity=(draft.project_id, draft.sample_id),
+        ),
+    )
+
+
+def _current_fit(
+    session: main_window_module.ManualFitSession, group_index: int = 0
+) -> FitResult | None:
+    current = session.result_workspace.current_result
+    return None if current is None else current.point(group_index).fit_result
+
+
+def _current_matches_branch(
+    session: main_window_module.ManualFitSession,
+    branch: MultiQBranchResult | UnifiedResult,
+) -> bool:
+    current = session.result_workspace.current_result
+    if isinstance(branch, UnifiedResult):
+        return current is branch
+    return current is not None and all(
+        point.outcome is outcome
+        for point, outcome in zip(current.points, branch.outcomes, strict=True)
     )
 
 
@@ -4533,7 +4559,7 @@ def test_real_fit_all_q_adopts_successful_target_manual_setup(
     window._run_manual_fit()
     session = window._active_manual_session
     assert session is not None
-    anchor = session.result_workspace.current_result
+    anchor = _current_fit(session)
     assert isinstance(anchor, FitResult)
     assert session.draft.setup(1).model is None
     model = session.draft.setup(0).model
@@ -4561,7 +4587,7 @@ def test_real_fit_all_q_adopts_successful_target_manual_setup(
     assert not messages
     assert window._active_fit_all_q_generation is None
     branch = session.result_workspace.current_result
-    assert isinstance(branch, MultiQBranchResult)
+    assert isinstance(branch, UnifiedResult)
     target = branch.outcome(1)
     assert target.status is MultiQFitStatus.SUCCESS
     assert isinstance(target.fit_result, FitResult)
@@ -4585,7 +4611,7 @@ def test_real_fit_all_q_adopts_successful_target_manual_setup(
     window.dataset_view.set_current_group(0)
     window.dataset_view.set_current_group(1)
     assert session.draft is adopted_draft
-    assert session.result_workspace.current_result is branch
+    assert _current_matches_branch(session, branch)
     assert window.manual_fit_editor._model is adopted_model
     window.close()
 
@@ -4623,7 +4649,7 @@ def test_real_fit_all_q_projects_adopted_centers_and_keeps_result_after_edit(
         )
     window._refresh_manual_fit()
     window._run_manual_fit()
-    anchor = session.result_workspace.current_result
+    anchor = _current_fit(session)
     assert isinstance(anchor, FitResult)
     assert session.draft.setup(1).model is None
     anchor_model = session.draft.setup(0).model
@@ -4641,7 +4667,7 @@ def test_real_fit_all_q_projects_adopted_centers_and_keeps_result_after_edit(
         time.sleep(0.005)
     assert window._fit_all_q_thread is None
     branch = session.result_workspace.current_result
-    assert isinstance(branch, MultiQBranchResult)
+    assert isinstance(branch, UnifiedResult)
     target = branch.outcome(1)
     assert target.status is MultiQFitStatus.SUCCESS
     result = target.fit_result
@@ -4666,7 +4692,7 @@ def test_real_fit_all_q_projects_adopted_centers_and_keeps_result_after_edit(
     for group in (1, 0, 1):
         window.dataset_view.set_current_group(group)
         assert session.draft is draft
-        assert session.result_workspace.current_result is branch
+        assert _current_matches_branch(session, branch)
         assert window.manual_fit_editor._model is draft.setup(group).model
         assert (
             window.dataset_view._manual_fit_result is branch.outcome(group).fit_result
@@ -4727,7 +4753,7 @@ def test_real_fit_all_q_projects_adopted_centers_and_keeps_result_after_edit(
     window.dataset_view.set_current_group(1)
     assert session.draft is edited_draft
     assert editor._model is edited
-    assert session.result_workspace.current_result is branch
+    assert _current_matches_branch(session, branch)
     assert window.dataset_view._manual_fit_result is result
     assert session.execution_state(1).lifecycle is ManualFitLifecycle.NEEDS_FIT
     window.close()
@@ -4741,7 +4767,7 @@ def test_fit_all_q_blocked_outcome_keeps_its_own_diagnostic(
     window._run_manual_fit()
     session = window._active_manual_session
     assert session is not None
-    anchor = session.result_workspace.current_result
+    anchor = _current_fit(session)
     assert isinstance(anchor, FitResult)
     assert session.draft.setup(1).model is None
     diagnostic = ManualFitReadinessDiagnostic(
@@ -4769,6 +4795,7 @@ def test_fit_all_q_blocked_outcome_keeps_its_own_diagnostic(
             branch,
             tuple(setup.model for setup in draft.setups),
             ResultOrigin.MANUAL_FIT_ALL_Q,
+            sample_identity=(draft.project_id, draft.sample_id),
         ),
     )
     snapshot = session.result_workspace.current
@@ -4821,7 +4848,7 @@ def test_fit_all_q_other_target_statuses_follow_branch_outcome(
     window._run_manual_fit()
     session = window._active_manual_session
     assert session is not None
-    anchor = session.result_workspace.current_result
+    anchor = _current_fit(session)
     assert isinstance(anchor, FitResult)
     branch = MultiQBranchResult(
         0,
@@ -4838,6 +4865,7 @@ def test_fit_all_q_other_target_statuses_follow_branch_outcome(
             branch,
             tuple(setup.model for setup in draft.setups),
             ResultOrigin.MANUAL_FIT_ALL_Q,
+            sample_identity=(draft.project_id, draft.sample_id),
         ),
     )
     snapshot = session.result_workspace.current
@@ -4865,7 +4893,7 @@ def test_fit_all_q_async_navigation_status_and_result_save_lifecycle(
     window._run_manual_fit()
     session = window._active_manual_session
     assert session is not None
-    current = session.result_workspace.current_result
+    current = _current_fit(session)
     assert current is window._manual_fit_result
     assert isinstance(current, FitResult)
     assert window.manual_fit_editor.fit_all_q_button.isEnabled()
@@ -4925,7 +4953,7 @@ def test_fit_all_q_async_navigation_status_and_result_save_lifecycle(
     assert window._active_fit_all_q_generation is None
     assert window.dataset_view.current_group_index == 0
     assert window.dataset_view.group_spinbox.isEnabled()
-    assert session.result_workspace.current_result is branch
+    assert _current_matches_branch(session, branch)
     assert session.result_workspace.saved_results == ()
     assert _dataset_tree_item(window, project, sample_state).childCount() == 0
     assert window.dataset_view.fit_status_descriptions == ("Success", "Success")
@@ -4937,18 +4965,23 @@ def test_fit_all_q_async_navigation_status_and_result_save_lifecycle(
     assert len(session.result_workspace.saved_results) == 1
     assert session.result_workspace.associated_saved_result is not None
     saved = session.result_workspace.saved_results[0]
-    assert saved.result is branch
+    assert all(
+        saved.result.point(item.group_index).outcome is item for item in branch.outcomes
+    )
     result_item = _saved_tree_item(_dataset_tree_item(window, project, sample_state), 0)
     assert (result_item.text(0), result_item.text(1)) == ("Across Q", "Multi-Q")
     window.workspace._on_item_double_clicked(result_item, 0)
     assert session.viewed_saved_result is session.result_workspace.saved_results[0]
-    assert session.result_workspace.current_result is branch
+    assert _current_matches_branch(session, branch)
     assert window.dataset_view.fit_status_descriptions == ("Success", "Success")
     window._run_manual_fit()
     rerun = session.result_workspace.current_result
     assert rerun is not None and rerun is not branch
     assert session.result_workspace.current_saved_result_index == 0
-    assert session.result_workspace.saved_results[0] is saved
+    modified = session.result_workspace.saved_results[0]
+    assert modified.snapshot is saved.snapshot
+    assert modified.modified_copy is not None and modified.modified
+    assert modified.working_copy.snapshot is session.result_workspace.current
     assert window.manual_fit_editor.result_state_label.text() == "Unsaved changes"
     window._save_manual_result()
     assert len(session.result_workspace.saved_results) == 1
@@ -4965,7 +4998,7 @@ def test_saved_result_workspace_nodes_follow_explicit_save_lifecycle(
     window._run_manual_fit()
     session = window._active_manual_session
     assert session is not None
-    first_fit = session.result_workspace.current_result
+    first_fit = _current_fit(session)
     assert isinstance(first_fit, FitResult)
     dataset_item = _dataset_tree_item(window, project, sample)
     assert dataset_item.childCount() == 0
@@ -4981,15 +5014,21 @@ def test_saved_result_workspace_nodes_follow_explicit_save_lifecycle(
     assert result_a.data(0, SAVED_RESULT_ENTRY_ROLE) is saved_a
 
     window._run_manual_fit()
-    second_fit = session.result_workspace.current_result
+    second_fit = _current_fit(session)
     assert isinstance(second_fit, FitResult) and second_fit is not first_fit
-    assert session.result_workspace.saved_results[0] is saved_a
+    modified_a = session.result_workspace.saved_results[0]
+    assert modified_a.snapshot is saved_a.snapshot
+    assert modified_a.modified_copy is not None and modified_a.modified
+    assert modified_a.working_copy.snapshot is session.result_workspace.current
     assert _saved_tree_item(_dataset_tree_item(window, project, sample), 0).text(0) == (
         "Result A"
     )
     window._save_manual_result()
     assert len(session.result_workspace.saved_results) == 1
-    assert session.result_workspace.saved_results[0].result is second_fit
+    assert (
+        session.result_workspace.saved_results[0].result.point(0).fit_result
+        is second_fit
+    )
 
     monkeypatch.setattr(QInputDialog, "getText", lambda *_args: ("Result B", True))
     window._save_manual_result_as()
@@ -5004,18 +5043,25 @@ def test_saved_result_workspace_nodes_follow_explicit_save_lifecycle(
         for i in range(2)
     ] == list(session.result_workspace.saved_results)
     assert session.result_workspace.current_saved_result_index == 1
-    assert session.result_workspace.saved_results[0].result is second_fit
+    assert (
+        session.result_workspace.saved_results[0].result.point(0).fit_result
+        is second_fit
+    )
 
     window._run_manual_fit()
     current_fit = session.result_workspace.current_result
-    assert current_fit is not second_fit
+    assert current_fit is not None
+    assert current_fit.point(0).fit_result is not second_fit
     saved_item = _saved_tree_item(_dataset_tree_item(window, project, sample), 0)
     window.workspace.tree.setCurrentItem(saved_item)
     assert session.result_workspace.current_result is current_fit
     window.workspace._on_item_double_clicked(saved_item, 0)
     assert session.viewed_saved_result is session.result_workspace.saved_results[0]
     assert session.result_workspace.current_result is current_fit
-    assert session.result_workspace.saved_results[0].result is second_fit
+    assert (
+        session.result_workspace.saved_results[0].result.point(0).fit_result
+        is second_fit
+    )
     assert window.dataset_view._manual_fit_result is second_fit
     assert (
         "Saved Result · Result A"
@@ -5025,7 +5071,8 @@ def test_saved_result_workspace_nodes_follow_explicit_save_lifecycle(
         _dataset_tree_item(window, project, sample), 0
     )
     assert session.viewed_saved_result is None
-    assert window.dataset_view._manual_fit_result is current_fit
+    assert current_fit is not None
+    assert window.dataset_view._manual_fit_result is current_fit.point(0).fit_result
     assert window._open_dataset is sample
     window.close()
 
@@ -5046,7 +5093,7 @@ def test_saved_result_does_not_overlay_changed_resolution_context(
         _saved_tree_item(_dataset_tree_item(window, project, sample), 0), 0
     )
     assert session.viewed_saved_result is session.result_workspace.saved_results[0]
-    assert window.dataset_view._manual_fit_result is saved.result
+    assert window.dataset_view._manual_fit_result is saved.result.point(0).fit_result
     resolution = next(
         item
         for item in project.datasets
@@ -5219,7 +5266,7 @@ def test_fit_all_q_cancelled_partial_becomes_current_without_false_start(
     window._run_manual_fit()
     session = window._active_manual_session
     assert session is not None
-    current = session.result_workspace.current_result
+    current = _current_fit(session)
     assert isinstance(current, FitResult)
     model = session.draft.setup(0).model
     assert model is not None
@@ -5260,7 +5307,7 @@ def test_fit_all_q_cancelled_partial_becomes_current_without_false_start(
         application.processEvents()
         time.sleep(0.005)
     application.processEvents()
-    assert session.result_workspace.current_result is branch
+    assert _current_matches_branch(session, branch)
     assert window.dataset_view.current_group_index == 0
     assert window.dataset_view.fit_status_descriptions == ("Success", "Not run")
 
@@ -5283,7 +5330,7 @@ def test_fit_all_q_unexpected_failure_restores_anchor_and_preserves_current(
     window._run_manual_fit()
     session = window._active_manual_session
     assert session is not None
-    previous = session.result_workspace.current_result
+    previous = _current_fit(session)
     assert isinstance(previous, FitResult)
     model = session.draft.setup(0).model
     assert model is not None
@@ -5320,7 +5367,7 @@ def test_fit_all_q_unexpected_failure_restores_anchor_and_preserves_current(
         time.sleep(0.005)
     application.processEvents()
 
-    assert session.result_workspace.current_result is previous
+    assert _current_fit(session) is previous
     assert window.dataset_view.current_group_index == 0
     assert window.dataset_view.group_spinbox.isEnabled()
     assert messages == ["synthetic execution failure"]
@@ -5340,7 +5387,7 @@ def test_fit_all_q_locks_manual_mask_q_units_and_resolution_mutations(
     window._run_manual_fit()
     session = window._active_manual_session
     assert session is not None
-    current = session.result_workspace.current_result
+    current = _current_fit(session)
     assert isinstance(current, FitResult)
     model = session.draft.setup(0).model
     assert model is not None
@@ -5452,7 +5499,7 @@ def test_fit_all_q_locks_manual_mask_q_units_and_resolution_mutations(
         application.processEvents()
         time.sleep(0.005)
     application.processEvents()
-    assert session.result_workspace.current_result is branch
+    assert _current_matches_branch(session, branch)
     assert window.manual_fit_editor.sections.isEnabled()
     assert window.mask_task_bar.isEnabled()
     window.close_mask_task("discard")
@@ -5468,7 +5515,7 @@ def test_fit_all_q_stale_completion_cannot_replace_invalidated_context(
     window._run_manual_fit()
     session = window._active_manual_session
     assert session is not None
-    previous = session.result_workspace.current_result
+    previous = _current_fit(session)
     assert isinstance(previous, FitResult)
     model = session.draft.setup(0).model
     assert model is not None
@@ -5523,7 +5570,7 @@ def test_fit_all_q_stale_completion_cannot_replace_invalidated_context(
         time.sleep(0.005)
     application.processEvents()
 
-    assert session.result_workspace.current_result is previous
+    assert _current_fit(session) is previous
     assert session.execution_state(0).fit_result is previous
     assert session.execution_state(1).fit_result is None
     assert window.dataset_view.fit_status_descriptions == ("Success", "Not run")
@@ -5539,7 +5586,7 @@ def test_fit_all_q_blocks_clean_boundary_preview_until_cancel_or_discard(
     window._run_manual_fit()
     session = window._active_manual_session
     assert session is not None
-    anchor = session.result_workspace.current_result
+    anchor = _current_fit(session)
     assert isinstance(anchor, FitResult)
     model = session.draft.setup(0).model
     assert model is not None
@@ -5590,7 +5637,7 @@ def test_fit_all_q_blocks_clean_boundary_preview_until_cancel_or_discard(
     assert not window._mask_boundary_preview_active
     assert window.dataset_view.selection is draft.selection is selection
     assert not draft.is_dirty
-    assert session.result_workspace.current_result is anchor
+    assert _current_fit(session) is anchor
     assert session.execution_state(0).lifecycle is ManualFitLifecycle.CURRENT
     assert window.manual_fit_editor.fit_all_q_button.isEnabled()
 
@@ -5599,7 +5646,7 @@ def test_fit_all_q_blocks_clean_boundary_preview_until_cancel_or_discard(
     assert window.close_mask_task("discard")
     assert not window._mask_boundary_preview_active
     assert window.dataset_view.selection is selection
-    assert session.result_workspace.current_result is anchor
+    assert _current_fit(session) is anchor
     assert window.manual_fit_editor.fit_all_q_button.isEnabled()
     window.close()
 
@@ -5612,7 +5659,7 @@ def test_fit_all_q_boundary_preview_apply_requires_new_single_q_anchor(
     window._run_manual_fit()
     session = window._active_manual_session
     assert session is not None
-    anchor = session.result_workspace.current_result
+    anchor = _current_fit(session)
     assert isinstance(anchor, FitResult)
     window.enter_mask_task()
     draft = window._mask_draft
@@ -5642,7 +5689,7 @@ def test_fit_all_q_boundary_preview_apply_requires_new_single_q_anchor(
 
     window._run_manual_fit()
     assert session.execution_state(0).lifecycle is ManualFitLifecycle.CURRENT
-    assert session.result_workspace.current_result is not anchor
+    assert _current_fit(session) is not anchor
     assert window.manual_fit_editor.fit_all_q_button.isEnabled()
     window.close_mask_task("discard")
     window.close()
@@ -5657,7 +5704,7 @@ def test_fit_all_q_requires_changed_mask_draft_resolution_and_refit(
     window._run_manual_fit()
     session = window._active_manual_session
     assert session is not None
-    anchor = session.result_workspace.current_result
+    anchor = _current_fit(session)
     assert isinstance(anchor, FitResult)
     model = session.draft.setup(0).model
     assert model is not None
@@ -5702,7 +5749,7 @@ def test_fit_all_q_requires_changed_mask_draft_resolution_and_refit(
 
     window._run_manual_fit()
     assert session.execution_state(0).lifecycle is ManualFitLifecycle.CURRENT
-    assert session.result_workspace.current_result is not anchor
+    assert _current_fit(session) is not anchor
     assert window.manual_fit_editor.fit_all_q_button.isEnabled()
     window.close_mask_task("discard")
     window.close()
@@ -5717,7 +5764,7 @@ def test_fit_all_q_requires_changed_q_draft_resolution_and_refit(
     window._run_manual_fit()
     session = window._active_manual_session
     assert session is not None
-    anchor = session.result_workspace.current_result
+    anchor = _current_fit(session)
     assert isinstance(anchor, FitResult)
     model = session.draft.setup(0).model
     assert model is not None
@@ -5775,7 +5822,7 @@ def test_fit_all_q_requires_changed_q_draft_resolution_and_refit(
     )
     window._run_manual_fit()
     assert session.execution_state(0).lifecycle is ManualFitLifecycle.CURRENT
-    assert session.result_workspace.current_result is not anchor
+    assert _current_fit(session) is not anchor
     assert window.manual_fit_editor.fit_all_q_button.isEnabled()
     q_editor.discard()
     window.close()
@@ -5790,7 +5837,7 @@ def test_fit_all_q_draft_discard_restores_committed_display_and_anchor(
     window._run_manual_fit()
     session = window._active_manual_session
     assert session is not None
-    anchor = session.result_workspace.current_result
+    anchor = _current_fit(session)
     assert isinstance(anchor, FitResult)
     model = session.draft.setup(0).model
     assert model is not None
@@ -5808,7 +5855,7 @@ def test_fit_all_q_draft_discard_restores_committed_display_and_anchor(
     assert not window.manual_fit_editor.fit_all_q_button.isEnabled()
     assert window.close_mask_task("discard")
     assert window.dataset_view.selection is committed_selection
-    assert session.result_workspace.current_result is anchor
+    assert _current_fit(session) is anchor
     assert session.execution_state(0).lifecycle is ManualFitLifecycle.CURRENT
     assert window.manual_fit_editor.fit_all_q_button.isEnabled()
 
@@ -5826,7 +5873,7 @@ def test_fit_all_q_draft_discard_restores_committed_display_and_anchor(
         window.dataset_view.dataset.q_bins.q_values,
         committed_dataset.q_bins.q_values,
     )
-    assert session.result_workspace.current_result is anchor
+    assert _current_fit(session) is anchor
     assert session.execution_state(0).lifecycle is ManualFitLifecycle.CURRENT
     assert window.manual_fit_editor.fit_all_q_button.isEnabled()
 
@@ -5875,7 +5922,7 @@ def test_fit_all_q_draft_discard_restores_committed_display_and_anchor(
         application.processEvents()
         time.sleep(0.005)
     application.processEvents()
-    assert session.result_workspace.current_result is branch
+    assert _current_matches_branch(session, branch)
     window.close()
 
 
@@ -5888,7 +5935,7 @@ def test_main_window_close_waits_for_active_fit_all_q_worker(
     window._run_manual_fit()
     session = window._active_manual_session
     assert session is not None
-    previous = session.result_workspace.current_result
+    previous = _current_fit(session)
     assert isinstance(previous, FitResult)
     model = session.draft.setup(0).model
     assert model is not None
@@ -5935,7 +5982,7 @@ def test_main_window_close_waits_for_active_fit_all_q_worker(
     assert window._appearance_listener_connected
     assert window._fit_all_q_thread is not None
     assert window._fit_all_q_thread.isRunning()
-    assert session.result_workspace.current_result is previous
+    assert _current_fit(session) is previous
 
     finish_release.set()
     deadline = time.monotonic() + 2.0
@@ -5948,7 +5995,7 @@ def test_main_window_close_waits_for_active_fit_all_q_worker(
 
     assert window._fit_all_q_thread is None
     assert not window._appearance_listener_connected
-    assert session.result_workspace.current_result is previous
+    assert _current_fit(session) is previous
     assert messages == []
 
 

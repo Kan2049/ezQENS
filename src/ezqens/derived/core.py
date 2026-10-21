@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -19,6 +21,9 @@ from ezqens.fitting import (
     ParameterFamily,
     ParameterReference,
 )
+
+if TYPE_CHECKING:
+    from ezqens.workflow.results import UnifiedResult
 
 _TAU_NUMERATOR_MEV_PS = 1.3164239138
 _CANONICAL_ENERGY_UNIT = "meV"
@@ -67,6 +72,7 @@ class DerivedWarningCode(StrEnum):
     EISF_FIXED_CONTRIBUTORS = "eisf_fixed_contributors"
     EISF_ALL_CONTRIBUTORS_FIXED = "eisf_all_contributors_fixed"
     INCOMPATIBLE_COMPONENT_TOPOLOGY = "incompatible_component_topology"
+    STALE_CONTEXT = "stale_context"
 
 
 @dataclass(frozen=True, slots=True)
@@ -429,7 +435,11 @@ class DerivedQENSPoint:
         ):
             raise ValueError("available derived science requires a successful fit")
         source_fit = self.source_outcome.fit_result
-        if source_fit is not None and self.q_value != source_fit.provenance.q_value:
+        if (
+            source_fit is not None
+            and self.derivation_status is DerivedPointStatus.AVAILABLE
+            and self.q_value != source_fit.provenance.q_value
+        ):
             raise ValueError("derived point Q must match its source FitResult")
         if self.derivation_status is DerivedPointStatus.AVAILABLE:
             if source_fit is None or self.eisf is None:
@@ -512,6 +522,57 @@ class DerivedQENSResult:
         """Return one derived point by original dataset group index."""
 
         return self.points[group_index]
+
+
+@dataclass(frozen=True, slots=True)
+class DerivedUnifiedQENSResult:
+    """Per-Q derivation without requiring one fixed branch composition."""
+
+    source_result: UnifiedResult
+    q_bins: QBins
+    points: tuple[DerivedQENSPoint, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.q_bins, QBins):
+            raise ValueError("derived Result requires QBins")
+        if (
+            len(self.points) != len(self.source_result.points)
+            or len(self.points) != self.q_bins.group_count
+            or tuple(point.group_index for point in self.points)
+            != tuple(range(len(self.points)))
+            or tuple(point.q_value for point in self.points)
+            != tuple(float(value) for value in self.q_bins.q_values)
+        ):
+            raise ValueError("derived Result must preserve every source Q")
+        if any(
+            point.source_outcome is not source.outcome
+            for point, source in zip(
+                self.points, self.source_result.points, strict=True
+            )
+        ):
+            raise ValueError("derived Result points must retain exact source outcomes")
+
+    def point(self, group_index: int) -> DerivedQENSPoint:
+        return self.points[group_index]
+
+    def lorentzian_series(
+        self, identity: ComponentIdentity
+    ) -> tuple[LorentzianDerivedQuantity | None, ...]:
+        return tuple(
+            next(
+                (item for item in point.lorentzians if item.component == identity), None
+            )
+            for point in self.points
+        )
+
+    @property
+    def eisf_series(self) -> tuple[EISFResult | None, ...]:
+        return tuple(
+            point.eisf
+            if point.eisf is not None and point.eisf.elastic_area is not None
+            else None
+            for point in self.points
+        )
 
 
 def _parameter_index(
@@ -976,3 +1037,94 @@ def derive_qens(
             )
         )
     return DerivedQENSResult(branch_result, q_bins, tuple(points))
+
+
+def derive_unified_qens(
+    result: UnifiedResult,
+    q_bins: QBins,
+    *,
+    context_valid: Sequence[bool],
+) -> DerivedUnifiedQENSResult:
+    """Derive each fitted Q independently, linking only exact component identities."""
+
+    if len(result.points) != q_bins.group_count or len(context_valid) != len(
+        result.points
+    ):
+        raise ValueError("Q topology and context validity must match the Result")
+    points: list[DerivedQENSPoint] = []
+    for source, q_raw, valid in zip(
+        result.points, q_bins.q_values, context_valid, strict=True
+    ):
+        outcome = source.outcome
+        q_value = float(q_raw)
+        if outcome.status is not MultiQFitStatus.SUCCESS:
+            points.append(
+                DerivedQENSPoint(
+                    outcome.group_index,
+                    q_value,
+                    outcome.status,
+                    DerivedPointStatus.NOT_APPLICABLE,
+                    outcome,
+                )
+            )
+            continue
+        if outcome.derived_result_excluded:
+            points.append(
+                DerivedQENSPoint(
+                    outcome.group_index,
+                    q_value,
+                    outcome.status,
+                    DerivedPointStatus.EXCLUDED,
+                    outcome,
+                )
+            )
+            continue
+        fit = outcome.fit_result
+        assert fit is not None
+        if not valid or fit.provenance.q_value != q_value:
+            points.append(
+                _blocked_point(
+                    outcome,
+                    q_value,
+                    DerivedWarning(
+                        DerivedWarningCode.STALE_CONTEXT,
+                        "fitted Q no longer matches its active scientific context",
+                    ),
+                )
+            )
+            continue
+        if fit.provenance.energy_unit != _CANONICAL_ENERGY_UNIT:
+            points.append(
+                _blocked_point(
+                    outcome,
+                    q_value,
+                    DerivedWarning(
+                        DerivedWarningCode.NON_CANONICAL_ENERGY_UNIT,
+                        "derived linewidth and relaxation time require canonical "
+                        "meV FitResult energy quantities",
+                    ),
+                )
+            )
+            continue
+        fitted = fit.fitted_model
+        if fitted is None:
+            raise ValueError("successful FitResult has no fitted model")
+        identities = tuple(item.identity for item in fitted.lorentzians)
+        lorentzians = tuple(
+            _derive_lorentzian(fit, identity) for identity in identities
+        )
+        eisf = _derive_eisf(fit, identities)
+        points.append(
+            DerivedQENSPoint(
+                outcome.group_index,
+                q_value,
+                outcome.status,
+                DerivedPointStatus.AVAILABLE,
+                outcome,
+                lorentzians,
+                eisf,
+                tuple(warning for item in lorentzians for warning in item.warnings)
+                + eisf.warnings,
+            )
+        )
+    return DerivedUnifiedQENSResult(result, q_bins, tuple(points))

@@ -31,7 +31,6 @@ from PySide6.QtWidgets import (
 )
 
 from ezqens.batch import (
-    MultiQBranchResult,
     MultiQFitOutcome,
     MultiQFitStatus,
 )
@@ -103,6 +102,7 @@ from ezqens.workflow import (
     MultiQConstraintTransferPolicy,
     PendingManualInteraction,
     ProjectDataset,
+    ResultOrigin,
     ResultSnapshot,
     SavedFitResult,
     SingleQAutoFitOutcome,
@@ -110,6 +110,7 @@ from ezqens.workflow import (
     WorkflowDiagnosticCode,
     WorkflowError,
     WorkflowProject,
+    active_manual_draft,
     add_project_dataset,
     adopt_selected_auto_fit_branch,
     adopt_single_q_auto_fit_candidate,
@@ -137,6 +138,7 @@ from ezqens.workflow import (
     remove_manual_component,
     remove_project_dataset,
     remove_saved_result,
+    replace_current_q_result,
     replace_project_dataset,
     resolve_manual_fit_context,
     run_and_adopt_manual_fit,
@@ -147,6 +149,7 @@ from ezqens.workflow import (
     untie_center_group_parameter,
     untie_parameter,
     update_manual_parameter,
+    update_working_draft,
 )
 
 INSPECTOR_PREFERRED_WIDTH = 280
@@ -342,7 +345,9 @@ class MainWindow(QMainWindow):
     def _manual_draft(self, draft: ManualFitDraft) -> None:
         if self._active_manual_session is None:
             raise RuntimeError("Manual draft assignment requires an active session")
-        self._active_manual_session.draft = draft
+        session = self._active_manual_session
+        session.result_workspace = update_working_draft(session.result_workspace, draft)
+        session.draft = draft
 
     @property
     def _manual_fit_result(self) -> FitResult | None:
@@ -1957,6 +1962,7 @@ class MainWindow(QMainWindow):
                         dialog.outcome,
                         selection,
                         group_index=self.dataset_view.current_group_index,
+                        current=workspace.current,
                     )
                     if not single_adoption.success:
                         raise WorkflowError(single_adoption.diagnostics)
@@ -1969,10 +1975,15 @@ class MainWindow(QMainWindow):
             else:
                 adoption = adoptions[0]
                 assert adoption.snapshot is not None
-                workspace = set_current_result(
+                adopt_current = (
+                    set_current_result
+                    if isinstance(adoption, ManualMultiQFitExecutionOutcome)
+                    else replace_current_q_result
+                )
+                workspace = adopt_current(
                     workspace,
                     adoption.snapshot,
-                    retain_saved_association=action == "save",
+                    draft=adoption.adopted_draft,
                 )
                 if action == "save":
                     workspace = save_current_result(workspace)
@@ -1998,7 +2009,8 @@ class MainWindow(QMainWindow):
         session.draft = adoption.adopted_draft
         session.group_index = dialog.outcome.group_index
         session.viewed_saved_result = None
-        self._project_current_snapshot(session, adoption.snapshot)
+        assert workspace.current is not None
+        self._project_current_snapshot(session, workspace.current)
         self._activate_manual_session(session, expand=True)
         dialog.accept()
 
@@ -2223,8 +2235,8 @@ class MainWindow(QMainWindow):
         session.execution_by_group.clear()
         session.result_workspace = replace(
             session.result_workspace,
-            current=None,
-            current_saved_result_index=None,
+            active_item=None,
+            untitled=None,
         )
 
     def _invalidate_manual_fit(self, *, retain_fit_result: bool = False) -> None:
@@ -2271,15 +2283,14 @@ class MainWindow(QMainWindow):
             self._manual_draft = outcome.adopted_draft
             session = self._active_manual_session
             assert session is not None
-            session.result_workspace = set_current_result(
+            session.result_workspace = replace_current_q_result(
                 session.result_workspace,
                 outcome.snapshot,
-                retain_saved_association=(
-                    session.result_workspace.current_saved_result_index is not None
-                ),
+                draft=outcome.adopted_draft,
             )
+            assert session.result_workspace.current is not None
             self._project_current_snapshot(
-                session, outcome.snapshot, outcome.diagnostics
+                session, session.result_workspace.current, outcome.diagnostics
             )
         else:
             self._manual_fit_result = None
@@ -2300,18 +2311,18 @@ class MainWindow(QMainWindow):
         ):
             return False
         current = session.result_workspace.current_result
-        if (
-            not isinstance(current, FitResult)
-            or not current.diagnostics.optimizer_success
-        ):
+        if current is None:
             return False
         group_index = self.dataset_view.current_group_index
+        current_fit = current.point(group_index).fit_result
+        if current_fit is None:
+            return False
         execution = session.execution_state(group_index)
         return (
             execution.lifecycle is ManualFitLifecycle.CURRENT
-            and execution.fit_result is current
-            and current.context_binding is not None
-            and current.context_binding.group_index == group_index
+            and execution.fit_result is current_fit
+            and current_fit.context_binding is not None
+            and current_fit.context_binding.group_index == group_index
         )
 
     def _has_unresolved_fitting_context_draft(self) -> bool:
@@ -2358,7 +2369,11 @@ class MainWindow(QMainWindow):
             return False
         if context.session.draft is not context.draft:
             return False
-        if context.session.result_workspace.current_result is not context.anchor_fit:
+        current = context.session.result_workspace.current_result
+        if (
+            current is None
+            or current.point(context.anchor_group).fit_result is not context.anchor_fit
+        ):
             return False
         execution = context.session.execution_state(context.anchor_group)
         if execution.fit_result is not context.anchor_fit:
@@ -2396,7 +2411,10 @@ class MainWindow(QMainWindow):
         group_index = self.dataset_view.current_group_index
         model = session.draft.setup(group_index).model
         current = session.result_workspace.current_result
-        if model is None or not isinstance(current, FitResult):
+        if model is None or current is None:
+            return
+        current_fit = current.point(group_index).fit_result
+        if current_fit is None:
             return
         workflow = self._workflow_project_for(self._open_project)
         try:
@@ -2421,7 +2439,7 @@ class MainWindow(QMainWindow):
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        self._start_fit_all_q(session, current, dialog.transfer_policy())
+        self._start_fit_all_q(session, current_fit, dialog.transfer_policy())
 
     def _start_fit_all_q(
         self,
@@ -2552,7 +2570,7 @@ class MainWindow(QMainWindow):
         session.result_workspace = set_current_result(
             workspace,
             outcome.snapshot,
-            retain_saved_association=workspace.current_saved_result_index is not None,
+            draft=outcome.adopted_draft,
         )
         session.viewed_saved_result = None
         self._project_current_snapshot(session, outcome.snapshot)
@@ -2613,26 +2631,19 @@ class MainWindow(QMainWindow):
     ) -> None:
         """Project execution evidence only when an issued snapshot becomes Current."""
 
-        result = snapshot.result
-        if isinstance(result, FitResult):
-            binding = result.context_binding
-            assert binding is not None
-            execution = session.execution_state(binding.group_index)
-            execution.lifecycle = ManualFitLifecycle.CURRENT
-            execution.fit_result = result
-            execution.diagnostics = diagnostics
-            return
-        branch = result
-        for outcome in branch.outcomes:
+        for point in snapshot.result.points:
+            outcome = point.outcome
             execution = session.execution_state(outcome.group_index)
             if outcome.status is MultiQFitStatus.SUCCESS:
-                assert outcome.fit_result is not None
+                assert point.fit_result is not None
                 execution.lifecycle = ManualFitLifecycle.CURRENT
-                execution.fit_result = outcome.fit_result
+                execution.fit_result = point.fit_result
+            elif outcome.status is MultiQFitStatus.NOT_RUN:
+                continue
             else:
                 execution.lifecycle = ManualFitLifecycle.NEEDS_FIT
                 execution.fit_result = None
-            execution.diagnostics = ()
+            execution.diagnostics = diagnostics if point.origin is not None else ()
 
     def _save_manual_result(self) -> None:
         session = self._active_manual_session
@@ -2686,10 +2697,13 @@ class MainWindow(QMainWindow):
         """Check public input identities before projecting an immutable snapshot."""
 
         result = entry.result
-        anchor_fit = (
-            result.outcome(result.anchor_group_index).fit_result
-            if isinstance(result, MultiQBranchResult)
-            else result
+        anchor_fit = next(
+            (
+                point.fit_result
+                for point in result.points
+                if point.fit_result is not None
+            ),
+            None,
         )
         assert anchor_fit is not None
         binding = anchor_fit.context_binding
@@ -2699,9 +2713,7 @@ class MainWindow(QMainWindow):
         context = resolve_manual_fit_context(
             workflow,
             self._workflow_dataset(workflow, dataset),
-            result.anchor_group_index
-            if isinstance(result, MultiQBranchResult)
-            else binding.group_index,
+            binding.group_index,
         ).context
         return (
             context is not None
@@ -2747,7 +2759,6 @@ class MainWindow(QMainWindow):
             item is entry for item in session.result_workspace.saved_results
         ):
             return
-        result = entry.result
         if not self._saved_result_matches_context(session, dataset, entry):
             show_message_dialog(
                 self,
@@ -2756,15 +2767,17 @@ class MainWindow(QMainWindow):
                 "be overlaid on the current Dataset view.",
             )
             return
+        result = entry.result
         if not self.open_dataset(project, dataset):
             return
         session.viewed_saved_result = entry
-        group_index = (
-            result.anchor_group_index
-            if isinstance(result, MultiQBranchResult)
-            else result.context_binding.group_index
-            if result.context_binding is not None
-            else self.dataset_view.current_group_index
+        group_index = next(
+            (
+                point.outcome.group_index
+                for point in result.points
+                if point.fit_result is not None
+            ),
+            self.dataset_view.current_group_index,
         )
         self.dataset_view.set_current_group(group_index)
         self._activate_manual_session(session)
@@ -2788,7 +2801,11 @@ class MainWindow(QMainWindow):
         # Recheck after the modal confirmation in case the row became stale.
         if not any(item is entry for item in session.result_workspace.saved_results):
             return
+        was_active = session.result_workspace.active_item is entry
         session.result_workspace = remove_saved_result(session.result_workspace, entry)
+        if was_active:
+            session.draft = active_manual_draft(session.result_workspace, session.draft)
+            session.execution_by_group.clear()
         if session.viewed_saved_result is entry:
             session.viewed_saved_result = None
         self.workspace.refresh_dataset_analysis(project)
@@ -3186,18 +3203,21 @@ class MainWindow(QMainWindow):
             if viewed_saved is None
             else viewed_saved.result
         )
+        current_point = (
+            current_result.point(group_index) if current_result is not None else None
+        )
         branch_outcome = (
-            current_result.outcome(group_index)
-            if isinstance(current_result, MultiQBranchResult)
+            current_point.outcome
+            if current_point is not None
+            and current_point.origin
+            in (ResultOrigin.MANUAL_FIT_ALL_Q, ResultOrigin.AUTO_FIT_BRANCH)
             else None
         )
         display_fit = self._manual_fit_result
         if viewed_saved is not None:
             display_fit = (
-                current_result
-                if isinstance(current_result, FitResult)
-                and current_result.context_binding is not None
-                and current_result.context_binding.group_index == group_index
+                current_result.point(group_index).fit_result
+                if current_result is not None
                 else None
             )
         if branch_outcome is not None and viewed_saved is not None:
@@ -3308,14 +3328,19 @@ class MainWindow(QMainWindow):
         current = (
             session.result_workspace.current_result if viewed is None else viewed.result
         )
-        if isinstance(current, MultiQBranchResult):
-            return tuple(outcome.status for outcome in current.outcomes)
-        statuses: list[MultiQFitStatus | None] = [None] * count
-        if isinstance(current, FitResult) and current.diagnostics.optimizer_success:
-            binding = current.context_binding
-            if binding is not None and 0 <= binding.group_index < count:
-                statuses[binding.group_index] = MultiQFitStatus.SUCCESS
-        return tuple(statuses)
+        if current is None:
+            return (None,) * count
+        multi_q = any(
+            point.origin
+            in (ResultOrigin.MANUAL_FIT_ALL_Q, ResultOrigin.AUTO_FIT_BRANCH)
+            for point in current.points
+        )
+        return tuple(
+            None
+            if point.status is MultiQFitStatus.NOT_RUN and not multi_q
+            else point.status
+            for point in current.points
+        )
 
     def _refresh_result_status_projection(self) -> None:
         session = self._active_manual_session

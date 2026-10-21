@@ -16,7 +16,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog, QTreeWidgetItem
 
 import ezqens.gui.main_window as window_module
-from ezqens.batch import MultiQBranchResult, MultiQFitStatus
+from ezqens.batch import MultiQFitStatus
 from ezqens.domain import (
     DiagnosticSeverity,
     QBins,
@@ -44,6 +44,7 @@ from ezqens.workflow import (
     ManualFitExecutionOutcome,
     MultiQConstraintTransferPolicy,
     ResultOrigin,
+    ResultSnapshot,
     SavedFitResult,
     SingleQAutoFitOutcome,
     WorkflowDiagnostic,
@@ -250,7 +251,9 @@ def _saved_item(problem: LifecycleProblem, entry: SavedFitResult) -> QTreeWidget
 def _apply_single(problem: LifecycleProblem) -> FitResult:
     dialog = _dialog(problem, (problem.candidates[1],))
     QTest.mouseClick(dialog.use_candidate_button, Qt.MouseButton.LeftButton)
-    result = problem.session.result_workspace.current_result
+    current = problem.session.result_workspace.current_result
+    assert current is not None
+    result = current.point(0).fit_result
     assert isinstance(result, FitResult)
     assert dialog.result() == QDialog.DialogCode.Accepted
     return result
@@ -335,7 +338,7 @@ def test_real_dialog_apply_projects_workflow_ties_bounds_and_b0(
         assert (
             problem.session.execution_state(1).lifecycle is ManualFitLifecycle.CURRENT
         )
-        assert isinstance(snapshot.result, MultiQBranchResult)
+        assert len(snapshot.result.points) == len(problem.session.draft.setups)
         assert (
             problem.window.dataset_view._manual_fit_result
             is snapshot.result.outcome(1).fit_result
@@ -363,6 +366,7 @@ def test_save_overwrites_exact_associated_entry_and_closes(
     assert workspace.saved_results[0] is not previous
     assert workspace.saved_results[0].name == previous.name
     assert workspace.saved_results[0].snapshot is workspace.current
+    assert previous.snapshot is not None
     assert previous.snapshot.candidate is problem.candidates[1].candidate
     assert workspace.current is not None
     assert workspace.current.candidate is problem.candidates[0].candidate
@@ -413,6 +417,7 @@ def test_single_save_as_retains_current_and_its_association(
     assert len(session.result_workspace.saved_results) == 2
     entry = session.result_workspace.saved_results[-1]
     assert entry.name == "Alternative"
+    assert entry.snapshot is not None
     assert entry.snapshot.origin is ResultOrigin.AUTO_FIT_SINGLE_Q
     assert entry.snapshot.candidate is problem.candidates[0].candidate
     _saved_item(problem, entry)
@@ -448,6 +453,7 @@ def test_mixed_save_as_appends_without_adopting_or_closing(
     assert workspace.saved_results[: len(before.saved_results)] == before.saved_results
     appended = workspace.saved_results[len(before.saved_results) :]
     assert len(appended) == 2 and appended[0] is not appended[1]
+    assert appended[0].snapshot is not None and appended[1].snapshot is not None
     assert appended[0].snapshot.origin is ResultOrigin.AUTO_FIT_SINGLE_Q
     assert appended[1].snapshot.origin is ResultOrigin.AUTO_FIT_BRANCH
     for entry in appended:
@@ -478,10 +484,11 @@ def test_save_as_adoption_failure_appends_nothing(
         candidate: CandidateFitResult,
         *,
         group_index: int | None = None,
+        current: ResultSnapshot | None = None,
     ) -> ManualFitExecutionOutcome:
         calls.append(candidate)
         return adopt_single_q_auto_fit_candidate(
-            project, draft, outcome, candidate, group_index=group_index
+            project, draft, outcome, candidate, group_index=group_index, current=current
         )
 
     def fail_branch(*_args: object, **_kwargs: object) -> object:
@@ -589,14 +596,30 @@ def test_workspace_delete_uses_exact_saved_entry(
     assert not any(
         entry is selected for entry in session.result_workspace.saved_results
     )
-    assert session.result_workspace.current is current
-    assert session.draft is draft and _execution_state(problem) == executions
+    if delete == "associated":
+        assert session.result_workspace.current is None
+        assert session.result_workspace.active_item is None
+        assert all(setup.model is None for setup in session.draft.setups)
+        assert all(
+            execution.fit_result is None
+            for execution in session.execution_by_group.values()
+        )
+    else:
+        assert session.result_workspace.current is current
+        assert session.draft is draft and _execution_state(problem) == executions
     if delete == "viewed":
         assert session.viewed_saved_result is None
-        assert problem.window.dataset_view._manual_fit_result is current.result
+        assert current is not None
+        assert (
+            problem.window.dataset_view._manual_fit_result
+            is current.result.point(0).fit_result
+        )
     else:
         assert session.viewed_saved_result is b
-        assert problem.window.dataset_view._manual_fit_result is b.result
+        assert (
+            problem.window.dataset_view._manual_fit_result
+            is b.result.point(0).fit_result
+        )
     if delete == "associated":
         assert session.result_workspace.associated_saved_result is None
         assert not problem.window.manual_fit_editor.save_result_button.isEnabled()
@@ -620,7 +643,9 @@ def test_structural_edit_dismisses_current_branch_overlay_only(
 ) -> None:
     if origin == "manual":
         _apply_single(problem)
-        anchor = problem.session.result_workspace.current_result
+        current = problem.session.result_workspace.current_result
+        assert current is not None
+        anchor = current.point(0).fit_result
         assert isinstance(anchor, FitResult)
         model = problem.session.draft.setup(0).model
         assert model is not None
@@ -639,7 +664,8 @@ def test_structural_edit_dismisses_current_branch_overlay_only(
         QTest.mouseClick(dialog.use_candidate_button, Qt.MouseButton.LeftButton)
     session = problem.session
     snapshot = session.result_workspace.current
-    assert snapshot is not None and isinstance(snapshot.result, MultiQBranchResult)
+    assert snapshot is not None
+    assert len(snapshot.result.points) == len(session.draft.setups)
     session.result_workspace = save_current_result_as(
         session.result_workspace, "Branch"
     )
@@ -658,9 +684,13 @@ def test_structural_edit_dismisses_current_branch_overlay_only(
     assert problem.window.dataset_view.residual_axes is None
     assert problem.window.manual_fit_editor.result_section.isHidden()
     assert session.result_workspace.current is snapshot
-    assert session.result_workspace.saved_results[0] is saved
+    updated = session.result_workspace.saved_results[0]
+    assert updated.snapshot is saved.snapshot
+    assert updated.modified_copy is not None
+    assert updated.has_draft_edits and not updated.modified
+    assert updated.working_copy.draft_states[1] is session.draft.setup(1).model
     assert problem.window.dataset_view.fit_status_descriptions == statuses
-    problem.window.workspace._on_item_double_clicked(_saved_item(problem, saved), 0)
+    problem.window.workspace._on_item_double_clicked(_saved_item(problem, updated), 0)
     problem.window.dataset_view.set_current_group(1)
     assert (
         problem.window.dataset_view._manual_fit_result
