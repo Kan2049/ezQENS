@@ -448,33 +448,55 @@ a fixed value belongs to the Method because it completes the fixed constraint.
 AutoFit and Manual Fit are creation/refinement paths into the same Method/Result
 lifecycle rather than permanently different result types.
 
-A Result belongs to concrete data and fitting scope. Editing a reusable Method
-must not silently rewrite an existing Result. Re-running an edited Current Fit
-replaces Current without rewriting a saved snapshot. Save overwrites only the
-entry associated with Current; Save As appends a snapshot and associates Current
-with it. Method Save and Save as New Method follow the analogous workflow.
+A Result belongs to one Dataset and holds ordered, core-owned per-Q outcomes.
+The active workspace working copy is the sole editable Manual parameter state.
+Each named saved entry may retain its own modified copy; separate untitled work
+is never added to history automatically. Manual Run Fit replaces only its Q in
+the active item; Fit to all Q replaces the full Result. Failed runs leave the
+Result unchanged. Parameter-value edits retain last-fit evidence while marking
+the edited Q needs-fit; structural edits dismiss its fitted overlay and Info.
+Save overwrites the active saved entry and its parameter baseline; Save As
+appends and activates a named entry. Neither rewrites immutable fit-time evidence.
 
-AutoFit finalizes each checked selection independently: a candidate not executed
-across Q uses its original Single-Q evaluation evidence; an executed candidate
-uses its complete execution-issued Multi-Q branch record. Mixed selections
-retain those respective scopes.
+Dataset single-click restores its last active item, including fresh/untitled
+work; otherwise it opens Best, the first saved entry, or raw data, in that order.
+Deleting the active saved entry uses the same default. Dataset double-click
+starts fresh analysis: raw data, empty parameters, no Result. Saved-entry click
+or double-click loads its editable retained copy. Switching Datasets, Projects,
+tasks, or saved entries retains saved working copies without prompting. A
+different Q-group count blocks loading but does not remove history. Context-menu
+Rename, Best, Revert to Saved, and confirmed Delete do not implicitly load.
 
-AutoFit dialog actions use the Result state captured when the dialog opened.
-With exactly one checked candidate and no Current Result, offer Apply. With one
-checked candidate and an existing Current, offer Save and Save As; Save is
-disabled if Current had no associated saved entry. With two or more checked
-candidates, offer Save As only. Results produced inside the dialog do not change
-these opening-state rules.
+Replacing/retiring untitled fitted work requires Save / Discard / Cancel; Save
+requires a non-empty name before continuing. Untitled edits without a fit require
+Discard / Cancel and cannot be saved as fit evidence. Dataset/Project removal
+collects unsaved Results and unfitted edits in one Save All / Discard / Cancel
+dialog. Save All overwrites modified saved entries and names untitled fitted
+items together; cancelling naming cancels closure. Unfitted untitled setups are
+listed as discarded. Quit also warns for clean saved Results: there is no disk
+project persistence yet, so all Results are lost on quit. Dataset removal does
+not delete source files and explicitly warns that its Results are discarded.
 
-AutoFit Apply installs the selected snapshot as Current together with the
-workflow-adopted Manual draft and per-Q execution state, then closes the dialog.
-Save performs that adoption and overwrites Current's associated saved entry,
-retaining the association, then closes. AutoFit Save As uses one editable name
-per selection, defaulting to its existing candidate display label and requiring
-non-empty names. It appends all selected snapshots atomically while leaving
-Current, its association, the Manual draft, and per-Q state unchanged; the dialog
-stays open and Workspace history updates immediately. Adoption failure changes
-none of that application state. Names have no uniqueness requirement.
+Dataset dots represent readiness, not fit coverage. Result rows show fitted Qs
+out of counted Qs (core total minus core EXCLUDED count), a status breakdown,
+and all/partial/none coverage using semantic colors and text. Cached modified
+copies have a marker. Best is first, then save order; the active entry is
+highlighted, or the Dataset for untitled/fresh analysis.
+
+AutoFit Save accepts one or more checked candidates. An executed selection saves
+its full issued Multi-Q branch; otherwise it saves original anchor evaluation
+evidence. All selections append atomically, without installing their adopted
+Manual drafts or changing existing active work. With no Result or draft edits,
+the first new entry is loaded. The dialog stays open and history updates
+immediately. A naming dialog defaults to candidate labels, choosing the first
+free numeric suffix ` (1)`, ` (2)`, etc. only for defaults; user names need only
+be non-empty, not unique.
+
+AutoFit Apply requires an active saved entry (clean or modified) and exactly one
+checked candidate. It adopts that original anchor candidate and replaces only
+its Q in the active entry's working copy, marks it modified, and closes. Cached
+Multi-Q execution does not widen Apply's scope. Recommendation/scientific
+semantics and Method Save behavior remain unchanged.
 
 The former `.qensfit` project-container proposal is not a permanent contract.
 The final container format and extension remain unresolved until persistence

@@ -68,7 +68,6 @@ from ezqens.fitting import (
 from ezqens.gui import MainWindow, create_application
 from ezqens.gui.auto_fit import AutoFitCandidateDialog
 from ezqens.gui.main_window import ManualFitSession
-from ezqens.gui.manual_fit import ManualFitLifecycle
 from ezqens.gui.scientific_canvas import (
     SCIENTIFIC_BACKGROUND_COLOR,
     SCIENTIFIC_ELASTIC_COLOR,
@@ -86,7 +85,10 @@ from ezqens.workflow import (
     SelectedAutoFitProgressEvent,
     SingleQAutoFitOutcome,
     WorkflowProject,
+    adopt_single_q_auto_fit_candidate,
     run_single_q_auto_fit,
+    save_current_result_as,
+    set_current_result,
 )
 from ezqens.workflow.multi_q import _issue_auto_fit_candidate_branch_result
 
@@ -976,7 +978,7 @@ def test_executed_candidate_panels_consume_derived_api_and_reuse_cached_views(
     )
     _select_only(dialog, selected)
     assert not dialog.use_candidate_button.isEnabled()
-    assert dialog.save_as_button.isEnabled()
+    assert dialog.save_button.isEnabled()
     assert not dialog.fwhm_axes_by_candidate
     assert not dialog.eisf_axes_by_candidate
     assert dialog.fwhm_view_button.isHidden()
@@ -986,8 +988,8 @@ def test_executed_candidate_panels_consume_derived_api_and_reuse_cached_views(
     dialog._sync_controls()
     dialog._draw_comparison()
 
-    assert dialog.save_as_button.isEnabled()
-    assert dialog.use_candidate_button.toolTip() == ""
+    assert dialog.save_button.isEnabled()
+    assert "saved Result" in dialog.use_candidate_button.toolTip()
     assert not dialog.fwhm_view_button.isChecked()
     assert not dialog.eisf_view_button.isChecked()
     assert not dialog.fwhm_view_button.isHidden()
@@ -1195,11 +1197,11 @@ def test_executed_candidate_panels_consume_derived_api_and_reuse_cached_views(
     assert dialog.set_candidate_checked(unexecuted_row, True)
     assert dialog.focused_candidate is active_before_check
     assert not dialog.use_candidate_button.isEnabled()
-    assert dialog.save_as_button.isEnabled()
+    assert dialog.save_button.isEnabled()
     assert unexecuted.candidate not in dialog.fwhm_axes_by_candidate
     assert unexecuted.candidate not in dialog.eisf_axes_by_candidate
     assert dialog.set_candidate_checked(unexecuted_row, False)
-    assert dialog.save_as_button.isEnabled()
+    assert dialog.save_button.isEnabled()
 
     cached_derived = dict(dialog._derived_results)
     dialog.fwhm_view_button.setChecked(False)
@@ -2591,8 +2593,8 @@ def test_selected_candidates_run_in_background_cache_and_navigate_together(
     assert not dialog.use_candidate_button.isEnabled()
     assert dialog.set_candidate_checked(not_run_row, False)
     assert dialog.progress_label.text() == "Calculated groups: 30 / 30"
-    assert dialog.save_as_button.text() == "Save As"
-    assert dialog.save_as_button.isEnabled()
+    assert dialog.save_button.text() == "Save"
+    assert dialog.save_button.isEnabled()
     assert tuple(item.candidate for item in dialog.executed_branches) == expected_order
     dialog.reject()
 
@@ -2800,7 +2802,7 @@ def test_autofit_dialog_preview_and_explicit_adoption_are_group_local(
     )
     assert chosen.fit is not None
 
-    retained_result = chosen.fit
+    retained_result = None
     first_session.draft = first_session.draft.with_model(
         1,
         ManualModelState(
@@ -2808,12 +2810,6 @@ def test_autofit_dialog_preview_and_explicit_adoption_are_group_local(
             b0=ManualParameterIntent(0.3),
         ),
     )
-    first_group_one = first_session.execution_state(1)
-    first_group_one.lifecycle = ManualFitLifecycle.CURRENT
-    first_group_one.fit_result = retained_result
-    second_group_zero = second_session.execution_state(0)
-    second_group_zero.lifecycle = ManualFitLifecycle.CURRENT
-    second_group_zero.fit_result = retained_result
     second_draft = second_session.draft
 
     dialog = AutoFitCandidateDialog(outcome, window)
@@ -3099,6 +3095,16 @@ def test_autofit_dialog_preview_and_explicit_adoption_are_group_local(
     assert dialog.result() == QDialog.DialogCode.Rejected
     assert first_session.draft is before_focus
 
+    initial = adopt_single_q_auto_fit_candidate(
+        workflow, first_session.draft, outcome, chosen, current=None
+    )
+    assert initial.snapshot is not None and initial.adopted_draft is not None
+    first_session.result_workspace = set_current_result(
+        first_session.result_workspace, initial.snapshot, draft=initial.adopted_draft
+    )
+    first_session.result_workspace = save_current_result_as(
+        first_session.result_workspace, "Active"
+    )
     adoption_dialog = window._create_auto_fit_dialog(
         project, first, workflow, first_session.draft, outcome
     )

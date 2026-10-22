@@ -55,7 +55,9 @@ from ezqens.gui.workspace import (
     q_method_drag_indices_from_mime_data,
 )
 from ezqens.preprocessing import FittingSelection
-from ezqens.workflow import ManualComponentKind
+from ezqens.workflow import ManualComponentKind, ResultDisplayStatus
+
+type FitDisplayStatus = MultiQFitStatus | ResultDisplayStatus | None
 
 Q_DISPLAY_UNIT = "Å⁻¹"
 OVERVIEW_COLORMAP = "jet"
@@ -67,7 +69,7 @@ SPECTRUM_ZOOM_DRAG_THRESHOLD_PX = 4.0
 BOUNDARY_HIT_RADIUS_LOGICAL_PX = 8.0
 
 
-def _fit_status_description(status: MultiQFitStatus | None) -> str:
+def _fit_status_description(status: FitDisplayStatus) -> str:
     if status is None or status is MultiQFitStatus.NOT_RUN:
         return "Not run"
     return {
@@ -75,6 +77,12 @@ def _fit_status_description(status: MultiQFitStatus | None) -> str:
         MultiQFitStatus.FAILED: "Failed",
         MultiQFitStatus.BLOCKED: "Blocked",
         MultiQFitStatus.EXCLUDED: "Excluded",
+        ResultDisplayStatus.FITTED_CURRENT: "Success",
+        ResultDisplayStatus.NEEDS_FIT: "Needs fit",
+        ResultDisplayStatus.NOT_FITTED: "Not fitted",
+        ResultDisplayStatus.FAILED: "Failed",
+        ResultDisplayStatus.BLOCKED: "Blocked",
+        ResultDisplayStatus.EXCLUDED: "Excluded",
     }[status]
 
 
@@ -176,7 +184,7 @@ class ReducedDatasetView(QWidget):
         self._navigation_drag_active = False
         self._navigation_drag_axes: Axes | None = None
         self._navigation_enabled = True
-        self._fit_statuses: tuple[MultiQFitStatus | None, ...] = ()
+        self._fit_statuses: tuple[FitDisplayStatus, ...] = ()
         self._processing_group_index: int | None = None
         self.y_scale = "linear"
         self.heatmap_scale = "linear"
@@ -718,7 +726,7 @@ class ReducedDatasetView(QWidget):
 
     def set_fit_statuses(
         self,
-        statuses: tuple[MultiQFitStatus | None, ...],
+        statuses: tuple[FitDisplayStatus, ...],
         *,
         processing_group_index: int | None = None,
     ) -> None:
@@ -1682,22 +1690,25 @@ class ReducedDatasetView(QWidget):
                 edges.append(self._fit_status_warning)
                 widths.append(1.2)
                 sizes.append(34.0)
-            elif status is MultiQFitStatus.SUCCESS:
+            elif status in (
+                MultiQFitStatus.SUCCESS,
+                ResultDisplayStatus.FITTED_CURRENT,
+            ):
                 faces.append(self._fit_status_success)
                 edges.append(self._fit_status_success)
                 widths.append(0.8)
                 sizes.append(16.0)
-            elif status is MultiQFitStatus.FAILED:
+            elif status in (MultiQFitStatus.FAILED, ResultDisplayStatus.FAILED):
                 faces.append(self._fit_status_danger)
                 edges.append(self._fit_status_danger)
                 widths.append(0.8)
                 sizes.append(16.0)
-            elif status is MultiQFitStatus.BLOCKED:
+            elif status in (MultiQFitStatus.BLOCKED, ResultDisplayStatus.BLOCKED):
                 faces.append("none")
                 edges.append(self._fit_status_danger)
                 widths.append(1.5)
                 sizes.append(22.0)
-            elif status is MultiQFitStatus.EXCLUDED:
+            elif status in (MultiQFitStatus.EXCLUDED, ResultDisplayStatus.EXCLUDED):
                 faces.append(self._fit_status_muted)
                 edges.append(self._fit_status_muted)
                 widths.append(0.8)

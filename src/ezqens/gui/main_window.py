@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import sys
-from collections.abc import Iterable
-from dataclasses import dataclass, field, replace
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import Event
 from uuid import uuid4
@@ -58,7 +58,7 @@ from ezqens.fitting import (
 )
 from ezqens.gui import masking
 from ezqens.gui.auto_fit import AutoFitCandidateDialog, ResultNamesDialog
-from ezqens.gui.dataset_view import ReducedDatasetView
+from ezqens.gui.dataset_view import FitDisplayStatus, ReducedDatasetView
 from ezqens.gui.dialogs import (
     DialogChoice,
     choose_dialog,
@@ -95,6 +95,7 @@ from ezqens.workflow import (
     AutoFitCandidateBranchResult,
     FittingWorkspaceState,
     ManualComponentKind,
+    ManualFitContext,
     ManualFitDraft,
     ManualFitExecutionOutcome,
     ManualMultiQFitExecutionOutcome,
@@ -102,7 +103,7 @@ from ezqens.workflow import (
     MultiQConstraintTransferPolicy,
     PendingManualInteraction,
     ProjectDataset,
-    ResultOrigin,
+    ResultDisplayStatus,
     ResultSnapshot,
     SavedFitResult,
     SingleQAutoFitOutcome,
@@ -124,8 +125,11 @@ from ezqens.workflow import (
     complete_lorentzian_interaction,
     create_parameter_tie,
     create_project,
+    draft_edit_items,
+    fresh_analysis,
     join_center_group,
     join_parameter_tie,
+    load_saved_result,
     manual_workflow_readiness,
     materialize_manual_setup,
     measured_point_correspondence_exactly_unchanged,
@@ -138,14 +142,19 @@ from ezqens.workflow import (
     remove_manual_component,
     remove_project_dataset,
     remove_saved_result,
+    rename_saved_result,
     replace_current_q_result,
     replace_project_dataset,
     resolve_manual_fit_context,
+    result_q_display_status,
+    revert_saved_result,
     run_and_adopt_manual_fit,
     run_single_q_auto_fit,
     save_current_result,
     save_current_result_as,
+    set_best_saved_result,
     set_current_result,
+    unsaved_result_items,
     untie_center_group_parameter,
     untie_parameter,
     update_manual_parameter,
@@ -187,28 +196,90 @@ class ImportBatchResult:
 
 @dataclass(eq=False, slots=True)
 class ManualFitExecutionState:
-    """Execution-only state owned independently by one Sample Group."""
+    """Transient run diagnostics and overlay visibility, never Result truth."""
 
-    lifecycle: ManualFitLifecycle = ManualFitLifecycle.READY
-    fit_result: FitResult | None = None
+    session: ManualFitSession
+    group_index: int
+    running: bool = False
+    overlay_hidden: bool = False
     diagnostics: tuple[WorkflowDiagnostic, ...] = ()
 
+    @property
+    def fit_result(self) -> FitResult | None:
+        current = self.session.result_workspace.current_result
+        if current is None or self.overlay_hidden or self.running:
+            return None
+        point = current.point(self.group_index)
+        model = self.session.draft.setup(self.group_index).model
+        fitted_state = point.working_state
+        # Match visible component sections only, not scientific validity. This
+        # also keeps structural-overlay dismissal on a cached entry's reload.
+        if model is None or fitted_state is None:
+            return None
+        if (
+            (model.elastic_area is None) != (fitted_state.elastic_area is None)
+            or model.background is not fitted_state.background
+            or {item.identity for item in model.lorentzians}
+            != {item.identity for item in fitted_state.lorentzians}
+        ):
+            return None
+        return point.fit_result
 
-@dataclass(eq=False, slots=True)
+    @property
+    def lifecycle(self) -> ManualFitLifecycle:
+        if self.running:
+            return ManualFitLifecycle.FITTING
+        status = self.session.display_status(self.group_index)
+        if status is ResultDisplayStatus.FITTED_CURRENT:
+            return ManualFitLifecycle.CURRENT
+        if status is ResultDisplayStatus.NEEDS_FIT:
+            return ManualFitLifecycle.NEEDS_FIT
+        return ManualFitLifecycle.READY
+
+
 class ManualFitSession:
-    """One authoritative in-session Manual working state for one Sample."""
+    """Project the active workflow working copy into the Manual editor."""
 
-    owner: tuple[ProjectState, str]
-    draft: ManualFitDraft
-    group_index: int
-    execution_by_group: dict[int, ManualFitExecutionState] = field(default_factory=dict)
-    result_workspace: FittingWorkspaceState = field(
-        default_factory=FittingWorkspaceState
-    )
-    viewed_saved_result: SavedFitResult | None = None
-    draft_available: bool = True
-    editor_expanded: bool = True
-    result_expanded: bool = False
+    def __init__(
+        self, owner: tuple[ProjectState, str], draft: ManualFitDraft, group_index: int
+    ) -> None:
+        self.owner = owner
+        self._template = draft
+        self.group_index = group_index
+        self.result_workspace = FittingWorkspaceState()
+        self.execution_by_group: dict[int, ManualFitExecutionState] = {}
+        self.context_for: Callable[[int], ManualFitContext | None] = lambda _index: None
+        self.draft_available = True
+        self.editor_expanded = True
+        self.result_expanded = False
+        if any(setup.model is not None for setup in draft.setups):
+            self.result_workspace = update_working_draft(self.result_workspace, draft)
+
+    @property
+    def draft(self) -> ManualFitDraft:
+        if self.draft_available:
+            self._template = active_manual_draft(self.result_workspace, self._template)
+        return self._template
+
+    @draft.setter
+    def draft(self, draft: ManualFitDraft) -> None:
+        self.result_workspace = update_working_draft(self.result_workspace, draft)
+        self._template = draft
+
+    def display_status(self, group_index: int) -> ResultDisplayStatus:
+        return result_q_display_status(
+            self.result_workspace,
+            self.draft,
+            group_index,
+            self.context_for(group_index),
+        )
+
+    def resume(self, template: ManualFitDraft) -> None:
+        """Re-open editing after a consent-gated role/topology retirement."""
+        self.result_workspace, self._template = fresh_analysis(
+            self.result_workspace, template, discard_untitled=True
+        )
+        self.draft_available = True
 
     def execution_state(
         self,
@@ -218,7 +289,9 @@ class ManualFitSession:
 
         target = self.group_index if group_index is None else group_index
         self.draft.setup(target)
-        return self.execution_by_group.setdefault(target, ManualFitExecutionState())
+        return self.execution_by_group.setdefault(
+            target, ManualFitExecutionState(self, target)
+        )
 
     @property
     def lifecycle(self) -> ManualFitLifecycle:
@@ -226,15 +299,11 @@ class ManualFitSession:
 
     @lifecycle.setter
     def lifecycle(self, lifecycle: ManualFitLifecycle) -> None:
-        self.execution_state().lifecycle = lifecycle
+        self.execution_state().running = lifecycle is ManualFitLifecycle.FITTING
 
     @property
     def fit_result(self) -> FitResult | None:
         return self.execution_state().fit_result
-
-    @fit_result.setter
-    def fit_result(self, result: FitResult | None) -> None:
-        self.execution_state().fit_result = result
 
     @property
     def execution_diagnostics(self) -> tuple[WorkflowDiagnostic, ...]:
@@ -346,21 +415,12 @@ class MainWindow(QMainWindow):
         if self._active_manual_session is None:
             raise RuntimeError("Manual draft assignment requires an active session")
         session = self._active_manual_session
-        session.result_workspace = update_working_draft(session.result_workspace, draft)
         session.draft = draft
 
     @property
     def _manual_fit_result(self) -> FitResult | None:
         session = self._active_manual_session
         return None if session is None else session.fit_result
-
-    @_manual_fit_result.setter
-    def _manual_fit_result(self, result: FitResult | None) -> None:
-        if self._active_manual_session is None:
-            if result is None:
-                return
-            raise RuntimeError("Manual result assignment requires an active session")
-        self._active_manual_session.fit_result = result
 
     @property
     def _manual_fit_lifecycle(self) -> ManualFitLifecycle:
@@ -442,14 +502,16 @@ class MainWindow(QMainWindow):
         self._fit_all_q_anchor_group: int | None = None
         self._fit_all_q_session: ManualFitSession | None = None
         self._fit_all_q_run_context: FitAllQRunContext | None = None
-        self._fit_all_q_live_statuses: list[MultiQFitStatus | None] | None = None
+        self._fit_all_q_live_statuses: list[FitDisplayStatus] | None = None
         self._fit_all_q_close_pending = False
         self._mask_boundary_preview_active = False
         self.workspace.set_scientific_replacement_resolver(
             self._resolve_scientific_dataset_replacement,
         )
+        self.workspace.set_dataset_replacement_guard(self._approve_dataset_replacement)
         self.workspace.set_fitting_started_resolver(self._dataset_fitting_started)
         self.workspace.set_saved_results_resolver(self._workspace_saved_results)
+        self.workspace.set_active_result_resolver(self._workspace_active_result)
         self.inspector = self._build_inspector()
         self._create_actions()
         self.central_workspace = self._build_central_workspace()
@@ -475,8 +537,12 @@ class MainWindow(QMainWindow):
         self.workspace.import_files_requested.connect(self._prompt_import_files)
         self.workspace.import_folder_requested.connect(self._prompt_import_folder)
         self.workspace.dataset_open_requested.connect(self._open_workspace_dataset)
+        self.workspace.dataset_fresh_requested.connect(self._fresh_workspace_dataset)
         self.workspace.saved_result_open_requested.connect(self._open_saved_result)
         self.workspace.saved_result_delete_requested.connect(self._delete_saved_result)
+        self.workspace.saved_result_rename_requested.connect(self._rename_saved_result)
+        self.workspace.saved_result_best_requested.connect(self._best_saved_result)
+        self.workspace.saved_result_revert_requested.connect(self._revert_saved_result)
         self.workspace.dataset_added.connect(self._on_dataset_added)
         self.workspace.dataset_role_changed.connect(self._on_dataset_role_changed)
         self.workspace.dataset_role_change_requested.connect(self.change_dataset_role)
@@ -560,6 +626,12 @@ class MainWindow(QMainWindow):
             event.ignore()
             return
 
+        self.setEnabled(True)
+        if not self._resolve_result_close(
+            tuple(self._manual_sessions.values()), quitting=True
+        ):
+            event.ignore()
+            return
         if self._appearance_listener_connected:
             self._appearance_controller.theme_changed.disconnect(self._on_theme_changed)
             self._appearance_listener_connected = False
@@ -1592,12 +1664,12 @@ class MainWindow(QMainWindow):
         project: ProjectState,
         dataset: DatasetState,
     ) -> None:
-        """Opening the Dataset returns its display to the Current Result."""
+        """Restore the last active item, then Best, save order, or raw data."""
 
         if self.open_dataset(project, dataset):
             session = self._manual_sessions.get((project, dataset.workflow_dataset_id))
-            if session is not None and session.viewed_saved_result is not None:
-                session.viewed_saved_result = None
+            if session is not None and session.draft_available:
+                self._default_result_view(session)
                 self._refresh_manual_fit()
 
     def show_q_rebin(
@@ -1708,17 +1780,18 @@ class MainWindow(QMainWindow):
                 None,
             )
         )
-        self._workflow_projects[project] = preview.workflow
-        self._preserved_q_sources.setdefault(
-            (project, preview.sample.dataset_id),
-            preview.sample_source,
-        )
-        if preview.resolution is not None and preview.resolution_source is not None:
+
+        def publish_workflow() -> None:
+            self._workflow_projects[project] = preview.workflow
             self._preserved_q_sources.setdefault(
-                (project, preview.resolution.dataset_id),
-                preview.resolution_source,
+                (project, preview.sample.dataset_id), preview.sample_source
             )
-        current_sample, _current_resolution = self.workspace.apply_q_rebin_transaction(
+            if preview.resolution is not None and preview.resolution_source is not None:
+                self._preserved_q_sources.setdefault(
+                    (project, preview.resolution.dataset_id), preview.resolution_source
+                )
+
+        transaction = self.workspace.apply_q_rebin_transaction(
             project,
             sample_state,
             preview.sample.dataset,
@@ -1728,12 +1801,16 @@ class MainWindow(QMainWindow):
                 if visible_resolution is None or preview.resolution is None
                 else preview.resolution.dataset
             ),
+            before_publish=publish_workflow,
         )
-        session = self._sample_view_sessions.setdefault(
+        if transaction is None:
+            return False
+        current_sample, _current_resolution = transaction
+        view_session = self._sample_view_sessions.setdefault(
             (project, current_sample.workflow_dataset_id),
             SampleViewSession(),
         )
-        session.group_index = (
+        view_session.group_index = (
             self.dataset_view.current_group_index
             if project is self._open_project and current_sample is self._open_dataset
             else 0
@@ -1780,7 +1857,7 @@ class MainWindow(QMainWindow):
                 )
                 self._manual_sessions[owner] = session
             else:
-                session.draft = draft
+                session.resume(draft)
                 session.group_index = self.dataset_view.current_group_index
                 session.execution_by_group.clear()
                 session.draft_available = True
@@ -1810,9 +1887,11 @@ class MainWindow(QMainWindow):
         session = self._manual_sessions.get(owner)
         if session is not None and not session.draft_available:
             try:
-                session.draft = open_manual_fit_draft(
-                    workflow,
-                    self._workflow_dataset(workflow, target_dataset),
+                session.resume(
+                    open_manual_fit_draft(
+                        workflow,
+                        self._workflow_dataset(workflow, target_dataset),
+                    )
                 )
             except WorkflowError as error:
                 self._show_workflow_error("AutoFit", error)
@@ -1868,8 +1947,7 @@ class MainWindow(QMainWindow):
             self,
             project=workflow,
             draft=draft,
-            has_current_result=workspace.current is not None,
-            has_saved_association=workspace.associated_saved_result is not None,
+            has_active_saved_result=workspace.associated_saved_result is not None,
         )
         dialog.finalization_requested.connect(
             lambda action, selections: self._finalize_auto_fit(
@@ -1890,27 +1968,34 @@ class MainWindow(QMainWindow):
 
         if self._fit_all_q_mutation_blocked() or dialog.is_running or not selections:
             return
-        if (
+        session = self._manual_sessions.get(owner)
+        workspace = (
+            FittingWorkspaceState() if session is None else session.result_workspace
+        )
+        if action not in {"apply", "save"} or (
             action == "apply"
-            and (dialog.has_current_result_at_open or len(selections) != 1)
-            or action == "save"
-            and (
-                not dialog.has_current_result_at_open
-                or not dialog.has_saved_association_at_open
-                or len(selections) != 1
-            )
-            or action not in {"apply", "save", "save_as"}
+            and (workspace.associated_saved_result is None or len(selections) != 1)
         ):
             return
         names: tuple[str, ...] = ()
-        if action == "save_as":
-            naming = ResultNamesDialog(
-                tuple(
+        if action == "save":
+            taken = {entry.name for entry in workspace.saved_results}
+            defaults: list[str] = []
+            for item in selections:
+                base = (
                     item.anchor_evidence.candidate.name
                     if isinstance(item, AutoFitCandidateBranchResult)
                     else item.candidate.name
-                    for item in selections
-                ),
+                )
+                name = base
+                suffix = 1
+                while name in taken:
+                    name = f"{base} ({suffix})"
+                    suffix += 1
+                taken.add(name)
+                defaults.append(name)
+            naming = ResultNamesDialog(
+                tuple(defaults),
                 dialog,
             )
             if naming.exec() != QDialog.DialogCode.Accepted:
@@ -1918,12 +2003,10 @@ class MainWindow(QMainWindow):
             names = naming.names
             if not all(name.strip() for name in names):
                 return
-        elif len(selections) != 1:
-            return
-        session = self._manual_sessions.get(owner)
         draft = original_draft if session is None else session.draft
-        workspace = (
-            FittingWorkspaceState() if session is None else session.result_workspace
+        active_copy = workspace.active_working_copy
+        load_first = active_copy is None or not (
+            active_copy.has_result or active_copy.has_draft_edits
         )
         workflow = self._workflow_project_for(owner[0])
         adoptions: list[
@@ -1947,6 +2030,10 @@ class MainWindow(QMainWindow):
                     )
                 )
             for selection in selections:
+                if action == "apply" and isinstance(
+                    selection, AutoFitCandidateBranchResult
+                ):
+                    selection = selection.anchor_evidence
                 if isinstance(selection, AutoFitCandidateBranchResult):
                     adoption = adopt_selected_auto_fit_branch(
                         workflow,
@@ -1962,16 +2049,21 @@ class MainWindow(QMainWindow):
                         dialog.outcome,
                         selection,
                         group_index=self.dataset_view.current_group_index,
-                        current=workspace.current,
+                        current=workspace.current if action == "apply" else None,
                     )
                     if not single_adoption.success:
                         raise WorkflowError(single_adoption.diagnostics)
                     adoption = single_adoption
                 adoptions.append(adoption)
-            if action == "save_as":
+            if action == "save":
+                first_saved_index = len(workspace.saved_results)
                 for name, adoption in zip(names, adoptions, strict=True):
                     assert adoption.snapshot is not None
                     workspace = append_saved_result(workspace, name, adoption.snapshot)
+                if load_first:
+                    workspace, _projected = load_saved_result(
+                        workspace, draft, workspace.saved_results[first_saved_index]
+                    )
             else:
                 adoption = adoptions[0]
                 assert adoption.snapshot is not None
@@ -1985,8 +2077,6 @@ class MainWindow(QMainWindow):
                     adoption.snapshot,
                     draft=adoption.adopted_draft,
                 )
-                if action == "save":
-                    workspace = save_current_result(workspace)
         except WorkflowError as error:
             self._show_workflow_error("AutoFit", error)
             return
@@ -1999,8 +2089,14 @@ class MainWindow(QMainWindow):
             )
             self._manual_sessions[owner] = session
         session.result_workspace = workspace
-        if action == "save_as":
+        if action == "save":
             self.workspace.refresh_dataset_analysis(owner[0])
+            if load_first:
+                session.execution_by_group.clear()
+                self._activate_manual_session(session)
+            dialog.set_active_saved_result(
+                workspace.associated_saved_result is not None
+            )
             self._refresh_manual_result_actions()
             return
         adoption = adoptions[0]
@@ -2008,9 +2104,10 @@ class MainWindow(QMainWindow):
         self._discard_pending_manual_interaction()
         session.draft = adoption.adopted_draft
         session.group_index = dialog.outcome.group_index
-        session.viewed_saved_result = None
         assert workspace.current is not None
-        self._project_current_snapshot(session, workspace.current)
+        self._project_current_snapshot(
+            session, workspace.current, group_indices=(dialog.outcome.group_index,)
+        )
         self._activate_manual_session(session, expand=True)
         dialog.accept()
 
@@ -2023,6 +2120,7 @@ class MainWindow(QMainWindow):
         """Bind one retained Sample session to the current editor and plot view."""
 
         self._active_manual_session = session
+        session.context_for = lambda index: self._manual_context(session, index)
         self.set_inspector_visible(True)
         self.manual_fit_editor.show()
         self.manual_fit_editor.set_expanded(True if expand else session.editor_expanded)
@@ -2209,7 +2307,6 @@ class MainWindow(QMainWindow):
     ) -> None:
         """Mark the affected Groups in one retained Sample session stale."""
 
-        self._dismiss_incompatible_saved_result(session)
         if not session.draft_available:
             return
 
@@ -2218,26 +2315,42 @@ class MainWindow(QMainWindow):
         )
         for group_index in targets:
             execution = session.execution_state(group_index)
-            if execution.lifecycle is ManualFitLifecycle.CURRENT:
-                execution.lifecycle = ManualFitLifecycle.NEEDS_FIT
             if not retain_fit_result:
-                execution.fit_result = None
-            if execution.fit_result is None:
+                execution.overlay_hidden = (
+                    session.display_status(group_index)
+                    is not ResultDisplayStatus.FITTED_CURRENT
+                )
                 execution.diagnostics = ()
         # Working-Method edits invalidate the editable per-Group projection only.
         # Current and Saved Results are immutable application lifecycle state.
 
-    def _retire_manual_editing(self, session: ManualFitSession) -> None:
-        """Retain saved history while retiring an incompatible working draft."""
+    def _approve_dataset_replacement(
+        self, project: ProjectState, previous: DatasetState, replacement: ReducedDataset
+    ) -> bool:
+        """Veto a retiring replacement before Workspace/workflow publication."""
 
-        session.viewed_saved_result = None
+        retires = previous.dataset.role is SpectrumRole.SAMPLE and (
+            replacement.role is not SpectrumRole.SAMPLE
+            or len(previous.dataset.spectra) != len(replacement.spectra)
+        )
+        if not retires:
+            return True
+        if self._fit_all_q_mutation_blocked():
+            return False
+        session = self._manual_sessions.get((project, previous.workflow_dataset_id))
+        return session is None or self._resolve_untitled(session)
+
+    def _retire_manual_editing(self, session: ManualFitSession) -> None:
+        """Retire a preflight-approved draft; notifications cannot offer a veto."""
+
+        session.result_workspace, _draft = fresh_analysis(
+            session.result_workspace, session.draft, discard_untitled=True
+        )
+        session.draft = _draft
         session.draft_available = False
         session.execution_by_group.clear()
-        session.result_workspace = replace(
-            session.result_workspace,
-            active_item=None,
-            untitled=None,
-        )
+        if session is self._active_manual_session:
+            self._deactivate_manual_fit()
 
     def _invalidate_manual_fit(self, *, retain_fit_result: bool = False) -> None:
         """Mark working edits stale, optionally retaining last fitted evidence."""
@@ -2259,12 +2372,8 @@ class MainWindow(QMainWindow):
             or self._open_project is None
         ):
             return
-        if self._active_manual_session is not None:
-            self._active_manual_session.viewed_saved_result = None
-        previous_lifecycle = self._manual_fit_lifecycle
         self._discard_pending_manual_interaction()
         self._manual_fit_lifecycle = ManualFitLifecycle.FITTING
-        self._manual_fit_result = None
         self.dataset_view.set_manual_fit_result(None)
         self._manual_execution_diagnostics = ()
         self._refresh_manual_fit()
@@ -2290,15 +2399,12 @@ class MainWindow(QMainWindow):
             )
             assert session.result_workspace.current is not None
             self._project_current_snapshot(
-                session, session.result_workspace.current, outcome.diagnostics
+                session,
+                session.result_workspace.current,
+                outcome.diagnostics,
+                group_indices=(self.dataset_view.current_group_index,),
             )
-        else:
-            self._manual_fit_result = None
-            self._manual_fit_lifecycle = (
-                ManualFitLifecycle.NEEDS_FIT
-                if previous_lifecycle is ManualFitLifecycle.NEEDS_FIT
-                else ManualFitLifecycle.READY
-            )
+        self._manual_fit_lifecycle = ManualFitLifecycle.READY
         self.dataset_view.set_manual_fit_result(self._manual_fit_result)
         self._refresh_manual_fit()
 
@@ -2317,10 +2423,8 @@ class MainWindow(QMainWindow):
         current_fit = current.point(group_index).fit_result
         if current_fit is None:
             return False
-        execution = session.execution_state(group_index)
         return (
-            execution.lifecycle is ManualFitLifecycle.CURRENT
-            and execution.fit_result is current_fit
+            session.display_status(group_index) is ResultDisplayStatus.FITTED_CURRENT
             and current_fit.context_binding is not None
             and current_fit.context_binding.group_index == group_index
         )
@@ -2374,9 +2478,6 @@ class MainWindow(QMainWindow):
             current is None
             or current.point(context.anchor_group).fit_result is not context.anchor_fit
         ):
-            return False
-        execution = context.session.execution_state(context.anchor_group)
-        if execution.fit_result is not context.anchor_fit:
             return False
         if self._workflow_projects.get(context.owner[0]) is not context.workflow:
             return False
@@ -2572,7 +2673,6 @@ class MainWindow(QMainWindow):
             outcome.snapshot,
             draft=outcome.adopted_draft,
         )
-        session.viewed_saved_result = None
         self._project_current_snapshot(session, outcome.snapshot)
         self._finish_fit_all_q_run(generation)
 
@@ -2614,10 +2714,17 @@ class MainWindow(QMainWindow):
             self._fit_all_q_thread = None
             self._fit_all_q_worker = None
             if self._fit_all_q_close_pending:
+                anchor = self._fit_all_q_anchor_group
                 self._fit_all_q_cancel_event = None
                 self._fit_all_q_anchor_group = None
                 self._fit_all_q_session = None
                 self._fit_all_q_run_context = None
+                self.setEnabled(True)
+                self._set_fit_all_q_context_locked(False)
+                self.dataset_view.set_q_navigation_enabled(True)
+                if anchor is not None:
+                    self.dataset_view.set_current_group(anchor)
+                self._refresh_manual_fit()
         thread.deleteLater()
         if self._fit_all_q_close_pending:
             self._fit_all_q_close_pending = False
@@ -2628,22 +2735,19 @@ class MainWindow(QMainWindow):
         session: ManualFitSession,
         snapshot: ResultSnapshot,
         diagnostics: tuple[WorkflowDiagnostic, ...] = (),
+        *,
+        group_indices: tuple[int, ...] | None = None,
     ) -> None:
         """Project execution evidence only when an issued snapshot becomes Current."""
 
         for point in snapshot.result.points:
             outcome = point.outcome
-            execution = session.execution_state(outcome.group_index)
-            if outcome.status is MultiQFitStatus.SUCCESS:
-                assert point.fit_result is not None
-                execution.lifecycle = ManualFitLifecycle.CURRENT
-                execution.fit_result = point.fit_result
-            elif outcome.status is MultiQFitStatus.NOT_RUN:
+            if group_indices is not None and outcome.group_index not in group_indices:
                 continue
-            else:
-                execution.lifecycle = ManualFitLifecycle.NEEDS_FIT
-                execution.fit_result = None
-            execution.diagnostics = diagnostics if point.origin is not None else ()
+            execution = session.execution_state(outcome.group_index)
+            execution.running = False
+            execution.overlay_hidden = False
+            execution.diagnostics = ()
 
     def _save_manual_result(self) -> None:
         session = self._active_manual_session
@@ -2651,12 +2755,7 @@ class MainWindow(QMainWindow):
             return
         if session.result_workspace.current_saved_result_index is None:
             return
-        before = session.result_workspace
-        session.result_workspace = save_current_result(before)
-        if session.viewed_saved_result is before.associated_saved_result:
-            session.viewed_saved_result = (
-                session.result_workspace.associated_saved_result
-            )
+        session.result_workspace = save_current_result(session.result_workspace)
         self.workspace.refresh_dataset_analysis(session.owner[0])
         self._refresh_manual_fit()
 
@@ -2672,7 +2771,6 @@ class MainWindow(QMainWindow):
             session.result_workspace,
             name,
         )
-        session.viewed_saved_result = None
         self.workspace.refresh_dataset_analysis(session.owner[0])
         self._refresh_manual_fit()
 
@@ -2688,47 +2786,19 @@ class MainWindow(QMainWindow):
             return ()
         return session.result_workspace.saved_results
 
-    def _saved_result_matches_context(
-        self,
-        session: ManualFitSession,
-        dataset: DatasetState,
-        entry: SavedFitResult,
-    ) -> bool:
-        """Check public input identities before projecting an immutable snapshot."""
-
-        result = entry.result
-        anchor_fit = next(
-            (
-                point.fit_result
-                for point in result.points
-                if point.fit_result is not None
-            ),
-            None,
-        )
-        assert anchor_fit is not None
-        binding = anchor_fit.context_binding
-        if binding is None or dataset.dataset.role is not SpectrumRole.SAMPLE:
-            return False
-        workflow = self._workflow_project_for(session.owner[0])
-        context = resolve_manual_fit_context(
-            workflow,
-            self._workflow_dataset(workflow, dataset),
-            binding.group_index,
-        ).context
+    def _workspace_active_result(
+        self, project: ProjectState, dataset: DatasetState
+    ) -> SavedFitResult | None:
+        session = self._manual_sessions.get((project, dataset.workflow_dataset_id))
         return (
-            context is not None
-            and binding.selection is context.selection
-            and binding.prepared_resolution.sample_dataset is context.sample.dataset
-            and binding.prepared_resolution.resolution_dataset
-            is context.resolution.dataset
+            None
+            if session is None
+            else session.result_workspace.associated_saved_result
         )
 
-    def _dismiss_incompatible_saved_result(self, session: ManualFitSession) -> None:
-        """End a historical view before any refreshed plot can project it."""
-
-        entry = session.viewed_saved_result
-        if entry is None:
-            return
+    def _manual_context(
+        self, session: ManualFitSession, group_index: int
+    ) -> ManualFitContext | None:
         dataset = next(
             (
                 item
@@ -2737,12 +2807,186 @@ class MainWindow(QMainWindow):
             ),
             None,
         )
-        if (
-            dataset is None
-            or not any(item is entry for item in session.result_workspace.saved_results)
-            or not self._saved_result_matches_context(session, dataset, entry)
+        if dataset is None or dataset.dataset.role is not SpectrumRole.SAMPLE:
+            return None
+        workflow = self._workflow_project_for(session.owner[0])
+        return resolve_manual_fit_context(
+            workflow, self._workflow_dataset(workflow, dataset), group_index
+        ).context
+
+    def _resolve_untitled(self, session: ManualFitSession) -> bool:
+        """Obtain explicit consent before replacing unsaved untitled work."""
+
+        item = session.result_workspace.untitled
+        if item is None or not (item.has_result or item.has_draft_edits):
+            return True
+        choices = [DialogChoice("Discard", "discard", destructive=True)]
+        if item.has_result:
+            choices.insert(0, DialogChoice("Save", "save"))
+            message = "Save the Untitled Result before replacing it?"
+        else:
+            message = (
+                "Discard the unfitted edits? Setups without a fit cannot be saved."
+            )
+        choice = choose_dialog(
+            self,
+            "Replace Untitled",
+            message,
+            (*choices, DialogChoice("Cancel", "cancel", default=True)),
+            cancel_value="cancel",
+        )
+        if choice == "cancel":
+            return False
+        if choice == "save":
+            name, accepted = QInputDialog.getText(self, "Save Result As", "Result name")
+            if not accepted or not name.strip():
+                return False
+            session.result_workspace = save_current_result_as(
+                session.result_workspace, name.strip()
+            )
+        return True
+
+    def _resolve_result_close(
+        self, sessions: tuple[ManualFitSession, ...], *, quitting: bool = False
+    ) -> bool:
+        """Resolve all affected in-memory work in one explicit close decision."""
+        lines: list[str] = []
+        for session in sessions:
+            workspace = session.result_workspace
+            pending = (*unsaved_result_items(workspace), *draft_edit_items(workspace))
+            dataset_name = self._dataset_name_for_workflow_id(
+                session.owner[0], session.owner[1]
+            )
+            seen: set[int] = set()
+            for item in pending:
+                if id(item) in seen:
+                    continue
+                seen.add(id(item))
+                name = item.name if isinstance(item, SavedFitResult) else "Untitled"
+                kinds = []
+                if item.modified:
+                    kinds.append("unsaved fit")
+                if item.has_draft_edits:
+                    kinds.append("unfitted edits")
+                lines.append(f"{dataset_name} · {name} · {' / '.join(kinds)}")
+        any_result = any(
+            session.result_workspace.saved_results
+            or session.result_workspace.current_result is not None
+            for session in sessions
+        )
+        if not lines and not (quitting and any_result):
+            return True
+        message = "\n".join(lines)
+        if quitting:
+            message += (
+                "\n\nezQENS does not yet save projects to disk. All Results, "
+                "including saved Results, are discarded on quit."
+            )
+        message += "\nUnfitted Untitled setups cannot be saved and will be discarded."
+        choice = choose_dialog(
+            self,
+            "Close Results",
+            message.strip(),
+            (
+                DialogChoice("Save All", "save"),
+                DialogChoice("Discard", "discard", destructive=True),
+                DialogChoice("Cancel", "cancel", default=True),
+            ),
+            cancel_value="cancel",
+        )
+        if choice != "save":
+            return choice == "discard"
+        untitled_sessions = tuple(
+            session
+            for session in sessions
+            if session.result_workspace.untitled is not None
+            and session.result_workspace.untitled.has_result
+        )
+        names: tuple[str, ...] = ()
+        if untitled_sessions:
+            naming = ResultNamesDialog(
+                tuple(
+                    self._dataset_name_for_workflow_id(*session.owner) + " · Untitled"
+                    for session in untitled_sessions
+                ),
+                self,
+            )
+            if naming.exec() != QDialog.DialogCode.Accepted:
+                return False
+            names = naming.names
+            if not all(name.strip() for name in names):
+                return False
+        updates: list[tuple[ManualFitSession, FittingWorkspaceState]] = []
+        try:
+            for session in sessions:
+                workspace = session.result_workspace
+                if session in untitled_sessions:
+                    workspace = save_current_result_as(
+                        workspace, names[untitled_sessions.index(session)].strip()
+                    )
+                active_index = workspace.current_saved_result_index
+                active_item, untitled = workspace.active_item, workspace.untitled
+                modified_indices = tuple(
+                    index
+                    for index, entry in enumerate(workspace.saved_results)
+                    if entry.modified_copy is not None
+                )
+                for index in modified_indices:
+                    entry = workspace.saved_results[index]
+                    # Save the entry's existing working copy, without loading its
+                    # historical Q topology into the current Dataset/editor.
+                    workspace = save_current_result(
+                        replace(workspace, active_item=entry, untitled=None)
+                    )
+                workspace = replace(
+                    workspace,
+                    active_item=(
+                        workspace.saved_results[active_index]
+                        if active_index is not None
+                        else active_item
+                    ),
+                    untitled=untitled,
+                )
+                updates.append((session, workspace))
+        except ValueError as error:
+            show_message_dialog(self, "Save All", str(error))
+            return False
+        for session, workspace in updates:
+            session.result_workspace = workspace
+            self.workspace.refresh_dataset_analysis(session.owner[0])
+        return True
+
+    def _default_result_view(self, session: ManualFitSession) -> None:
+        workspace = session.result_workspace
+        if workspace.active_item is not None:
+            return
+        entry = workspace.best_saved_result or next(iter(workspace.saved_results), None)
+        if entry is not None and entry.result.total_count == len(session.draft.setups):
+            session.result_workspace, _draft = load_saved_result(
+                workspace, session.draft, entry
+            )
+
+    def _fresh_workspace_dataset(
+        self, project: ProjectState, dataset: DatasetState
+    ) -> None:
+        if self._fit_all_q_mutation_blocked() or not self.open_dataset(
+            project, dataset
         ):
-            session.viewed_saved_result = None
+            return
+        if dataset.dataset.role is not SpectrumRole.SAMPLE:
+            return
+        session = self._manual_sessions.get((project, dataset.workflow_dataset_id))
+        if session is None:
+            self.show_manual_fit(project, dataset)
+            session = self._active_manual_session
+        if session is None or not self._resolve_untitled(session):
+            return
+        self._discard_pending_manual_interaction()
+        session.result_workspace, _draft = fresh_analysis(
+            session.result_workspace, session.draft, discard_untitled=True
+        )
+        session.execution_by_group.clear()
+        self._activate_manual_session(session)
 
     def _open_saved_result(
         self,
@@ -2750,7 +2994,7 @@ class MainWindow(QMainWindow):
         dataset: DatasetState,
         entry: SavedFitResult,
     ) -> None:
-        """View one saved snapshot without replacing Current or the Manual draft."""
+        """Load the saved entry's editable, cached working copy."""
 
         if self._fit_all_q_mutation_blocked():
             return
@@ -2759,32 +3003,95 @@ class MainWindow(QMainWindow):
             item is entry for item in session.result_workspace.saved_results
         ):
             return
-        if not self._saved_result_matches_context(session, dataset, entry):
+        if dataset.dataset.role is not SpectrumRole.SAMPLE:
             show_message_dialog(
                 self,
                 "Open Saved Result",
-                "This Result belongs to an earlier scientific context and cannot "
-                "be overlaid on the current Dataset view.",
+                "Results can only be loaded for a Sample Dataset.",
             )
             return
-        result = entry.result
+        if entry.result.total_count != len(dataset.dataset.spectra):
+            show_message_dialog(
+                self,
+                "Open Saved Result",
+                "This Result has a different Q-group count and cannot be loaded.",
+            )
+            return
         if not self.open_dataset(project, dataset):
             return
-        session.viewed_saved_result = entry
-        group_index = next(
-            (
-                point.outcome.group_index
-                for point in result.points
-                if point.fit_result is not None
-            ),
-            self.dataset_view.current_group_index,
+        if not self._resolve_untitled(session):
+            return
+        self._discard_pending_manual_interaction()
+        session.result_workspace, _draft = load_saved_result(
+            session.result_workspace, session.draft, entry, discard_untitled=True
         )
-        self.dataset_view.set_current_group(group_index)
+        session.execution_by_group.clear()
         self._activate_manual_session(session)
+
+    def _rename_saved_result(
+        self, project: ProjectState, dataset: DatasetState, entry: SavedFitResult
+    ) -> None:
+        session = self._saved_result_session(project, dataset, entry)
+        if session is None:
+            return
+        name, accepted = QInputDialog.getText(
+            self, "Rename Result", "Result name", text=entry.name
+        )
+        if (
+            accepted
+            and name.strip()
+            and self._saved_result_session(project, dataset, entry) is session
+        ):
+            session.result_workspace = rename_saved_result(
+                session.result_workspace, entry, name.strip()
+            )
+            self.workspace.refresh_dataset_analysis(project)
+
+    def _best_saved_result(
+        self, project: ProjectState, dataset: DatasetState, entry: SavedFitResult
+    ) -> None:
+        session = self._saved_result_session(project, dataset, entry)
+        if session is None:
+            return
+        session.result_workspace = set_best_saved_result(
+            session.result_workspace, None if entry.best else entry
+        )
+        self.workspace.refresh_dataset_analysis(project)
+
+    def _revert_saved_result(
+        self, project: ProjectState, dataset: DatasetState, entry: SavedFitResult
+    ) -> None:
+        if self._fit_all_q_mutation_blocked():
+            return
+        session = self._saved_result_session(project, dataset, entry)
+        if session is None:
+            return
+        if session.result_workspace.active_item is entry:
+            self._discard_pending_manual_interaction()
+        session.result_workspace, _draft = revert_saved_result(
+            session.result_workspace, session.draft, entry
+        )
+        session.execution_by_group.clear()
+        self.workspace.refresh_dataset_analysis(project)
+        if self._active_manual_session is session:
+            self._refresh_manual_fit()
+
+    def _saved_result_session(
+        self, project: ProjectState, dataset: DatasetState, entry: SavedFitResult
+    ) -> ManualFitSession | None:
+        session = self._manual_sessions.get((project, dataset.workflow_dataset_id))
+        return (
+            session
+            if session is not None
+            and any(item is entry for item in session.result_workspace.saved_results)
+            else None
+        )
 
     def _delete_saved_result(
         self, project: ProjectState, dataset: DatasetState, entry: SavedFitResult
     ) -> None:
+        if self._fit_all_q_mutation_blocked():
+            return
         session = self._manual_sessions.get((project, dataset.workflow_dataset_id))
         if session is None or not any(
             item is entry for item in session.result_workspace.saved_results
@@ -2804,10 +3111,8 @@ class MainWindow(QMainWindow):
         was_active = session.result_workspace.active_item is entry
         session.result_workspace = remove_saved_result(session.result_workspace, entry)
         if was_active:
-            session.draft = active_manual_draft(session.result_workspace, session.draft)
             session.execution_by_group.clear()
-        if session.viewed_saved_result is entry:
-            session.viewed_saved_result = None
+            self._default_result_view(session)
         self.workspace.refresh_dataset_analysis(project)
         if self._active_manual_session is session:
             self._refresh_manual_fit()
@@ -3189,7 +3494,6 @@ class MainWindow(QMainWindow):
             != (self._open_project, self._open_dataset.workflow_dataset_id)
         ):
             return
-        self._dismiss_incompatible_saved_result(session)
         workflow = self._workflow_project_for(self._open_project)
         group_index = self.dataset_view.current_group_index
         readiness = manual_workflow_readiness(
@@ -3197,39 +3501,15 @@ class MainWindow(QMainWindow):
             self._manual_draft,
             group_index,
         )
-        viewed_saved = session.viewed_saved_result
-        current_result = (
-            session.result_workspace.current_result
-            if viewed_saved is None
-            else viewed_saved.result
-        )
+        current_result = session.result_workspace.current_result
         current_point = (
             current_result.point(group_index) if current_result is not None else None
         )
-        branch_outcome = (
-            current_point.outcome
-            if current_point is not None
-            and current_point.origin
-            in (ResultOrigin.MANUAL_FIT_ALL_Q, ResultOrigin.AUTO_FIT_BRANCH)
-            else None
-        )
+        branch_outcome = current_point.outcome if current_point is not None else None
         display_fit = self._manual_fit_result
-        if viewed_saved is not None:
-            display_fit = (
-                current_result.point(group_index).fit_result
-                if current_result is not None
-                else None
-            )
-        if branch_outcome is not None and viewed_saved is not None:
-            display_fit = (
-                branch_outcome.fit_result
-                if branch_outcome.status is MultiQFitStatus.SUCCESS
-                else None
-            )
         result_outcome = branch_outcome
         if (
-            viewed_saved is None
-            and branch_outcome is not None
+            branch_outcome is not None
             and branch_outcome.status is MultiQFitStatus.SUCCESS
             and display_fit is None
         ):
@@ -3266,13 +3546,10 @@ class MainWindow(QMainWindow):
             metadata,
             readiness,
             lifecycle=self._manual_fit_lifecycle,
-            execution_diagnostics=(
-                () if branch_outcome is not None else self._manual_execution_diagnostics
-            ),
+            execution_diagnostics=self._manual_execution_diagnostics,
             fit_result=display_fit,
             result_outcome=result_outcome,
             result_metadata=result_metadata,
-            saved_result_name=None if viewed_saved is None else viewed_saved.name,
         )
         self._refresh_manual_result_actions()
         if self._active_fit_all_q_generation is None:
@@ -3282,9 +3559,7 @@ class MainWindow(QMainWindow):
         try:
             preview = (
                 None
-                if viewed_saved is not None
-                or readiness.context is None
-                or model is None
+                if readiness.context is None or model is None
                 else preview_manual_fit(
                     workflow,
                     self._manual_draft,
@@ -3318,29 +3593,21 @@ class MainWindow(QMainWindow):
             fit_all_q_enabled=self._fit_all_q_available(session),
             running=self._active_fit_all_q_generation is not None,
         )
+        for dialog in self.findChildren(AutoFitCandidateDialog):
+            context = dialog.outcome.scientific_context
+            if (context.project_id, context.sample.dataset_id) == (
+                session.draft.project_id,
+                session.draft.sample_id,
+            ):
+                dialog.set_active_saved_result(associated is not None)
 
     def _result_fit_statuses(
         self,
         session: ManualFitSession,
-    ) -> tuple[MultiQFitStatus | None, ...]:
+    ) -> tuple[ResultDisplayStatus | None, ...]:
         count = len(session.draft.setups)
-        viewed = session.viewed_saved_result
-        current = (
-            session.result_workspace.current_result if viewed is None else viewed.result
-        )
-        if current is None:
-            return (None,) * count
-        multi_q = any(
-            point.origin
-            in (ResultOrigin.MANUAL_FIT_ALL_Q, ResultOrigin.AUTO_FIT_BRANCH)
-            for point in current.points
-        )
-        return tuple(
-            None
-            if point.status is MultiQFitStatus.NOT_RUN and not multi_q
-            else point.status
-            for point in current.points
-        )
+        session.context_for = lambda index: self._manual_context(session, index)
+        return tuple(session.display_status(index) for index in range(count))
 
     def _refresh_result_status_projection(self) -> None:
         session = self._active_manual_session
@@ -3460,6 +3727,13 @@ class MainWindow(QMainWindow):
                 return False
         if self._open_project is project and not self._resolve_mask_task_transition():
             return False
+        sessions = tuple(
+            session
+            for session in self._manual_sessions.values()
+            if session.owner[0] is project
+        )
+        if not self._resolve_result_close(sessions):
+            return False
         if self._open_project is project:
             self._clear_open_context()
         self._workflow_projects.pop(project, None)
@@ -3491,7 +3765,7 @@ class MainWindow(QMainWindow):
                 self,
                 "Remove from Project",
                 "Remove this dataset from the ezQENS Project? Its source file will "
-                "not be deleted from disk.",
+                "not be deleted from disk. Its Results will be discarded.",
                 accept_text="Remove",
                 destructive=True,
             )
@@ -3502,6 +3776,9 @@ class MainWindow(QMainWindow):
             self._open_project is project and self._open_dataset is dataset
         )
         if removing_open_dataset and not self._resolve_mask_task_transition():
+            return False
+        session = self._manual_sessions.get((project, dataset.workflow_dataset_id))
+        if session is not None and not self._resolve_result_close((session,)):
             return False
         if removing_open_dataset and dataset is not self._open_dataset:
             # Saving the resolved task replaces its immutable DatasetState owner.
@@ -4644,18 +4921,19 @@ class MainWindow(QMainWindow):
                 session.owner[1] == previous.workflow_dataset_id
                 and current.dataset.role is not SpectrumRole.SAMPLE
             ):
-                if session.result_workspace.saved_results:
-                    self._retire_manual_editing(session)
-                elif session is not self._active_manual_session:
+                self._retire_manual_editing(session)
+                if not session.result_workspace.saved_results:
                     self._manual_sessions.pop(session.owner, None)
             elif (
                 session.owner[1] == previous.workflow_dataset_id
                 and current.dataset.role is SpectrumRole.SAMPLE
                 and not session.draft_available
             ):
-                session.draft = open_manual_fit_draft(
-                    workflow,
-                    self._workflow_dataset(workflow, current),
+                session.resume(
+                    open_manual_fit_draft(
+                        workflow,
+                        self._workflow_dataset(workflow, current),
+                    )
                 )
                 session.execution_by_group.clear()
                 session.draft_available = True
@@ -4669,10 +4947,8 @@ class MainWindow(QMainWindow):
                     (project, current.workflow_dataset_id),
                 ),
                 allow_group_count_change=(
-                    project,
-                    current.workflow_dataset_id,
-                )
-                in self._preserved_q_sources,
+                    len(previous.dataset.spectra) != len(current.dataset.spectra)
+                ),
             )
             self.dataset_view.set_selection(
                 None if current.auto_mask is None else current.auto_mask.selection,
@@ -4760,13 +5036,13 @@ class MainWindow(QMainWindow):
                 and session.owner[1] == previous.workflow_dataset_id
                 else None
             )
-            self._invalidate_manual_session(session, group_indices)
-            if (
-                session.owner[1] == previous.workflow_dataset_id
-                and len(session.draft.setups) != len(current.dataset.spectra)
-                and session.result_workspace.saved_results
+            if session.owner[1] == previous.workflow_dataset_id and (
+                current.dataset.role is not SpectrumRole.SAMPLE
+                or len(session.draft.setups) != len(current.dataset.spectra)
             ):
                 self._retire_manual_editing(session)
+            else:
+                self._invalidate_manual_session(session, group_indices)
         if self._open_project is project and self._open_dataset is previous:
             self._open_dataset = current
             if (
@@ -4784,10 +5060,8 @@ class MainWindow(QMainWindow):
                     (project, current.workflow_dataset_id),
                 ),
                 allow_group_count_change=(
-                    project,
-                    current.workflow_dataset_id,
-                )
-                in self._preserved_q_sources,
+                    len(previous.dataset.spectra) != len(current.dataset.spectra)
+                ),
             )
             self.dataset_view.set_selection(
                 None if current.auto_mask is None else current.auto_mask.selection,
@@ -4799,8 +5073,7 @@ class MainWindow(QMainWindow):
             available, _tooltip = self._manual_fit_capability(project, current)
             if not available and self._active_manual_session is not None:
                 session = self._active_manual_session
-                if session.result_workspace.saved_results:
-                    self._retire_manual_editing(session)
+                self._retire_manual_editing(session)
                 self.close_manual_fit(
                     discard_session=not session.result_workspace.saved_results
                 )

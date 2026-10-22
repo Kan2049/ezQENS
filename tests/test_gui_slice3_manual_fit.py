@@ -59,6 +59,7 @@ from ezqens.fitting import (
     ParameterFamily,
     ParameterMetadata,
     ParameterReference,
+    manual_parameter_metadata,
 )
 from ezqens.gui import MainWindow, create_application
 from ezqens.gui.dataset_view import OVERVIEW_ACTIVE_ALPHA, OVERVIEW_ACTIVE_COLOR
@@ -74,7 +75,6 @@ from ezqens.gui.manual_fit_all_q import (
 )
 from ezqens.gui.theme import indicator_tokens_for, tokens_for
 from ezqens.gui.workspace import (
-    SAVED_RESULT_ENTRY_ROLE,
     DatasetAnalysisState,
     DatasetState,
     ProjectState,
@@ -98,6 +98,7 @@ from ezqens.workflow import (
     WorkflowProject,
     active_transferable_constraints,
     create_parameter_tie,
+    fit_all_q_from_current_with_adoption,
     manual_workflow_readiness,
     run_and_adopt_manual_fit,
     set_current_result,
@@ -1967,7 +1968,6 @@ def test_real_tab_commits_only_user_edits_and_allows_blank_optional_bounds(
         ),
     )
     offset = ParameterReference(BACKGROUND_COMPONENT, ParameterFamily.OFFSET)
-    window._manual_fit_lifecycle = ManualFitLifecycle.CURRENT
     window._refresh_manual_fit()
     calls: list[tuple[ParameterReference, ManualParameterEdit]] = []
     actual_update = update_manual_parameter
@@ -1996,7 +1996,7 @@ def test_real_tab_commits_only_user_edits_and_allows_blank_optional_bounds(
     QTest.keyClick(controls.current, Qt.Key.Key_Tab)
     application.processEvents()
     assert calls == []
-    assert _lifecycle(window) is ManualFitLifecycle.CURRENT
+    assert _lifecycle(window) is ManualFitLifecycle.NEEDS_FIT
     assert controls.current.text() == "1.23"
     model = window._manual_draft.setup(0).model
     assert model is not None
@@ -2007,7 +2007,7 @@ def test_real_tab_commits_only_user_edits_and_allows_blank_optional_bounds(
     QTest.keyClick(controls.lower, Qt.Key.Key_Tab)
     application.processEvents()
     assert calls == []
-    assert _lifecycle(window) is ManualFitLifecycle.CURRENT
+    assert _lifecycle(window) is ManualFitLifecycle.NEEDS_FIT
 
     _replace_text_and_tab(application, controls.lower, "")
     assert len(calls) == 1
@@ -2311,7 +2311,7 @@ def test_small_semantic_indicators_use_saturated_palette(
         indicators.error
     )
     assert window.workspace._analysis_state_colors[DatasetAnalysisState.READY] == (
-        indicators.warning
+        indicators.success
     )
     assert window.manual_fit_editor._icon_colors["accent"] == indicators.accent
     assert window.manual_fit_editor._icon_colors["amber"] == indicators.warning
@@ -2559,12 +2559,12 @@ def test_run_fit_adopts_values_seeds_next_run_and_uses_result_plot(
         recording_run,
     )
     assert window.manual_fit_editor.run_button.isEnabled()
-    assert window.manual_fit_editor.status_label.text() == "Ready · Not yet fit"
+    assert window.manual_fit_editor.status_label.text() == "Needs fit"
 
     window.manual_fit_editor.run_button.click()
 
     assert _lifecycle(window) is ManualFitLifecycle.CURRENT
-    assert window.manual_fit_editor.status_label.text() == "Fit current"
+    assert window.manual_fit_editor.status_label.text() == "Manual setup · Fit current"
     assert window._manual_fit_result is not None
     first_result = window._manual_fit_result
     assert window.dataset_view._manual_fit_result is window._manual_fit_result
@@ -2656,7 +2656,7 @@ def test_run_fit_readiness_warning_and_structured_failure_behavior(
 
     assert window._manual_draft is original
     assert window._manual_fit_result is None
-    assert _lifecycle(window) is ManualFitLifecycle.READY
+    assert _lifecycle(window) is ManualFitLifecycle.NEEDS_FIT
     assert (
         "structured execution failure"
         in window.manual_fit_editor.diagnostics_label.text()
@@ -2693,7 +2693,7 @@ def test_parameter_changes_mark_current_fit_stale(
         edit.editingFinished.emit()
 
     assert _lifecycle(window) is ManualFitLifecycle.NEEDS_FIT
-    assert window.manual_fit_editor.status_label.text() == "Needs fit"
+    assert window.manual_fit_editor.status_label.text() == "Manual setup · Needs fit"
     assert window._manual_fit_result is result
     assert window.dataset_view._manual_fit_result is result
     assert window.dataset_view.residual_axes is not None
@@ -2800,7 +2800,6 @@ def test_tied_numeric_edits_refresh_every_member_once_and_mark_fit_stale(
     )
     _chain_control(window, centers[0]).click()
     _chain_control(window, centers[1]).click()
-    window._manual_fit_lifecycle = ManualFitLifecycle.CURRENT
     calls: list[tuple[ParameterReference, ManualParameterEdit]] = []
     actual_update = update_manual_parameter
 
@@ -2892,7 +2891,6 @@ def test_tied_bounds_state_is_shared_and_untie_copies_it(
     )
     _chain_control(window, areas[0]).click()
     _chain_control(window, areas[1]).click()
-    window._manual_fit_lifecycle = ManualFitLifecycle.CURRENT
 
     window.manual_fit_editor.parameter_controls[areas[0]].bounds_enabled.click()
 
@@ -2931,7 +2929,7 @@ def test_navigation_restores_current_fit_and_scientific_changes_invalidate_it(
     assert _lifecycle(window) is ManualFitLifecycle.READY
     assert window._manual_fit_result is None
     assert window.dataset_view.residual_axes is None
-    assert window.manual_fit_editor.result_section.isHidden()
+    assert not window.manual_fit_editor.result_section.isHidden()
 
     window.dataset_view.set_current_group(0)
     assert _lifecycle(window) is ManualFitLifecycle.CURRENT
@@ -2944,7 +2942,17 @@ def test_navigation_restores_current_fit_and_scientific_changes_invalidate_it(
     _set_runnable_background(window)
     window.manual_fit_editor.run_button.click()
     assert _lifecycle(window) is ManualFitLifecycle.CURRENT
-    replacement = window.workspace.add_dataset(project, _resolution(sample.dataset))
+    replacement_source = _resolution(sample.dataset)
+    replacement_source = replace(
+        replacement_source,
+        spectra=tuple(
+            replace(
+                item, intensity=item.intensity + np.linspace(0.0, 0.1, item.energy.size)
+            )
+            for item in replacement_source.spectra
+        ),
+    )
+    replacement = window.workspace.add_dataset(project, replacement_source)
     assert window.apply_resolution_for_sample(
         project,
         sample,
@@ -3047,6 +3055,114 @@ def test_two_groups_retain_results_and_invalidate_only_edited_group(
     window.close()
 
 
+def test_fit_all_q_async_navigation_status_and_result_save_lifecycle(
+    application: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window, project, sample_state = _window_with_manual_resolution(application)
+    _set_runnable_background(window)
+    window._run_manual_fit()
+    session = window._active_manual_session
+    assert session is not None
+    current = _current_fit(session)
+    assert current is window._manual_fit_result
+    assert isinstance(current, FitResult)
+    assert window.manual_fit_editor.fit_all_q_button.isEnabled()
+    model = session.draft.setup(0).model
+    assert model is not None
+    policy = MultiQConstraintTransferPolicy(model)
+    started = Event()
+    release = Event()
+    actual = fit_all_q_from_current_with_adoption(
+        window._workflow_project_for(project),
+        session.draft,
+        anchor_group_index=0,
+        current_fit=current,
+        transfer_policy=policy,
+    )
+    branch = actual.branch_result
+
+    def fake_fit_all_q(
+        *_args: object, **kwargs: object
+    ) -> ManualMultiQFitExecutionOutcome:
+        group_started = kwargs["group_started_callback"]
+        progress = kwargs["progress_callback"]
+        assert callable(group_started)
+        assert callable(progress)
+        progress(branch.outcomes[0])
+        group_started(1)
+        started.set()
+        assert release.wait(timeout=2.0)
+        progress(branch.outcomes[1])
+        return actual
+
+    monkeypatch.setattr(
+        manual_fit_all_q_module,
+        "fit_all_q_from_current_with_adoption",
+        fake_fit_all_q,
+    )
+    window._start_fit_all_q(session, current, policy)
+    deadline = time.monotonic() + 2.0
+    while (not started.is_set() or window.dataset_view.current_group_index != 1) and (
+        time.monotonic() < deadline
+    ):
+        application.processEvents()
+        time.sleep(0.005)
+    assert started.is_set()
+    assert window.dataset_view.current_group_index == 1
+    assert not window.dataset_view.group_spinbox.isEnabled()
+    assert window.dataset_view.fit_status_descriptions == ("Success", "Processing")
+
+    release.set()
+    deadline = time.monotonic() + 2.0
+    while (
+        window._active_fit_all_q_generation is not None and time.monotonic() < deadline
+    ):
+        application.processEvents()
+        time.sleep(0.005)
+    application.processEvents()
+    assert window._active_fit_all_q_generation is None
+    assert window.dataset_view.current_group_index == 0
+    assert window.dataset_view.group_spinbox.isEnabled()
+    assert _current_matches_branch(session, branch)
+    assert session.result_workspace.saved_results == ()
+    assert _dataset_tree_item(window, project, sample_state).childCount() == 0
+    assert window.dataset_view.fit_status_descriptions == ("Success", "Success")
+    assert not window.manual_fit_editor.save_result_button.isEnabled()
+    assert window.manual_fit_editor.save_result_as_button.isEnabled()
+
+    monkeypatch.setattr(QInputDialog, "getText", lambda *_args: ("Across Q", True))
+    window._save_manual_result_as()
+    assert len(session.result_workspace.saved_results) == 1
+    assert session.result_workspace.associated_saved_result is not None
+    saved = session.result_workspace.saved_results[0]
+    assert all(
+        saved.result.point(item.group_index).outcome is item for item in branch.outcomes
+    )
+    result_item = _saved_tree_item(_dataset_tree_item(window, project, sample_state), 0)
+    assert (result_item.text(0), result_item.text(1)) == ("Across Q", "2/2 Q")
+    window.workspace._on_item_double_clicked(result_item, 0)
+    assert (
+        session.result_workspace.active_item
+        is session.result_workspace.saved_results[0]
+    )
+    assert _current_matches_branch(session, branch)
+    assert window.dataset_view.fit_status_descriptions == ("Success", "Success")
+    window._run_manual_fit()
+    rerun = session.result_workspace.current_result
+    assert rerun is not None and rerun is not branch
+    assert session.result_workspace.current_saved_result_index == 0
+    modified = session.result_workspace.saved_results[0]
+    assert modified.snapshot is saved.snapshot
+    assert modified.modified_copy is not None and modified.modified
+    assert modified.working_copy.snapshot is session.result_workspace.current
+    assert window.manual_fit_editor.result_state_label.text() == "Unsaved changes"
+    window._save_manual_result()
+    assert len(session.result_workspace.saved_results) == 1
+    assert session.result_workspace.saved_results[0].result is rerun
+    window.close()
+
+
 def test_current_fit_result_uses_public_arrays_identities_and_evidence(
     application: QApplication,
 ) -> None:
@@ -3108,10 +3224,18 @@ def test_current_fit_result_uses_public_arrays_identities_and_evidence(
     before = window._manual_draft.setup(0).model
     assert before is not None
     before_bounds = before.parameter_intent(offset)
-    window._manual_fit_result = presented
-    window._manual_execution_diagnostics = (warning,)
-    window.dataset_view.set_manual_fit_result(presented)
-    window._refresh_manual_fit()
+    window.manual_fit_editor.set_state(
+        before,
+        manual_parameter_metadata(
+            presented.configuration, energy_unit="meV", intensity_unit="counts"
+        ),
+        manual_workflow_readiness(
+            window._workflow_project_for(_project), window._manual_draft, 0
+        ),
+        lifecycle=ManualFitLifecycle.CURRENT,
+        execution_diagnostics=(warning,),
+        fit_result=presented,
+    )
 
     rows = window.manual_fit_editor.result_parameter_rows
     assert set(rows) == set(before.parameter_references())
@@ -3146,6 +3270,7 @@ def test_current_fit_result_uses_public_arrays_identities_and_evidence(
     assert presented_model is not None
     assert presented_model.parameter_intent(offset) == before_bounds
     assert "±" not in window.manual_fit_editor.parameter_controls[offset].current.text()
+    window._refresh_manual_fit()
     important_before_edit = window.manual_fit_editor.result_important_label.text()
 
     window.show()
@@ -3153,8 +3278,8 @@ def test_current_fit_result_uses_public_arrays_identities_and_evidence(
     current = window.manual_fit_editor.parameter_controls[offset].current
     _replace_text_and_tab(application, current, "0.6")
     assert _lifecycle(window) is ManualFitLifecycle.NEEDS_FIT
-    assert window._manual_fit_result is presented
-    assert window.dataset_view._manual_fit_result is presented
+    assert window._manual_fit_result is result
+    assert window.dataset_view._manual_fit_result is result
     assert window.dataset_view.residual_axes is not None
     assert window.dataset_view.standardized_residual_line is not None
     assert not window.manual_fit_editor.result_section.isHidden()
@@ -3700,7 +3825,7 @@ def test_clear_model_converges_on_repeated_component_removal_lifecycle(
     assert clear_state == individual_state
     assert (
         window.workspace.dataset_analysis_state_for(project, _sample)
-        is DatasetAnalysisState.PARTIALLY_FIT
+        is DatasetAnalysisState.READY
     )
 
     window.dataset_view.set_current_group(1)
@@ -3874,7 +3999,16 @@ def test_resolution_invalidation_requires_active_sample_and_changed_association(
     )
     replacement_a = window.workspace.add_dataset(
         project,
-        _resolution(sample_a.dataset),
+        replace(
+            _resolution(sample_a.dataset),
+            spectra=tuple(
+                replace(
+                    item,
+                    intensity=item.intensity + np.linspace(0.0, 0.1, item.energy.size),
+                )
+                for item in _resolution(sample_a.dataset).spectra
+            ),
+        ),
     )
     window.open_dataset(project, sample_a)
     assert window.apply_resolution_for_sample(
@@ -4056,21 +4190,21 @@ def test_workspace_manual_model_progress_and_inspector_heading(
     window._refresh_manual_fit()
     assert (
         workspace.dataset_analysis_state_for(project, sample)
-        is DatasetAnalysisState.PARTIALLY_FIT
+        is DatasetAnalysisState.READY
     )
-    assert "Fitting has started" in sample_state_tooltip()
+    assert "Ready for Fit" in sample_state_tooltip()
     view = window.dataset_view
     view.set_current_group(1)
     assert (
         workspace.dataset_analysis_state_for(project, sample)
-        is DatasetAnalysisState.PARTIALLY_FIT
+        is DatasetAnalysisState.READY
     )
     view.set_current_group(0)
     _set_runnable_background(window)
     assert window.clear_manual_model(confirmed=True)
     assert (
         workspace.dataset_analysis_state_for(project, sample)
-        is DatasetAnalysisState.PARTIALLY_FIT
+        is DatasetAnalysisState.READY
     )
     view.set_current_group(1)
     assert window.clear_manual_model(confirmed=True)
@@ -4180,7 +4314,7 @@ def test_samples_retain_independent_manual_sessions_across_navigation(
     assert fitted_model_a.parameter_ties
     assert (
         window.workspace.dataset_analysis_state_for(project, sample_a)
-        is DatasetAnalysisState.PARTIALLY_FIT
+        is DatasetAnalysisState.READY
     )
 
     assert window.open_dataset(project, sample_b)
@@ -4194,7 +4328,7 @@ def test_samples_retain_independent_manual_sessions_across_navigation(
     assert session_a.fit_result is result_a
     assert (
         window.workspace.dataset_analysis_state_for(project, sample_a)
-        is DatasetAnalysisState.PARTIALLY_FIT
+        is DatasetAnalysisState.READY
     )
     assert (
         window.workspace.dataset_analysis_state_for(project, sample_b)
@@ -4209,7 +4343,7 @@ def test_samples_retain_independent_manual_sessions_across_navigation(
     assert draft_b is not draft_a
     assert (
         window.workspace.dataset_analysis_state_for(project, sample_b)
-        is DatasetAnalysisState.PARTIALLY_FIT
+        is DatasetAnalysisState.READY
     )
 
     assert window.open_dataset(project, sample_a)
@@ -4252,7 +4386,7 @@ def test_samples_retain_independent_manual_sessions_across_navigation(
     assert window._manual_draft.setup(0).model is not None
     assert (
         window.workspace.dataset_analysis_state_for(project, sample_a)
-        is DatasetAnalysisState.PARTIALLY_FIT
+        is DatasetAnalysisState.READY
     )
     window.dataset_view.set_current_group(0)
     assert window.clear_manual_model(confirmed=True)
@@ -4274,7 +4408,7 @@ def test_samples_retain_independent_manual_sessions_across_navigation(
     )
     assert (
         window.workspace.dataset_analysis_state_for(project, sample_b)
-        is DatasetAnalysisState.PARTIALLY_FIT
+        is DatasetAnalysisState.READY
     )
     window.close()
 
@@ -4833,7 +4967,7 @@ def test_fit_all_q_blocked_outcome_keeps_its_own_diagnostic(
             "Failed",
         ),
         (MultiQFitStatus.EXCLUDED, MultiQExecutionStatus.COMPLETED, None, "Excluded"),
-        (MultiQFitStatus.NOT_RUN, MultiQExecutionStatus.CANCELLED, None, "Not run"),
+        (MultiQFitStatus.NOT_RUN, MultiQExecutionStatus.CANCELLED, None, "Not fitted"),
     ),
 )
 def test_fit_all_q_other_target_statuses_follow_branch_outcome(
@@ -4876,343 +5010,14 @@ def test_fit_all_q_other_target_statuses_follow_branch_outcome(
     assert session.draft is draft
     assert session.draft.setup(1).model is None
     assert window.dataset_view.fit_status_descriptions[1] == label
-    assert window.manual_fit_editor.result_toggle_button.text() == f"Result · {label}"
+    outcome_label = "Not run" if target_status is MultiQFitStatus.NOT_RUN else label
+    assert window.manual_fit_editor.result_toggle_button.text() == (
+        f"Result · {outcome_label}"
+    )
     assert window.manual_fit_editor.result_outcome_message_label.text() == (
         detail or ""
     )
     assert window.dataset_view._manual_fit_result is None
-    window.close()
-
-
-def test_fit_all_q_async_navigation_status_and_result_save_lifecycle(
-    application: QApplication,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    window, project, sample_state = _window_with_manual_resolution(application)
-    _set_runnable_background(window)
-    window._run_manual_fit()
-    session = window._active_manual_session
-    assert session is not None
-    current = _current_fit(session)
-    assert current is window._manual_fit_result
-    assert isinstance(current, FitResult)
-    assert window.manual_fit_editor.fit_all_q_button.isEnabled()
-    model = session.draft.setup(0).model
-    assert model is not None
-    policy = MultiQConstraintTransferPolicy(model)
-    started = Event()
-    release = Event()
-    branch = MultiQBranchResult(
-        0,
-        MultiQExecutionStatus.COMPLETED,
-        (
-            MultiQFitOutcome(0, MultiQFitStatus.SUCCESS, fit_result=current),
-            MultiQFitOutcome(1, MultiQFitStatus.SUCCESS, fit_result=current),
-        ),
-    )
-
-    def fake_fit_all_q(
-        *_args: object, **kwargs: object
-    ) -> ManualMultiQFitExecutionOutcome:
-        group_started = kwargs["group_started_callback"]
-        progress = kwargs["progress_callback"]
-        assert callable(group_started)
-        assert callable(progress)
-        progress(branch.outcomes[0])
-        group_started(1)
-        started.set()
-        assert release.wait(timeout=2.0)
-        progress(branch.outcomes[1])
-        return _mock_multi_q_execution(branch, cast(ManualFitDraft, _args[1]))
-
-    monkeypatch.setattr(
-        manual_fit_all_q_module,
-        "fit_all_q_from_current_with_adoption",
-        fake_fit_all_q,
-    )
-    window._start_fit_all_q(session, current, policy)
-    deadline = time.monotonic() + 2.0
-    while (not started.is_set() or window.dataset_view.current_group_index != 1) and (
-        time.monotonic() < deadline
-    ):
-        application.processEvents()
-        time.sleep(0.005)
-    assert started.is_set()
-    assert window.dataset_view.current_group_index == 1
-    assert not window.dataset_view.group_spinbox.isEnabled()
-    assert window.dataset_view.fit_status_descriptions == ("Success", "Processing")
-
-    release.set()
-    deadline = time.monotonic() + 2.0
-    while (
-        window._active_fit_all_q_generation is not None and time.monotonic() < deadline
-    ):
-        application.processEvents()
-        time.sleep(0.005)
-    application.processEvents()
-    assert window._active_fit_all_q_generation is None
-    assert window.dataset_view.current_group_index == 0
-    assert window.dataset_view.group_spinbox.isEnabled()
-    assert _current_matches_branch(session, branch)
-    assert session.result_workspace.saved_results == ()
-    assert _dataset_tree_item(window, project, sample_state).childCount() == 0
-    assert window.dataset_view.fit_status_descriptions == ("Success", "Success")
-    assert not window.manual_fit_editor.save_result_button.isEnabled()
-    assert window.manual_fit_editor.save_result_as_button.isEnabled()
-
-    monkeypatch.setattr(QInputDialog, "getText", lambda *_args: ("Across Q", True))
-    window._save_manual_result_as()
-    assert len(session.result_workspace.saved_results) == 1
-    assert session.result_workspace.associated_saved_result is not None
-    saved = session.result_workspace.saved_results[0]
-    assert all(
-        saved.result.point(item.group_index).outcome is item for item in branch.outcomes
-    )
-    result_item = _saved_tree_item(_dataset_tree_item(window, project, sample_state), 0)
-    assert (result_item.text(0), result_item.text(1)) == ("Across Q", "Multi-Q")
-    window.workspace._on_item_double_clicked(result_item, 0)
-    assert session.viewed_saved_result is session.result_workspace.saved_results[0]
-    assert _current_matches_branch(session, branch)
-    assert window.dataset_view.fit_status_descriptions == ("Success", "Success")
-    window._run_manual_fit()
-    rerun = session.result_workspace.current_result
-    assert rerun is not None and rerun is not branch
-    assert session.result_workspace.current_saved_result_index == 0
-    modified = session.result_workspace.saved_results[0]
-    assert modified.snapshot is saved.snapshot
-    assert modified.modified_copy is not None and modified.modified
-    assert modified.working_copy.snapshot is session.result_workspace.current
-    assert window.manual_fit_editor.result_state_label.text() == "Unsaved changes"
-    window._save_manual_result()
-    assert len(session.result_workspace.saved_results) == 1
-    assert session.result_workspace.saved_results[0].result is rerun
-    window.close()
-
-
-def test_saved_result_workspace_nodes_follow_explicit_save_lifecycle(
-    application: QApplication,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    window, project, sample = _window_with_manual_resolution(application)
-    _set_runnable_background(window)
-    window._run_manual_fit()
-    session = window._active_manual_session
-    assert session is not None
-    first_fit = _current_fit(session)
-    assert isinstance(first_fit, FitResult)
-    dataset_item = _dataset_tree_item(window, project, sample)
-    assert dataset_item.childCount() == 0
-
-    monkeypatch.setattr(QInputDialog, "getText", lambda *_args: ("Result A", True))
-    window._save_manual_result_as()
-    saved_a = session.result_workspace.saved_results[0]
-    dataset_item = _dataset_tree_item(window, project, sample)
-    assert dataset_item.childCount() == 1
-    assert dataset_item.isExpanded()
-    result_a = _saved_tree_item(dataset_item, 0)
-    assert (result_a.text(0), result_a.text(1)) == ("Result A", "Single-Q")
-    assert result_a.data(0, SAVED_RESULT_ENTRY_ROLE) is saved_a
-
-    window._run_manual_fit()
-    second_fit = _current_fit(session)
-    assert isinstance(second_fit, FitResult) and second_fit is not first_fit
-    modified_a = session.result_workspace.saved_results[0]
-    assert modified_a.snapshot is saved_a.snapshot
-    assert modified_a.modified_copy is not None and modified_a.modified
-    assert modified_a.working_copy.snapshot is session.result_workspace.current
-    assert _saved_tree_item(_dataset_tree_item(window, project, sample), 0).text(0) == (
-        "Result A"
-    )
-    window._save_manual_result()
-    assert len(session.result_workspace.saved_results) == 1
-    assert (
-        session.result_workspace.saved_results[0].result.point(0).fit_result
-        is second_fit
-    )
-
-    monkeypatch.setattr(QInputDialog, "getText", lambda *_args: ("Result B", True))
-    window._save_manual_result_as()
-    dataset_item = _dataset_tree_item(window, project, sample)
-    assert dataset_item.childCount() == 2
-    assert [_saved_tree_item(dataset_item, i).text(0) for i in range(2)] == [
-        "Result A",
-        "Result B",
-    ]
-    assert [
-        _saved_tree_item(dataset_item, i).data(0, SAVED_RESULT_ENTRY_ROLE)
-        for i in range(2)
-    ] == list(session.result_workspace.saved_results)
-    assert session.result_workspace.current_saved_result_index == 1
-    assert (
-        session.result_workspace.saved_results[0].result.point(0).fit_result
-        is second_fit
-    )
-
-    window._run_manual_fit()
-    current_fit = session.result_workspace.current_result
-    assert current_fit is not None
-    assert current_fit.point(0).fit_result is not second_fit
-    saved_item = _saved_tree_item(_dataset_tree_item(window, project, sample), 0)
-    window.workspace.tree.setCurrentItem(saved_item)
-    assert session.result_workspace.current_result is current_fit
-    window.workspace._on_item_double_clicked(saved_item, 0)
-    assert session.viewed_saved_result is session.result_workspace.saved_results[0]
-    assert session.result_workspace.current_result is current_fit
-    assert (
-        session.result_workspace.saved_results[0].result.point(0).fit_result
-        is second_fit
-    )
-    assert window.dataset_view._manual_fit_result is second_fit
-    assert (
-        "Saved Result · Result A"
-        in window.manual_fit_editor.result_toggle_button.text()
-    )
-    window.workspace._on_item_double_clicked(
-        _dataset_tree_item(window, project, sample), 0
-    )
-    assert session.viewed_saved_result is None
-    assert current_fit is not None
-    assert window.dataset_view._manual_fit_result is current_fit.point(0).fit_result
-    assert window._open_dataset is sample
-    window.close()
-
-
-def test_saved_result_does_not_overlay_changed_resolution_context(
-    application: QApplication,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    window, project, sample = _window_with_manual_resolution(application)
-    _set_runnable_background(window)
-    window._run_manual_fit()
-    session = window._active_manual_session
-    assert session is not None
-    monkeypatch.setattr(QInputDialog, "getText", lambda *_args: ("Before", True))
-    window._save_manual_result_as()
-    saved = session.result_workspace.saved_results[0]
-    window.workspace._on_item_double_clicked(
-        _saved_tree_item(_dataset_tree_item(window, project, sample), 0), 0
-    )
-    assert session.viewed_saved_result is session.result_workspace.saved_results[0]
-    assert window.dataset_view._manual_fit_result is saved.result.point(0).fit_result
-    resolution = next(
-        item
-        for item in project.datasets
-        if item.dataset.role is SpectrumRole.RESOLUTION
-    )
-    changed = replace(
-        resolution.dataset,
-        spectra=tuple(
-            replace(item, intensity=np.asarray(item.intensity) * 1.01)
-            for item in resolution.dataset.spectra
-        ),
-    )
-    window.workspace._replace_dataset(project, resolution, changed)
-    assert session.viewed_saved_result is None
-    assert window.dataset_view._manual_fit_result is None
-    assert session.result_workspace.saved_results[0] is saved
-    assert _dataset_tree_item(window, project, sample).childCount() == 1
-    messages: list[str] = []
-    monkeypatch.setattr(
-        main_window_module,
-        "show_message_dialog",
-        lambda _parent, _title, message: messages.append(message),
-    )
-    window.workspace._on_item_double_clicked(
-        _saved_tree_item(_dataset_tree_item(window, project, sample), 0), 0
-    )
-    assert messages and "earlier scientific context" in messages[0]
-    assert session.viewed_saved_result is None
-    assert session.result_workspace.saved_results[0] is saved
-    window.close()
-
-
-def test_open_saved_result_is_dismissed_by_q_replacement(
-    application: QApplication,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    window, project, sample = _window_with_manual_resolution(application)
-    _set_runnable_background(window)
-    window._run_manual_fit()
-    session = window._active_manual_session
-    assert session is not None
-    monkeypatch.setattr(QInputDialog, "getText", lambda *_args: ("Before Q", True))
-    window._save_manual_result_as()
-    saved = session.result_workspace.saved_results[0]
-    window.workspace._on_item_double_clicked(
-        _saved_tree_item(_dataset_tree_item(window, project, sample), 0), 0
-    )
-    assert session.viewed_saved_result is session.result_workspace.saved_results[0]
-
-    updated = window.workspace.assign_q_bins(
-        project,
-        sample,
-        QBins.from_q_values((0.45, 0.65)),
-    )
-    assert updated is not None
-    assert session.viewed_saved_result is None
-    assert window.dataset_view._manual_fit_result is None
-    assert session.result_workspace.saved_results[0] is saved
-    assert _saved_tree_item(_dataset_tree_item(window, project, updated), 0).text(
-        0
-    ) == ("Before Q")
-    window.close()
-
-
-def test_saved_result_history_survives_sample_role_change(
-    application: QApplication,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    window, project, sample = _window_with_manual_resolution(application)
-    _set_runnable_background(window)
-    window._run_manual_fit()
-    session = window._active_manual_session
-    assert session is not None
-    monkeypatch.setattr(QInputDialog, "getText", lambda *_args: ("Before Role", True))
-    window._save_manual_result_as()
-    saved = session.result_workspace.saved_results[0]
-    window.workspace._on_item_double_clicked(
-        _saved_tree_item(_dataset_tree_item(window, project, sample), 0), 0
-    )
-    assert session.viewed_saved_result is session.result_workspace.saved_results[0]
-
-    re_roled = window.change_dataset_role(project, sample, SpectrumRole.RESOLUTION)
-    assert re_roled is not None
-    assert session is window._manual_sessions[(project, sample.workflow_dataset_id)]
-    assert not session.draft_available
-    assert session.viewed_saved_result is None
-    assert session.result_workspace.saved_results == (saved,)
-    assert session.result_workspace.current_result is None
-    assert window._active_manual_session is None
-    assert window.dataset_view._manual_fit_result is None
-    assert (
-        _saved_tree_item(_dataset_tree_item(window, project, re_roled), 0).text(0)
-        == "Before Role"
-    )
-    messages: list[str] = []
-    monkeypatch.setattr(
-        main_window_module,
-        "show_message_dialog",
-        lambda _parent, _title, message: messages.append(message),
-    )
-    window.workspace._on_item_double_clicked(
-        _saved_tree_item(_dataset_tree_item(window, project, re_roled), 0), 0
-    )
-    assert messages and "earlier scientific context" in messages[0]
-    assert session.viewed_saved_result is None
-    assert session.result_workspace.saved_results[0] is saved
-    restored = window.change_dataset_role(project, re_roled, SpectrumRole.SAMPLE)
-    assert restored is not None
-    assert session.draft_available
-    assert session.draft.setup(0).model is None
-    assert session.result_workspace.saved_results[0] is saved
-    assert _dataset_tree_item(window, project, restored).childCount() == 1
-    re_roled_again = window.change_dataset_role(
-        project, restored, SpectrumRole.RESOLUTION
-    )
-    assert re_roled_again is not None
-    assert session is window._manual_sessions[(project, sample.workflow_dataset_id)]
-    assert session.result_workspace.saved_results[0] is saved
-    assert _dataset_tree_item(window, project, re_roled_again).childCount() == 1
     window.close()
 
 
@@ -5309,7 +5114,7 @@ def test_fit_all_q_cancelled_partial_becomes_current_without_false_start(
     application.processEvents()
     assert _current_matches_branch(session, branch)
     assert window.dataset_view.current_group_index == 0
-    assert window.dataset_view.fit_status_descriptions == ("Success", "Not run")
+    assert window.dataset_view.fit_status_descriptions == ("Success", "Not fitted")
 
     # Late events from the finished generation cannot mutate the projection.
     assert generation is not None
@@ -5317,7 +5122,7 @@ def test_fit_all_q_cancelled_partial_becomes_current_without_false_start(
         generation,
         MultiQFitOutcome(1, MultiQFitStatus.SUCCESS, fit_result=current),
     )
-    assert window.dataset_view.fit_status_descriptions == ("Success", "Not run")
+    assert window.dataset_view.fit_status_descriptions == ("Success", "Not fitted")
     window.close()
 
 
@@ -5573,7 +5378,7 @@ def test_fit_all_q_stale_completion_cannot_replace_invalidated_context(
     assert _current_fit(session) is previous
     assert session.execution_state(0).fit_result is previous
     assert session.execution_state(1).fit_result is None
-    assert window.dataset_view.fit_status_descriptions == ("Success", "Not run")
+    assert window.dataset_view.fit_status_descriptions == ("Needs fit", "Not fitted")
     window.close()
 
 

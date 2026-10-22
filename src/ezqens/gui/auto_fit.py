@@ -331,8 +331,7 @@ class AutoFitCandidateDialog(QDialog):
         *,
         project: WorkflowProject | None = None,
         draft: ManualFitDraft | None = None,
-        has_current_result: bool = False,
-        has_saved_association: bool = False,
+        has_active_saved_result: bool = False,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("autoFitDialog")
@@ -343,8 +342,7 @@ class AutoFitCandidateDialog(QDialog):
         self.outcome = outcome
         self._project = project
         self._draft = draft
-        self.has_current_result_at_open = has_current_result
-        self.has_saved_association_at_open = has_saved_association
+        self._has_active_saved_result = has_active_saved_result
         self._candidates = outcome.recommendation.candidate_results
         self._lorentzian_styles_by_candidate = {
             candidate.candidate: self._anchor_lorentzian_styles(candidate)
@@ -605,10 +603,6 @@ class AutoFitCandidateDialog(QDialog):
         )
         self.save_button = QPushButton("Save")
         self.save_button.clicked.connect(lambda: self._request_finalization("save"))
-        self.save_as_button = QPushButton("Save As")
-        self.save_as_button.clicked.connect(
-            lambda: self._request_finalization("save_as")
-        )
         buttons = QHBoxLayout()
         buttons.setContentsMargins(0, 0, 0, 0)
         buttons.setSpacing(6)
@@ -616,7 +610,6 @@ class AutoFitCandidateDialog(QDialog):
         buttons.addWidget(self.cancel_button)
         buttons.addWidget(self.use_candidate_button)
         buttons.addWidget(self.save_button)
-        buttons.addWidget(self.save_as_button)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 14, 16, 14)
@@ -823,6 +816,11 @@ class AutoFitCandidateDialog(QDialog):
             )
             item.setSizeHint(row.item_size_hint())
 
+    def set_active_saved_result(self, active: bool) -> None:
+        """Refresh actions after the application changes the active Result."""
+        self._has_active_saved_result = active
+        self._sync_controls()
+
     def _sync_controls(self) -> None:
         checked = self.checked_candidates
         pending = tuple(
@@ -834,25 +832,18 @@ class AutoFitCandidateDialog(QDialog):
         )
         single = len(checked) == 1
         ready = has_execution_context and bool(checked) and not self._running
-        self.use_candidate_button.setVisible(
-            not self.has_current_result_at_open and len(checked) < 2
-        )
+        self.use_candidate_button.setVisible(True)
         self.use_candidate_button.setEnabled(
-            ready and single and not self.has_current_result_at_open
+            ready and single and self._has_active_saved_result
         )
-        self.save_button.setVisible(
-            self.has_current_result_at_open and len(checked) < 2
+        self.use_candidate_button.setToolTip(
+            "Replace this Q in the active saved Result."
+            if self._has_active_saved_result
+            else "Open a saved Result to Apply one candidate; "
+            "use Save to create new Results."
         )
-        self.save_button.setEnabled(
-            ready
-            and single
-            and self.has_current_result_at_open
-            and self.has_saved_association_at_open
-        )
-        self.save_as_button.setVisible(
-            self.has_current_result_at_open or len(checked) > 1
-        )
-        self.save_as_button.setEnabled(ready)
+        self.save_button.setVisible(True)
+        self.save_button.setEnabled(ready)
         executed_checked = sum(
             item.candidate in self._executed_branches for item in checked
         )
@@ -1996,22 +1987,25 @@ class AutoFitCandidateDialog(QDialog):
         button = {
             "apply": self.use_candidate_button,
             "save": self.save_button,
-            "save_as": self.save_as_button,
         }[action]
         if not button.isEnabled() or button.isHidden():
             return
         # Only exact evaluation evidence owns a branch; model labels/codes are
         # not a scientific correspondence rule.
-        selections = tuple(
-            next(
-                (
-                    branch
-                    for branch in self._executed_branches.values()
-                    if branch.anchor_evidence is candidate
-                ),
-                candidate,
+        selections = (
+            self.checked_candidates
+            if action == "apply"
+            else tuple(
+                next(
+                    (
+                        branch
+                        for branch in self._executed_branches.values()
+                        if branch.anchor_evidence is candidate
+                    ),
+                    candidate,
+                )
+                for candidate in self.checked_candidates
             )
-            for candidate in self.checked_candidates
         )
         self.finalization_requested.emit(action, selections)
 

@@ -1933,11 +1933,11 @@ def test_dataset_state_indicator_is_compact_and_truthful(
     assert dataset_analysis_state(complete) is DatasetAnalysisState.READY
     assert (
         dataset_analysis_state(complete, fitted_group_count=1)
-        is DatasetAnalysisState.PARTIALLY_FIT
+        is DatasetAnalysisState.READY
     )
     assert (
         dataset_analysis_state(complete, fitted_group_count=2)
-        is DatasetAnalysisState.FULLY_FIT
+        is DatasetAnalysisState.READY
     )
     assert complete_state.dataset is complete
     complete_item = data_item.child(1)
@@ -1967,8 +1967,8 @@ def test_resolution_identity_is_separate_from_dataset_state_indicator(
     assert resolution_item.text(1) == "Resolution"
     assert not resolution_item.icon(0).isNull()
     assert not resolution_item.icon(1).isNull()
-    assert dataset_analysis_state(resolution.dataset) is DatasetAnalysisState.REQUIRED
-    assert "Information required" in resolution_item.toolTip(1)
+    assert dataset_analysis_state(resolution.dataset) is DatasetAnalysisState.COMPLETE
+    assert "Resolution" in resolution_item.toolTip(1)
     window.close()
 
 

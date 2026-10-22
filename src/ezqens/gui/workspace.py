@@ -55,6 +55,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ezqens.batch import MultiQFitStatus
 from ezqens.domain import (
     DiagnosticSeverity,
     ImportDiagnostic,
@@ -70,7 +71,7 @@ from ezqens.gui.masking import (
     rebind_auto_mask_state,
 )
 from ezqens.gui.theme import DEFAULT_LAYOUT_TOKENS
-from ezqens.workflow import ResultOrigin, SavedFitResult
+from ezqens.workflow import SavedFitResult
 
 PROJECT_INDEX_ROLE = Qt.ItemDataRole.UserRole
 ITEM_KIND_ROLE = Qt.ItemDataRole.UserRole + 1
@@ -446,6 +447,10 @@ class WorkspaceSidebar(QWidget):
     dataset_open_requested = Signal(object, object)
     saved_result_open_requested = Signal(object, object, object)
     saved_result_delete_requested = Signal(object, object, object)
+    saved_result_rename_requested = Signal(object, object, object)
+    saved_result_best_requested = Signal(object, object, object)
+    saved_result_revert_requested = Signal(object, object, object)
+    dataset_fresh_requested = Signal(object, object)
     dataset_added = Signal(object, object)
     dataset_role_changed = Signal(object, object, object)
     dataset_role_change_requested = Signal(object, object, object)
@@ -474,21 +479,28 @@ class WorkspaceSidebar(QWidget):
         self._resolution_icon_color: str | None = None
         self._analysis_state_colors = {
             DatasetAnalysisState.REQUIRED: "#a54a4a",
-            DatasetAnalysisState.READY: "#a56c1d",
+            DatasetAnalysisState.READY: "#47785a",
             DatasetAnalysisState.PARTIALLY_FIT: "#496d91",
             DatasetAnalysisState.FULLY_FIT: "#47785a",
             DatasetAnalysisState.COMPLETE: "#676764",
         }
+        self._result_partial_color = "#a56c1d"
         self._active_project: ProjectState | None = None
         self._active_dataset: DatasetState | None = None
         self._scientific_replacement_resolver: (
             Callable[[ProjectState, DatasetState], DatasetState | None] | None
+        ) = None
+        self._replacement_guard: (
+            Callable[[ProjectState, DatasetState, ReducedDataset], bool] | None
         ) = None
         self._fitting_started_resolver: (
             Callable[[ProjectState, DatasetState], bool] | None
         ) = None
         self._saved_results_resolver: (
             Callable[[ProjectState, DatasetState], tuple[SavedFitResult, ...]] | None
+        ) = None
+        self._active_result_resolver: (
+            Callable[[ProjectState, DatasetState], SavedFitResult | None] | None
         ) = None
 
         title = QLabel("ezQENS")
@@ -560,6 +572,7 @@ class WorkspaceSidebar(QWidget):
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.currentItemChanged.connect(self._on_current_item_changed)
         self.tree.itemDoubleClicked.connect(self._on_item_double_clicked)
+        self.tree.itemClicked.connect(self._on_item_clicked)
         self.tree.customContextMenuRequested.connect(self._show_context_menu)
         self.tree.q_method_dropped.connect(self._on_q_method_dropped)
         self.tree.removal_requested.connect(self._request_item_removal)
@@ -677,11 +690,12 @@ class WorkspaceSidebar(QWidget):
                 replacement,
                 diagnostics=(*replacement.diagnostics, *diagnostics),
             )
-        return self._replace_dataset(
+        current = self._replace_dataset(
             project,
             dataset,
             replacement,
         )
+        return None if current is dataset else current
 
     def assign_source_units(
         self,
@@ -823,7 +837,8 @@ class WorkspaceSidebar(QWidget):
         *,
         resolution: DatasetState | None = None,
         rebinned_resolution: ReducedDataset | None = None,
-    ) -> tuple[DatasetState, DatasetState | None]:
+        before_publish: Callable[[], None] | None = None,
+    ) -> tuple[DatasetState, DatasetState | None] | None:
         """Replace visible rows only after the paired core transaction succeeds."""
 
         self.validate_dataset_membership(project, sample)
@@ -833,22 +848,29 @@ class WorkspaceSidebar(QWidget):
             )
         if resolution is not None:
             self.validate_dataset_membership(project, resolution)
-        current_sample = self._replace_dataset(
+        current_sample = self._prepare_dataset_replacement(
             project,
             sample,
             rebinned_sample,
             auto_mask=create_auto_mask_state(rebinned_sample),
-            emit_update=False,
         )
+        if current_sample is None:
+            return None
         current_resolution = None
         if resolution is not None and rebinned_resolution is not None:
-            current_resolution = self._replace_dataset(
+            current_resolution = self._prepare_dataset_replacement(
                 project,
                 resolution,
                 rebinned_resolution,
                 auto_mask=create_auto_mask_state(rebinned_resolution),
-                emit_update=False,
             )
+            if current_resolution is None:
+                return None
+        if before_publish is not None:
+            before_publish()
+        self._publish_dataset_replacement(project, sample, current_sample)
+        if resolution is not None and current_resolution is not None:
+            self._publish_dataset_replacement(project, resolution, current_resolution)
         self.dataset_updated.emit(project, sample, current_sample)
         if resolution is not None and current_resolution is not None:
             self.dataset_updated.emit(project, resolution, current_resolution)
@@ -916,6 +938,13 @@ class WorkspaceSidebar(QWidget):
 
         self._scientific_replacement_resolver = resolver
 
+    def set_dataset_replacement_guard(
+        self, guard: Callable[[ProjectState, DatasetState, ReducedDataset], bool]
+    ) -> None:
+        """Resolve application consent against the actual validated replacement."""
+
+        self._replacement_guard = guard
+
     def set_fitting_started_resolver(
         self,
         resolver: Callable[[ProjectState, DatasetState], bool],
@@ -937,6 +966,11 @@ class WorkspaceSidebar(QWidget):
 
         self._rebuild_dataset_items(self._project_index(project))
 
+    def set_active_result_resolver(
+        self, resolver: Callable[[ProjectState, DatasetState], SavedFitResult | None]
+    ) -> None:
+        self._active_result_resolver = resolver
+
     def dataset_analysis_state_for(
         self,
         project: ProjectState,
@@ -945,15 +979,7 @@ class WorkspaceSidebar(QWidget):
         """Return the current derived Workspace indicator state for one dataset."""
 
         self.validate_dataset_membership(project, dataset)
-        fitting_started = (
-            self._fitting_started_resolver(project, dataset)
-            if self._fitting_started_resolver is not None
-            else False
-        )
-        return dataset_analysis_state(
-            dataset.dataset,
-            fitting_started=fitting_started,
-        )
+        return dataset_analysis_state(dataset.dataset)
 
     def _resolve_scientific_replacement_target(
         self,
@@ -991,6 +1017,8 @@ class WorkspaceSidebar(QWidget):
             _dataset_with_role(dataset.dataset, role),
             emit_update=False,
         )
+        if re_roled is dataset:
+            return None
         self.dataset_role_changed.emit(project, dataset, re_roled)
         return re_roled
 
@@ -1034,11 +1062,12 @@ class WorkspaceSidebar(QWidget):
 
         self._analysis_state_colors = {
             DatasetAnalysisState.REQUIRED: required,
-            DatasetAnalysisState.READY: ready,
+            DatasetAnalysisState.READY: fully_fit,
             DatasetAnalysisState.PARTIALLY_FIT: partially_fit,
             DatasetAnalysisState.FULLY_FIT: fully_fit,
             DatasetAnalysisState.COMPLETE: complete or ready,
         }
+        self._result_partial_color = ready
         for project_index in range(len(self._projects)):
             self._rebuild_dataset_items(project_index)
 
@@ -1064,11 +1093,29 @@ class WorkspaceSidebar(QWidget):
         auto_mask: AutoMaskState | None = None,
         emit_update: bool = True,
     ) -> DatasetState:
-        """Replace one immutable dataset state and synchronize the Workspace row."""
+        """Publish an approved replacement, or return the unchanged owner on veto."""
+
+        current = self._prepare_dataset_replacement(
+            project, previous, replacement_dataset, auto_mask=auto_mask
+        )
+        if current is None:
+            return previous
+        self._publish_dataset_replacement(project, previous, current)
+        if emit_update:
+            self.dataset_updated.emit(project, previous, current)
+        return current
+
+    def _prepare_dataset_replacement(
+        self,
+        project: ProjectState,
+        previous: DatasetState,
+        replacement_dataset: ReducedDataset,
+        *,
+        auto_mask: AutoMaskState | None = None,
+    ) -> DatasetState | None:
+        """Validate and obtain consent without publishing any Dataset state."""
 
         self.validate_dataset_membership(project, previous)
-        project_index = self._project_index(project)
-        dataset_index = self._dataset_index(project, previous)
         mask_state = auto_mask
         if mask_state is None and previous.auto_mask is not None:
             mask_state = rebind_auto_mask_state(previous.auto_mask, replacement_dataset)
@@ -1077,14 +1124,22 @@ class WorkspaceSidebar(QWidget):
             dataset=replacement_dataset,
             auto_mask=mask_state,
         )
+        if self._replacement_guard is not None and not self._replacement_guard(
+            project, previous, replacement_dataset
+        ):
+            return None
+        return current
+
+    def _publish_dataset_replacement(
+        self, project: ProjectState, previous: DatasetState, current: DatasetState
+    ) -> None:
+        project_index = self._project_index(project)
+        dataset_index = self._dataset_index(project, previous)
         project.datasets[dataset_index] = current
         if self._active_project is project and self._active_dataset is previous:
             self._active_dataset = current
         project.datasets.sort(key=_dataset_sort_key)
         self._rebuild_dataset_items(project_index, select_dataset=current)
-        if emit_update:
-            self.dataset_updated.emit(project, previous, current)
-        return current
 
     def _on_current_item_changed(
         self,
@@ -1097,7 +1152,9 @@ class WorkspaceSidebar(QWidget):
         if isinstance(project_index, int):
             self.project_selected.emit(self._projects[project_index])
 
-    def _on_item_double_clicked(self, item: QTreeWidgetItem, _column: int) -> None:
+    def _on_item_clicked(
+        self, item: QTreeWidgetItem, _column: int, *, fresh: bool = False
+    ) -> None:
         kind = item.data(0, ITEM_KIND_ROLE)
         if kind not in {"dataset", "saved_result"}:
             return
@@ -1107,11 +1164,19 @@ class WorkspaceSidebar(QWidget):
             project = self._projects[project_index]
             dataset = project.datasets[dataset_index]
             if kind == "dataset":
-                self.dataset_open_requested.emit(project, dataset)
+                signal = (
+                    self.dataset_fresh_requested
+                    if fresh
+                    else self.dataset_open_requested
+                )
+                signal.emit(project, dataset)
             else:
                 entry = item.data(0, SAVED_RESULT_ENTRY_ROLE)
                 if isinstance(entry, SavedFitResult):
                     self.saved_result_open_requested.emit(project, dataset, entry)
+
+    def _on_item_double_clicked(self, item: QTreeWidgetItem, column: int) -> None:
+        self._on_item_clicked(item, column, fresh=True)
 
     def _show_context_menu(self, position: QPoint) -> None:
         item = self.tree.itemAt(position)
@@ -1159,6 +1224,21 @@ class WorkspaceSidebar(QWidget):
             self.tree.setCurrentItem(item)
             project = self._projects[project_index]
             menu = QMenu(self)
+            rename = menu.addAction("Rename…")
+            rename.triggered.connect(
+                lambda: self.saved_result_rename_requested.emit(project, dataset, entry)
+            )
+            best = menu.addAction("Remove Best" if entry.best else "Mark as Best")
+            best.triggered.connect(
+                lambda: self.saved_result_best_requested.emit(project, dataset, entry)
+            )
+            if entry.modified_copy is not None:
+                revert = menu.addAction("Revert to Saved")
+                revert.triggered.connect(
+                    lambda: self.saved_result_revert_requested.emit(
+                        project, dataset, entry
+                    )
+                )
             action = menu.addAction("Delete Result")
             action.triggered.connect(
                 lambda: self.saved_result_delete_requested.emit(project, dataset, entry)
@@ -1343,6 +1423,41 @@ class WorkspaceSidebar(QWidget):
     ) -> None:
         project = self._projects[project_index]
         data_item = self._data_items[project_index]
+        rows = [
+            self._dataset_item(project_index, index, dataset)
+            for index, dataset in enumerate(project.datasets)
+        ]
+        existing = [data_item.child(index) for index in range(data_item.childCount())]
+        if len(rows) == len(existing) and all(
+            before is not None
+            and before.data(0, DATASET_ID_ROLE) == after.data(0, DATASET_ID_ROLE)
+            and before.childCount() == after.childCount()
+            and all(
+                (old_child := before.child(index)) is not None
+                and (new_child := after.child(index)) is not None
+                and old_child.data(0, SAVED_RESULT_ENTRY_ROLE)
+                is new_child.data(0, SAVED_RESULT_ENTRY_ROLE)
+                for index in range(after.childCount())
+            )
+            for before, after in zip(existing, rows, strict=True)
+        ):
+            # Data/active-state refreshes must not invalidate Qt's pressed item
+            # index between the first click and a native double-click.
+            for before, after in zip(existing, rows, strict=True):
+                assert before is not None
+                self._copy_item_presentation(before, after)
+                for index in range(after.childCount()):
+                    child, source = before.child(index), after.child(index)
+                    assert child is not None and source is not None
+                    self._copy_item_presentation(child, source)
+                if (
+                    select_dataset is not None
+                    and before.data(0, DATASET_ID_ROLE)
+                    == select_dataset.workflow_dataset_id
+                ):
+                    self.tree.setCurrentItem(before)
+            data_item.setExpanded(True)
+            return
         current_item = self.tree.currentItem()
         selected_dataset = select_dataset or self._dataset_for_item(current_item)
         previous_rows = {
@@ -1367,7 +1482,7 @@ class WorkspaceSidebar(QWidget):
         )
         data_item.takeChildren()
         for dataset_index, dataset in enumerate(project.datasets):
-            item = self._dataset_item(project_index, dataset_index, dataset)
+            item = rows[dataset_index]
             data_item.addChild(item)
             was_expanded, previous_children = previous_rows.get(
                 dataset.workflow_dataset_id, (False, 0)
@@ -1385,6 +1500,26 @@ class WorkspaceSidebar(QWidget):
                         self.tree.setCurrentItem(child)
                         break
         data_item.setExpanded(True)
+
+    @staticmethod
+    def _copy_item_presentation(
+        target: QTreeWidgetItem, source: QTreeWidgetItem
+    ) -> None:
+        for column in (0, 1):
+            target.setText(column, source.text(column))
+            target.setIcon(column, source.icon(column))
+            target.setToolTip(column, source.toolTip(column))
+            target.setFont(column, source.font(column))
+            for role in (
+                PROJECT_INDEX_ROLE,
+                ITEM_KIND_ROLE,
+                DATASET_INDEX_ROLE,
+                ACTIVE_DATASET_ROLE,
+                DATASET_ID_ROLE,
+                SAVED_RESULT_ENTRY_ROLE,
+            ):
+                target.setData(column, role, source.data(column, role))
+        target.setFlags(source.flags())
 
     def _rebuild_method_items(self, project_index: int) -> None:
         """Render the small, in-memory Q Method list without a manager layer."""
@@ -1453,8 +1588,13 @@ class WorkspaceSidebar(QWidget):
         is_active = self._active_project is self._projects[project_index] and (
             self._active_dataset is dataset
         )
-        item.setData(0, ACTIVE_DATASET_ROLE, is_active)
-        item.setData(1, ACTIVE_DATASET_ROLE, is_active)
+        active_entry = (
+            None
+            if self._active_result_resolver is None
+            else self._active_result_resolver(self._projects[project_index], dataset)
+        )
+        item.setData(0, ACTIVE_DATASET_ROLE, is_active and active_entry is None)
+        item.setData(1, ACTIVE_DATASET_ROLE, is_active and active_entry is None)
         item.setToolTip(0, _dataset_source_tooltip(dataset))
         analysis_state = self.dataset_analysis_state_for(
             self._projects[project_index],
@@ -1480,23 +1620,49 @@ class WorkspaceSidebar(QWidget):
                 load_icon(IconName.RESOLUTION, self._resolution_icon_color),
             )
         if self._saved_results_resolver is not None:
-            for entry in self._saved_results_resolver(
+            entries = self._saved_results_resolver(
                 self._projects[project_index], dataset
-            ):
+            )
+            for entry in sorted(entries, key=lambda entry: not entry.best):
+                result = entry.working_copy.snapshot
+                assert result is not None
+                summary = result.result
+                counted = summary.total_count - dict(summary.status_counts).get(
+                    MultiQFitStatus.EXCLUDED, 0
+                )
+                fitted = summary.fitted_count
+                color = self._analysis_state_colors[
+                    DatasetAnalysisState.FULLY_FIT
+                    if fitted == counted and counted > 0
+                    else DatasetAnalysisState.READY
+                    if fitted > 0
+                    else DatasetAnalysisState.REQUIRED
+                ]
+                # Coverage warning and Dataset readiness use different semantic roles.
+                if 0 < fitted < counted:
+                    color = self._result_partial_color
                 child = QTreeWidgetItem(
                     [
-                        entry.name,
-                        "Multi-Q"
-                        if any(
-                            point.origin
-                            in (
-                                ResultOrigin.MANUAL_FIT_ALL_Q,
-                                ResultOrigin.AUTO_FIT_BRANCH,
-                            )
-                            for point in entry.result.points
-                        )
-                        else "Single-Q",
+                        ("★ " if entry.best else "")
+                        + entry.name
+                        + (" *" if entry.modified_copy is not None else ""),
+                        f"{fitted}/{counted} Q",
                     ]
+                )
+                child.setIcon(1, _analysis_state_icon(color))
+                breakdown = "\n".join(
+                    f"{status.value}: {count}"
+                    for status, count in summary.status_counts
+                )
+                if summary.total_count != len(dataset.dataset.spectra):
+                    breakdown += "\nDifferent Q-group count; cannot load."
+                child.setToolTip(0, breakdown)
+                child.setToolTip(1, breakdown)
+                child.setData(
+                    0, ACTIVE_DATASET_ROLE, is_active and active_entry is entry
+                )
+                child.setData(
+                    1, ACTIVE_DATASET_ROLE, is_active and active_entry is entry
                 )
                 child.setData(0, PROJECT_INDEX_ROLE, project_index)
                 child.setData(0, DATASET_INDEX_ROLE, dataset_index)
@@ -1518,21 +1684,15 @@ def dataset_analysis_state(
     fitted_group_count: int | None = None,
     fitting_started: bool = False,
 ) -> DatasetAnalysisState:
-    """Map metadata, fitting start, and future fit coverage to semantic states."""
+    """Show data readiness only, independently of Result coverage."""
 
-    if _dataset_information_is_incomplete(dataset):
-        return DatasetAnalysisState.REQUIRED
     if dataset.role is SpectrumRole.RESOLUTION:
         return DatasetAnalysisState.COMPLETE
+    if _dataset_information_is_incomplete(dataset):
+        return DatasetAnalysisState.REQUIRED
     if fitted_group_count is not None:
         if not 0 <= fitted_group_count <= len(dataset.spectra):
             raise ValueError("fitted group count is outside the dataset")
-        if fitted_group_count == len(dataset.spectra):
-            return DatasetAnalysisState.FULLY_FIT
-        if fitted_group_count:
-            return DatasetAnalysisState.PARTIALLY_FIT
-    if fitting_started:
-        return DatasetAnalysisState.PARTIALLY_FIT
     return DatasetAnalysisState.READY
 
 
@@ -1601,7 +1761,7 @@ def _dataset_state_tooltip(
         DatasetAnalysisState.REQUIRED: (
             "Information required before normal analysis can be complete."
         ),
-        DatasetAnalysisState.READY: "Ready for Fit; fitting has not started.",
+        DatasetAnalysisState.READY: "Ready for Fit.",
         DatasetAnalysisState.PARTIALLY_FIT: (
             "Fitting has started; dataset Groups are not yet fully completed."
         ),
