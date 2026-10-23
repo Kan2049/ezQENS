@@ -313,7 +313,7 @@ def test_apply_requires_active_saved_and_exactly_one(
 
 @pytest.mark.parametrize("active_work", (False, True))
 def test_save_mixed_scope_is_atomic_and_preserves_existing_work(
-    problem: LifecycleProblem, active_work: bool
+    problem: LifecycleProblem, active_work: bool, qt_slot_errors: list[BaseException]
 ) -> None:
     if active_work:
         _seed_single(problem, "Existing")
@@ -340,12 +340,15 @@ def test_save_mixed_scope_is_atomic_and_preserves_existing_work(
         assert (
             problem.session.draft.setup(0).model is single.working_copy.draft_states[0]
         )
-    assert dialog.isVisible()
+    assert not qt_slot_errors
+    assert not dialog.isVisible() and dialog.result() == QDialog.DialogCode.Accepted
     _saved_item(problem, single)
     _saved_item(problem, whole)
 
 
-def test_save_default_names_use_first_free_suffix(problem: LifecycleProblem) -> None:
+def test_save_default_names_use_first_free_suffix(
+    problem: LifecycleProblem, qt_slot_errors: list[BaseException]
+) -> None:
     base = problem.candidates[0].candidate.name
     _seed_single(problem, base)
     problem.session.result_workspace = save_current_result_as(
@@ -362,12 +365,16 @@ def test_save_default_names_use_first_free_suffix(problem: LifecycleProblem) -> 
 
         QTimer.singleShot(0, accept_default)
         QTest.mouseClick(dialog.save_button, Qt.MouseButton.LeftButton)
+        assert not qt_slot_errors
+        assert not dialog.isVisible() and dialog.result() == QDialog.DialogCode.Accepted
         assert problem.session.result_workspace.saved_results[-1].name == expected
         dialog.close()
 
 
 def test_save_second_adoption_failure_changes_nothing(
-    problem: LifecycleProblem, monkeypatch: pytest.MonkeyPatch
+    problem: LifecycleProblem,
+    monkeypatch: pytest.MonkeyPatch,
+    qt_slot_errors: list[BaseException],
 ) -> None:
     _seed_single(problem, "Existing")
     dialog = _dialog(problem, problem.candidates)
@@ -380,13 +387,43 @@ def test_save_second_adoption_failure_changes_nothing(
         raise ValueError("second adoption failed")
 
     monkeypatch.setattr(window_module, "adopt_selected_auto_fit_branch", fail_branch)
+    # Drive the actual error dialog nested after the real naming dialog.
     messages: list[str] = []
-    monkeypatch.setattr(
-        window_module,
-        "show_message_dialog",
-        lambda _p, _t, message: messages.append(message),
-    )
-    _name_results(problem, dialog, ("One", "Two"))
+
+    def dismiss_error() -> None:
+        from PySide6.QtWidgets import QLabel, QPushButton
+
+        error = QApplication.activeModalWidget()
+        assert isinstance(error, QDialog)
+        try:
+            assert error.windowTitle() == "AutoFit"
+            messages.extend(
+                label.text()
+                for label in error.findChildren(QLabel)
+                if label.objectName() == "ezqensDialogMessage"
+            )
+            QTest.mouseClick(
+                next(
+                    button
+                    for button in error.findChildren(QPushButton)
+                    if button.text() == "OK"
+                ),
+                Qt.MouseButton.LeftButton,
+            )
+        finally:
+            error.reject()
+
+    def accept_names() -> None:
+        naming = QApplication.activeModalWidget()
+        assert isinstance(naming, ResultNamesDialog)
+        QTimer.singleShot(0, dismiss_error)
+        for edit, name in zip(naming.name_edits, ("One", "Two"), strict=True):
+            edit.setText(name)
+        QTest.mouseClick(naming.save_button, Qt.MouseButton.LeftButton)
+
+    QTimer.singleShot(0, accept_names)
+    QTest.mouseClick(dialog.save_button, Qt.MouseButton.LeftButton)
+    assert not qt_slot_errors
     assert messages == ["second adoption failed"]
     assert problem.session.result_workspace is before
     assert problem.session.draft is draft and dialog.isVisible()

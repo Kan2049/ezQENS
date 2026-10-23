@@ -540,6 +540,9 @@ class MainWindow(QMainWindow):
         self.workspace.dataset_fresh_requested.connect(self._fresh_workspace_dataset)
         self.workspace.saved_result_open_requested.connect(self._open_saved_result)
         self.workspace.saved_result_delete_requested.connect(self._delete_saved_result)
+        self.workspace.saved_results_delete_requested.connect(
+            self._delete_saved_results
+        )
         self.workspace.saved_result_rename_requested.connect(self._rename_saved_result)
         self.workspace.saved_result_best_requested.connect(self._best_saved_result)
         self.workspace.saved_result_revert_requested.connect(self._revert_saved_result)
@@ -2098,6 +2101,7 @@ class MainWindow(QMainWindow):
                 workspace.associated_saved_result is not None
             )
             self._refresh_manual_result_actions()
+            dialog.accept()
             return
         adoption = adoptions[0]
         assert adoption.adopted_draft is not None and adoption.snapshot is not None
@@ -3111,6 +3115,55 @@ class MainWindow(QMainWindow):
         was_active = session.result_workspace.active_item is entry
         session.result_workspace = remove_saved_result(session.result_workspace, entry)
         if was_active:
+            session.execution_by_group.clear()
+            self._default_result_view(session)
+        self.workspace.refresh_dataset_analysis(project)
+        if self._active_manual_session is session:
+            self._refresh_manual_fit()
+
+    def _delete_saved_results(
+        self,
+        project: ProjectState,
+        dataset: DatasetState,
+        entries: tuple[SavedFitResult, ...],
+    ) -> None:
+        """Confirm one Dataset's selection, removing only still-present identities."""
+
+        if self._fit_all_q_mutation_blocked():
+            return
+        session = self._manual_sessions.get((project, dataset.workflow_dataset_id))
+        if session is None:
+            return
+        entries = tuple(
+            entry
+            for entry in entries
+            if any(item is entry for item in session.result_workspace.saved_results)
+        )
+        if not entries:
+            return
+        modified = sum(entry.modified_copy is not None for entry in entries)
+        if not confirm_dialog(
+            self,
+            "Delete Results",
+            f"Delete {len(entries)} Results?\n"
+            f"Entries with unsaved modifications: {modified}. "
+            "Those modifications will be lost.",
+            accept_text=f"Delete {len(entries)} Results",
+            destructive=True,
+        ):
+            return
+        if self._manual_sessions.get(session.owner) is not session:
+            return
+        workspace = session.result_workspace
+        removed_active = False
+        for entry in entries:
+            if not any(item is entry for item in workspace.saved_results):
+                continue
+            removed_active |= workspace.active_item is entry
+            workspace = remove_saved_result(workspace, entry)
+        session.result_workspace = workspace
+        if removed_active:
+            self._discard_pending_manual_interaction()
             session.execution_by_group.clear()
             self._default_result_view(session)
         self.workspace.refresh_dataset_analysis(project)

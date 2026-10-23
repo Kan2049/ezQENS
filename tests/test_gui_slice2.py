@@ -14,7 +14,6 @@ import numpy as np
 import pytest
 from matplotlib.backend_bases import KeyEvent, MouseButton, MouseEvent
 from PySide6.QtCore import QPoint, Qt, QTimer
-from PySide6.QtGui import QKeyEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QApplication,
@@ -2400,14 +2399,18 @@ def test_workspace_removal_menu_and_keyboard_share_removable_object_scope(
         lambda *_args, **_kwargs: False,
     )
     window.workspace.tree.setCurrentItem(dataset_item)
-    event = QKeyEvent(
-        QKeyEvent.Type.KeyPress,
-        Qt.Key.Key_Delete,
-        Qt.KeyboardModifier.NoModifier,
-    )
-    window.workspace.tree.keyPressEvent(event)
+    window.show()
+    window.workspace.tree.setFocus()
+    application.processEvents()
+    QTest.keyClick(window.workspace.tree, Qt.Key.Key_Delete)
 
     assert requested == [(project, dataset)]
+    next(
+        action
+        for action in dataset_menu.actions()
+        if action.text() == "Remove from Project"
+    ).trigger()
+    assert requested == [(project, dataset), (project, dataset)]
     assert method in project.q_methods
     window.close()
 

@@ -466,6 +466,21 @@ or double-click loads its editable retained copy. Switching Datasets, Projects,
 tasks, or saved entries retains saved working copies without prompting. A
 different Q-group count blocks loading but does not remove history. Context-menu
 Rename, Best, Revert to Saved, and confirmed Delete do not implicitly load.
+Cmd/Ctrl-click toggles Saved Result selection and Shift-click selects a range
+from the anchor, without loading or prompting. Selection is limited to one
+Dataset; selecting another Dataset's entry resets it. Right-click preserves an
+existing multi-selection, or selects just the clicked row without loading.
+A multi-selection offers only Delete N Results, with one confirmation stating
+the entry count and how many carry unsaved modifications that will be lost.
+Deletion uses entry identity, skips stale entries, and applies the default-view
+rule once if the active entry was removed. Rename, Best, and Revert are
+single-selection actions only.
+When the Workspace tree has focus and is not editing, Delete and Backspace use
+the same confirmed single/bulk Result deletion for a Saved-Result-only selection,
+or the existing removal flow and confirmations for one Project, Dataset, or
+Q Method. Mixed and other selections do nothing. These shortcuts do not act
+from parameter fields, dialogs, or other inputs, and do not intercept tree text
+editing.
 
 Replacing/retiring untitled fitted work requires Save / Discard / Cancel; Save
 requires a non-empty name before continuing. Untitled edits without a fit require
@@ -487,8 +502,9 @@ AutoFit Save accepts one or more checked candidates. An executed selection saves
 its full issued Multi-Q branch; otherwise it saves original anchor evaluation
 evidence. All selections append atomically, without installing their adopted
 Manual drafts or changing existing active work. With no Result or draft edits,
-the first new entry is loaded. The dialog stays open and history updates
-immediately. A naming dialog defaults to candidate labels, choosing the first
+the first new entry is loaded. A successful Save closes the dialog and updates
+history immediately; a failed Save leaves the dialog open with its error.
+A naming dialog defaults to candidate labels, choosing the first
 free numeric suffix ` (1)`, ` (2)`, etc. only for defaults; user names need only
 be non-empty, not unique.
 

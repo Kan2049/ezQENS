@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from PySide6.QtCore import (
     QByteArray,
+    QItemSelectionModel,
     QMimeData,
     QModelIndex,
     QPersistentModelIndex,
@@ -256,6 +257,120 @@ class WorkspaceTree(QTreeWidget):
 
     q_method_dropped = Signal(int, int, int, int)
     removal_requested = Signal(object)
+    result_removal_requested = Signal(object)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._result_selection_anchor = QPersistentModelIndex()
+        self._result_selection_press = False
+
+    def select_result_for_menu(self, item: QTreeWidgetItem) -> None:
+        """Keep a selected Result range, or select just the context-menu row."""
+
+        if not item.isSelected():
+            self.clearSelection()
+            item.setSelected(True)
+            self._result_selection_anchor = QPersistentModelIndex(
+                self.indexFromItem(item)
+            )
+        self.setCurrentItem(item, 0, QItemSelectionModel.SelectionFlag.NoUpdate)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        item = self.itemAt(event.position().toPoint())
+        self._result_selection_press = False
+        if item is not None and item.data(0, ITEM_KIND_ROLE) == "saved_result":
+            if event.button() is Qt.MouseButton.RightButton:
+                self.select_result_for_menu(item)
+                self._result_selection_press = True
+                event.accept()
+                return
+            if event.button() is Qt.MouseButton.LeftButton:
+                modifiers = event.modifiers()
+                if modifiers & (
+                    Qt.KeyboardModifier.ControlModifier
+                    | Qt.KeyboardModifier.MetaModifier
+                    | Qt.KeyboardModifier.ShiftModifier
+                ):
+                    self._select_result_range(item, modifiers)
+                    self._result_selection_press = True
+                    self.setFocus()
+                    event.accept()
+                    return
+                self._result_selection_anchor = QPersistentModelIndex(
+                    self.indexFromItem(item)
+                )
+        else:
+            self._result_selection_anchor = QPersistentModelIndex()
+        super().mousePressEvent(event)
+
+    def _select_result_range(
+        self, item: QTreeWidgetItem, modifiers: Qt.KeyboardModifier
+    ) -> None:
+        """Select within one Dataset, without emitting a load/click request."""
+
+        parent = item.parent()
+        assert parent is not None
+        if any(row.parent() is not parent for row in self.selectedItems()):
+            self.clearSelection()
+            self._result_selection_anchor = QPersistentModelIndex()
+        anchor_index = self._result_selection_anchor
+        model = anchor_index.model()
+        anchor = (
+            None
+            if model is None
+            else self.itemFromIndex(
+                model.index(
+                    anchor_index.row(), anchor_index.column(), anchor_index.parent()
+                )
+            )
+        )
+        if (
+            modifiers & Qt.KeyboardModifier.ShiftModifier
+            and anchor is not None
+            and anchor.parent() is parent
+        ):
+            lower, upper = sorted(
+                (parent.indexOfChild(anchor), parent.indexOfChild(item))
+            )
+            self.clearSelection()
+            for index in range(lower, upper + 1):
+                child = parent.child(index)
+                if child is not None:
+                    child.setSelected(True)
+        else:
+            if modifiers & Qt.KeyboardModifier.ShiftModifier:
+                self.clearSelection()
+                item.setSelected(True)
+            else:
+                item.setSelected(not item.isSelected())
+            self._result_selection_anchor = QPersistentModelIndex(
+                self.indexFromItem(item)
+            )
+        self.setCurrentItem(item, 0, QItemSelectionModel.SelectionFlag.NoUpdate)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if self._result_selection_press:
+            self._result_selection_press = False
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        item = self.itemAt(event.position().toPoint())
+        if (
+            item is not None
+            and item.data(0, ITEM_KIND_ROLE) == "saved_result"
+            and event.modifiers()
+            & (
+                Qt.KeyboardModifier.ControlModifier
+                | Qt.KeyboardModifier.MetaModifier
+                | Qt.KeyboardModifier.ShiftModifier
+            )
+        ):
+            self._result_selection_press = True
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
 
     def mimeData(self, items: Sequence[QTreeWidgetItem]) -> QMimeData:  # noqa: N802
         mime = super().mimeData(items)
@@ -316,21 +431,24 @@ class WorkspaceTree(QTreeWidget):
         event.ignore()
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
-        """Route ordinary removal keys through the same sidebar command path."""
+        """Route focused removal keys through the existing object/Result paths."""
 
         if self.state() is QAbstractItemView.State.EditingState:
             super().keyPressEvent(event)
             return
         if event.key() in {Qt.Key.Key_Delete, Qt.Key.Key_Backspace}:
-            item = self.currentItem()
-            if item is not None and item.data(0, ITEM_KIND_ROLE) in {
-                "project",
-                "dataset",
-                "q_method",
-            }:
-                self.removal_requested.emit(item)
-                event.accept()
-                return
+            rows = tuple(self.selectedItems())
+            if self.hasFocus() and rows:
+                if all(row.data(0, ITEM_KIND_ROLE) == "saved_result" for row in rows):
+                    self.result_removal_requested.emit(rows)
+                elif len(rows) == 1 and rows[0].data(0, ITEM_KIND_ROLE) in {
+                    "project",
+                    "dataset",
+                    "q_method",
+                }:
+                    self.removal_requested.emit(rows[0])
+            event.accept()
+            return
         super().keyPressEvent(event)
 
 
@@ -447,6 +565,7 @@ class WorkspaceSidebar(QWidget):
     dataset_open_requested = Signal(object, object)
     saved_result_open_requested = Signal(object, object, object)
     saved_result_delete_requested = Signal(object, object, object)
+    saved_results_delete_requested = Signal(object, object, object)
     saved_result_rename_requested = Signal(object, object, object)
     saved_result_best_requested = Signal(object, object, object)
     saved_result_revert_requested = Signal(object, object, object)
@@ -576,6 +695,7 @@ class WorkspaceSidebar(QWidget):
         self.tree.customContextMenuRequested.connect(self._show_context_menu)
         self.tree.q_method_dropped.connect(self._on_q_method_dropped)
         self.tree.removal_requested.connect(self._request_item_removal)
+        self.tree.result_removal_requested.connect(self._request_result_removal)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(8)
@@ -1221,9 +1341,26 @@ class WorkspaceSidebar(QWidget):
             entry = item.data(0, SAVED_RESULT_ENTRY_ROLE)
             if dataset is None or not isinstance(entry, SavedFitResult):
                 return None
-            self.tree.setCurrentItem(item)
+            self.tree.select_result_for_menu(item)
             project = self._projects[project_index]
             menu = QMenu(self)
+            entries = tuple(
+                selected_entry
+                for row in self.tree.selectedItems()
+                if row.parent() is item.parent()
+                and isinstance(
+                    selected_entry := row.data(0, SAVED_RESULT_ENTRY_ROLE),
+                    SavedFitResult,
+                )
+            )
+            if len(entries) > 1:
+                delete = menu.addAction(f"Delete {len(entries)} Results")
+                delete.triggered.connect(
+                    lambda: self.saved_results_delete_requested.emit(
+                        project, dataset, entries
+                    )
+                )
+                return menu
             rename = menu.addAction("Rename…")
             rename.triggered.connect(
                 lambda: self.saved_result_rename_requested.emit(project, dataset, entry)
@@ -1309,8 +1446,28 @@ class WorkspaceSidebar(QWidget):
         remove_action.triggered.connect(lambda: self._request_item_removal(item))
         return menu
 
+    def _request_result_removal(self, rows: tuple[QTreeWidgetItem, ...]) -> None:
+        """Use the context-menu commands for one Dataset's Result selection."""
+
+        item = rows[0]
+        project = self._project_for_item(item)
+        dataset = self._dataset_for_item(item.parent())
+        if (
+            project is None
+            or dataset is None
+            or any(row.parent() is not item.parent() for row in rows)
+        ):
+            return
+        entries = tuple(row.data(0, SAVED_RESULT_ENTRY_ROLE) for row in rows)
+        if not all(isinstance(entry, SavedFitResult) for entry in entries):
+            return
+        if len(entries) == 1:
+            self.saved_result_delete_requested.emit(project, dataset, entries[0])
+        else:
+            self.saved_results_delete_requested.emit(project, dataset, entries)
+
     def _request_item_removal(self, item: QTreeWidgetItem) -> None:
-        """Emit the object-level removal request shared by menu and keyboard paths."""
+        """Emit the shared context-menu/keyboard object removal request."""
 
         project = self._project_for_item(item)
         if project is None:
@@ -1480,6 +1637,9 @@ class WorkspaceSidebar(QWidget):
             if selected_result is not None and current_item is not None
             else None
         )
+        anchor = self.tree._result_selection_anchor
+        restore_anchor = anchor.data(PROJECT_INDEX_ROLE) == project_index
+        anchor_entry = anchor.data(SAVED_RESULT_ENTRY_ROLE) if restore_anchor else None
         data_item.takeChildren()
         for dataset_index, dataset in enumerate(project.datasets):
             item = rows[dataset_index]
@@ -1499,6 +1659,19 @@ class WorkspaceSidebar(QWidget):
                     ):
                         self.tree.setCurrentItem(child)
                         break
+        if restore_anchor:
+            self.tree._result_selection_anchor = QPersistentModelIndex()
+            for item in rows:
+                for index in range(item.childCount()):
+                    child = item.child(index)
+                    if (
+                        child is not None
+                        and anchor_entry is not None
+                        and child.data(0, SAVED_RESULT_ENTRY_ROLE) is anchor_entry
+                    ):
+                        self.tree._result_selection_anchor = QPersistentModelIndex(
+                            self.tree.indexFromItem(child)
+                        )
         data_item.setExpanded(True)
 
     @staticmethod
