@@ -73,7 +73,9 @@ from ezqens.gui.manual_fit_all_q import (
     TransferDefaultsStore,
 )
 from ezqens.gui.masking import MaskTaskDraft
+from ezqens.gui.q_dependence import ParameterViewer
 from ezqens.gui.q_rebin import QRebinDialog, QRebinPreview
+from ezqens.gui.result_presentation import lorentzian_slots
 from ezqens.gui.theme import (
     DEFAULT_LAYOUT_TOKENS,
     Appearance,
@@ -125,6 +127,7 @@ from ezqens.workflow import (
     complete_lorentzian_interaction,
     create_parameter_tie,
     create_project,
+    derive_result_in_context,
     draft_edit_items,
     fresh_analysis,
     join_center_group,
@@ -154,6 +157,7 @@ from ezqens.workflow import (
     save_current_result_as,
     set_best_saved_result,
     set_current_result,
+    swap_current_lorentzian_identities,
     unsaved_result_items,
     untie_center_group_parameter,
     untie_parameter,
@@ -455,6 +459,8 @@ class MainWindow(QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
+        self.parameter_viewer: ParameterViewer | None = None
+        self._parameter_viewer_key: tuple[object, ...] | None = None
         self.setObjectName("mainWindow")
         self._configure_native_window_chrome()
         self.resize(1200, 760)
@@ -583,6 +589,7 @@ class MainWindow(QMainWindow):
             self._cancel_manual_component_interaction,
         )
         self.dataset_view.group_changed.connect(self._on_manual_group_changed)
+        self.manual_fit_editor.series_swap_requested.connect(self._swap_result_series)
         self.dataset_view.mask_rectangle_requested.connect(self._exclude_rectangle)
         self.dataset_view.mask_lasso_requested.connect(self._exclude_lasso)
         self.dataset_view.mask_boundary_previewed.connect(self._preview_auto_boundary)
@@ -638,6 +645,8 @@ class MainWindow(QMainWindow):
         if self._appearance_listener_connected:
             self._appearance_controller.theme_changed.disconnect(self._on_theme_changed)
             self._appearance_listener_connected = False
+        if self.parameter_viewer is not None:
+            self.parameter_viewer.close()
         super().closeEvent(event)
 
     def set_scientific_figure_visible(self, visible: bool) -> None:
@@ -846,6 +855,10 @@ class MainWindow(QMainWindow):
         self.auto_fit_button.clicked.connect(
             lambda _checked=False: self.show_auto_fit(),
         )
+        self.parameter_viewer_button = QToolButton()
+        self.parameter_viewer_button.setText("Parameter Viewer")
+        self.parameter_viewer_button.setObjectName("parameterViewerButton")
+        self.parameter_viewer_button.clicked.connect(self.show_parameter_viewer)
 
         self.inspector_button = QToolButton()
         self.inspector_button.setObjectName("inspectorButton")
@@ -863,6 +876,7 @@ class MainWindow(QMainWindow):
         header_layout.addStretch(1)
         header_layout.addWidget(self.manual_fit_button)
         header_layout.addWidget(self.auto_fit_button)
+        header_layout.addWidget(self.parameter_viewer_button)
         header_layout.addWidget(self.inspector_button)
         self._central_header_layout = header_layout
 
@@ -3050,6 +3064,7 @@ class MainWindow(QMainWindow):
                 session.result_workspace, entry, name.strip()
             )
             self.workspace.refresh_dataset_analysis(project)
+            self._refresh_parameter_viewer()
 
     def _best_saved_result(
         self, project: ProjectState, dataset: DatasetState, entry: SavedFitResult
@@ -3534,6 +3549,7 @@ class MainWindow(QMainWindow):
             )
         self._sync_manual_fit_entry()
         self._refresh_manual_fit()
+        self._refresh_parameter_viewer()
 
     def _refresh_manual_fit(self) -> None:
         session = self._active_manual_session
@@ -3546,6 +3562,7 @@ class MainWindow(QMainWindow):
             or self._manual_owner
             != (self._open_project, self._open_dataset.workflow_dataset_id)
         ):
+            self._refresh_parameter_viewer()
             return
         workflow = self._workflow_project_for(self._open_project)
         group_index = self.dataset_view.current_group_index
@@ -3555,6 +3572,9 @@ class MainWindow(QMainWindow):
             group_index,
         )
         current_result = session.result_workspace.current_result
+        model = self._manual_draft.setup(group_index).model
+        slots = lorentzian_slots(current_result, model)
+        self.dataset_view.series_slots = slots
         current_point = (
             current_result.point(group_index) if current_result is not None else None
         )
@@ -3603,6 +3623,9 @@ class MainWindow(QMainWindow):
             fit_result=display_fit,
             result_outcome=result_outcome,
             result_metadata=result_metadata,
+            series_slots=slots,
+            swap_enabled=display_fit is not None
+            and not self._fit_all_q_mutation_blocked(),
         )
         self._refresh_manual_result_actions()
         if self._active_fit_all_q_generation is None:
@@ -3663,6 +3686,7 @@ class MainWindow(QMainWindow):
         return tuple(session.display_status(index) for index in range(count))
 
     def _refresh_result_status_projection(self) -> None:
+        self._refresh_parameter_viewer()
         session = self._active_manual_session
         if (
             session is None
@@ -3682,6 +3706,117 @@ class MainWindow(QMainWindow):
             else self._result_fit_statuses(session)
         )
         self.dataset_view.set_fit_statuses(statuses)
+
+    def show_parameter_viewer(self) -> None:
+        if self.parameter_viewer is None:
+            self.parameter_viewer = ParameterViewer(self)
+        if not self.parameter_viewer.isVisible():
+            self._parameter_viewer_key = None
+        self.parameter_viewer.show()
+        self._refresh_parameter_viewer()
+        self.parameter_viewer.raise_()
+        self.parameter_viewer.activateWindow()
+
+    def _refresh_parameter_viewer(self) -> None:
+        view = self.parameter_viewer
+        if view is None or not view.isVisible():
+            self._parameter_viewer_key = None
+            return
+        dataset, project = self._open_dataset, self._open_project
+        session = (
+            None
+            if dataset is None or project is None
+            else self._manual_sessions.get((project, dataset.workflow_dataset_id))
+        )
+        if (
+            session is None
+            or not session.draft_available
+            or session.result_workspace.current is None
+            or dataset is None
+            or project is None
+            or dataset.dataset.q_bins is None
+            or len(session.result_workspace.current.result.points)
+            != dataset.dataset.q_bins.group_count
+        ):
+            if view.derived is not None:
+                view.set_result(None, {}, (), 0, "No Result open")
+            self._parameter_viewer_key = None
+            return
+        entry = session.result_workspace.associated_saved_result
+        title = f"{dataset.name} · {entry.name if entry is not None else 'Untitled'}"
+        workflow = self._workflow_project_for(project)
+        # Immutable application/workflow objects own draft and context changes.
+        # Reference comparison avoids array equality or all-Q context resolution
+        # on navigation. Closed viewers are invalidated and recompute on open.
+        key = (
+            session,
+            session.result_workspace.active_item,
+            dataset.dataset,
+            dataset.auto_mask,
+            workflow,
+        )
+        if self._parameter_viewer_key is not None and all(
+            before is after
+            for before, after in zip(self._parameter_viewer_key, key, strict=True)
+        ):
+            view.set_title(title)
+            view.set_current_group(self.dataset_view.current_group_index)
+            return
+        contexts = tuple(
+            self._manual_context(session, index)
+            for index in range(len(session.draft.setups))
+        )
+        derived = derive_result_in_context(
+            session.result_workspace.current, dataset.dataset.q_bins, contexts
+        )
+        statuses = tuple(
+            result_q_display_status(
+                session.result_workspace, session.draft, index, context
+            )
+            for index, context in enumerate(contexts)
+        )
+        self._parameter_viewer_key = key
+        view.set_result(
+            derived,
+            lorentzian_slots(session.result_workspace.current_result),
+            statuses,
+            self.dataset_view.current_group_index,
+            title,
+            tuple(
+                manual_parameter_metadata(
+                    point.fit_result.configuration,
+                    energy_unit=dataset.dataset.spectra[index].energy_unit,
+                    intensity_unit=dataset.dataset.spectra[index].intensity_unit,
+                )
+                if point.fit_result is not None
+                else ()
+                for index, point in enumerate(derived.source_result.points)
+            ),
+        )
+
+    def _swap_result_series(
+        self, first: ComponentIdentity, second: ComponentIdentity
+    ) -> None:
+        session = self._active_manual_session
+        if session is None or self._fit_all_q_mutation_blocked():
+            return
+        group = self.dataset_view.current_group_index
+        result = session.result_workspace.current_result
+        if result is None or result.point(group).fit_result is None:
+            return
+        try:
+            state, draft = swap_current_lorentzian_identities(
+                session.result_workspace, session.draft, group, first, second
+            )
+        except WorkflowError as error:
+            self._show_workflow_error("Swap series", error)
+            return
+        except ValueError as error:
+            show_message_dialog(self, "Swap series", str(error))
+            return
+        session.result_workspace = state
+        session._template = draft
+        self._refresh_manual_fit()
 
     def _update_manual_inspector_minimum_width(self) -> None:
         """Stop the Inspector before its populated three-slot grid can clip."""
@@ -3902,6 +4037,7 @@ class MainWindow(QMainWindow):
         self.workspace.clear_active_dataset()
         self._open_project = None
         self._open_dataset = None
+        self._refresh_parameter_viewer()
         self.edit_mask_action.setEnabled(False)
         self._sync_manual_fit_entry()
         self.set_scientific_figure_visible(False)
@@ -5149,6 +5285,7 @@ class MainWindow(QMainWindow):
                 self._mask_draft_owner = current
             self._refresh_context_label()
             self._refresh_inspector_context()
+            self._refresh_parameter_viewer()
 
     def _on_project_renamed(self, project: ProjectState) -> None:
         if self._open_project is project:

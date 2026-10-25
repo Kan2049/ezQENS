@@ -492,6 +492,61 @@ listed as discarded. Quit also warns for clean saved Results: there is no disk
 project persistence yet, so all Results are lost on quit. Dataset removal does
 not delete source files and explicitly warns that its Results are discarded.
 
+The Parameter Viewer action beside Manual Fit / AutoFit opens or raises one
+owned, non-modal `Parameter Viewer — <Dataset> · <Result | Untitled>` window.
+FWHM, τ and EISF are three independently checkable, visibly toggled panels,
+all initially shown. All may be off (`No panel selected`). The + menu lists
+active-Result fitted parameters per function (δ, Result-local L aliases and
+Background), excluding Lorentzian FWHM and already-added panels. Added parameter
+toggles/panels can be removed through their context menu. Panel choices are
+window-only state shared across Results, keyed by display name: an absent item
+is hidden and its toggle disabled with `Not in this Result`, then restored when
+available again. The grid uses one column for 1–3 visible panels, two for 4–6,
+and three thereafter, in FWHM / τ / EISF / added order, with linked Q axes.
+Each panel's canvas
+context menu offers Linear / Log and Reset View; scales and user zoom limits
+persist where valid, independently for Y and linked for Q. These are display
+operations only. τ defaults to Log; other panels default to Linear. A canvas
+drag box zooms linked Q and only the touched panel's Y; releasing outside ends
+the gesture normally. Clicking a point does not navigate the main window.
+Main-window navigation only moves the existing amber marker, including
+worker-driven navigation; it neither derives again nor resets the view.
+Derivation follows active item, Result, draft and scientific-context changes,
+and runs only while the viewer is open (or on opening). Without a Result it
+shows `No Result open`.
+
+Values, uncertainties, statuses, identity marks and warnings come from workflow.
+All panels use a stable physical-Q display ordering, including unavailable
+NaN gaps; no segment bridges an unavailable Q, and navigation retains original
+group indices. Added parameter panels read values/standard errors directly by
+typed ParameterReference from each Q's FitResult, with typed metadata labels
+and units. Only FITTED_CURRENT Qs have values; fixed parameters remain visible
+with uncertainty-unavailable markers, and shared estimates note ties per
+function. No values are derived or converted in these panels.
+Stored Results are never reordered. Available error bars have
+caps and hollow point markers, without enlarging scientific errors. Missing
+uncertainty is marked and explained with its core uncertainty status, never
+synthesized. Paired-by-width, user-swap, warning and uncertainty-unavailable
+markers are explained in the legend. EISF/δ use elastic colors, Background uses
+its scientific color and Lorentzians their shared series palette. Warning and
+uncertainty-unavailable markers share a neutral color distinct from series and
+the current-Q marker. `Unavailable series at Q` have subtle axis ticks and
+tooltips with their reasons. Point tooltips also show values, uncertainties,
+Q status and identity provenance. Closing only closes the view.
+
+Within each active Result, L1, L2, … and their scientific colors follow typed
+Lorentzian identities numbered by first appearance in Result Q order, then
+component order at that Q. The same mapping is used by Parameter Viewer, Fitting
+Parameters, Fitting Info and spectrum curves; a Q can contain only L2. Without
+a Result the editable draft's order is used. For a fitted Q with two or
+more Lorentzians, each component menu offers `Swap series with Lk`. This invokes
+the workflow identity-swap operation without a refit, modifies only the active
+working copy and immediately updates the projections. No GUI correspondence,
+derived-value calculation or cross-Result component matching is performed.
+These L numbers/colors are per-Result display aliases and may renumber. The
+viewer displays `Series labels apply to this Result only`, also present in the
+Fitting Parameters/Info Lorentzian-label tooltips.
+
 Dataset dots represent readiness, not fit coverage. Result rows show fitted Qs
 out of counted Qs (core total minus core EXCLUDED count), a status breakdown,
 and all/partial/none coverage using semantic colors and text. Cached modified

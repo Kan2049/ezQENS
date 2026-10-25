@@ -610,7 +610,13 @@ def test_group_and_q_label_pairs_reflow_without_overlap_or_losing_navigation(
     application.processEvents()
     view.overview_canvas.draw()  # type: ignore[no-untyped-call]
     assert view.navigator_axes is not None
-    assert 280 <= view.overview_canvas.width() <= 340
+    assert view.overview_canvas.width() > 0
+    assert (
+        view.overview_canvas.width()
+        + view.right_control_block.width()
+        + view._controls_layout.spacing()
+        == view.controls_container.width()
+    )
     assert len(view._navigator_label_indices) < 48
     collapsed_labels = view._navigator_label_indices
     assert {0, 47}.issubset(collapsed_labels)

@@ -41,6 +41,7 @@ from ezqens.fitting import (
 )
 from ezqens.gui.masking import BoundaryCoordinates
 from ezqens.gui.q_editor import QAssignmentEditor
+from ezqens.gui.result_presentation import series_color
 from ezqens.gui.scientific_canvas import (
     SCIENTIFIC_BACKGROUND,
     ScientificCanvas,
@@ -240,6 +241,7 @@ class ReducedDatasetView(QWidget):
         self.overview_toggle_button.setObjectName("overviewToggleButton")
         self.overview_toggle_button.setCheckable(True)
         self.overview_toggle_button.clicked.connect(self._toggle_overview)
+        self.series_slots: dict[ComponentIdentity, int] = {}
 
         self.controls_container = QWidget(self)
         self.controls_container.setObjectName("datasetControls")
@@ -1128,10 +1130,12 @@ class ReducedDatasetView(QWidget):
         )
         for curve in evaluation.component_curves:
             emphasized = curve.component in self._manual_emphasized_components
+            slot = self.series_slots.get(curve.component)
             axes.plot(
                 evaluation.energy,
                 self._log_display_values(curve.values),
-                color="#6d8191",
+                color=series_color(slot) if slot is not None else "#6d8191",
+                label=f"L{slot + 1}" if slot is not None else None,
                 linewidth=1.35 if emphasized else 0.8,
                 alpha=1.0 if emphasized else 0.58,
                 zorder=4 if emphasized else 3,

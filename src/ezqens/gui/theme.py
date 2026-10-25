@@ -9,6 +9,8 @@ from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import QApplication
 
+from ezqens.gui.scientific_canvas import SCIENTIFIC_LORENTZIAN_COLORS
+
 
 class ColorScheme(Enum):
     """Application chrome color schemes."""
@@ -218,6 +220,11 @@ def application_stylesheet(tokens: DesignTokens) -> str:
     indicators = indicator_tokens_for(
         ColorScheme.DARK if tokens is DARK_TOKENS else ColorScheme.LIGHT,
     )
+    series_styles = "\n".join(
+        f'QLabel[lorentzianSeries="{index}"], '
+        f'QToolButton[lorentzianSeries="{index}"] {{ color: {color}; }}'
+        for index, color in enumerate(SCIENTIFIC_LORENTZIAN_COLORS)
+    )
     return f"""
 QMainWindow, #applicationShell, QSplitter {{
     background: {tokens.surface};
@@ -247,6 +254,7 @@ QLabel[secondary="true"] {{
 QLabel[muted="true"] {{
     color: {tokens.text_muted};
 }}
+{series_styles}
 #workspaceTitle, #inspectorTitle, #maskTaskTitle, #qAssignmentTitle,
 #manualFitTitle,
 #ezqensDialogTitle {{
@@ -592,18 +600,21 @@ QMenu::separator {{
 #autoFitCandidateRecommendation {{
     font-size: {TYPOGRAPHY.secondary_size}px;
 }}
-#autoFitDialog QToolButton[viewToggle="true"] {{
+#autoFitDialog QToolButton[viewToggle="true"],
+#parameterViewer QToolButton[viewToggle="true"] {{
     background: transparent;
     border-color: {tokens.border_subtle};
     border-radius: {tokens.control_radius + 2}px;
     padding-left: {layout.control_horizontal_padding - 2}px;
     padding-right: {layout.control_horizontal_padding - 2}px;
 }}
-#autoFitDialog QToolButton[viewToggle="true"]:hover {{
+#autoFitDialog QToolButton[viewToggle="true"]:hover,
+#parameterViewer QToolButton[viewToggle="true"]:hover {{
     background: {tokens.surface_hover};
     border-color: {tokens.border_subtle};
 }}
-#autoFitDialog QToolButton[viewToggle="true"]:checked {{
+#autoFitDialog QToolButton[viewToggle="true"]:checked,
+#parameterViewer QToolButton[viewToggle="true"]:checked {{
     background: {tokens.surface_selected};
     border-color: {tokens.border_focus};
     border-style: inset;

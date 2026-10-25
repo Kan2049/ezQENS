@@ -36,6 +36,8 @@ from ezqens.fitting import (
     SpectralModelDefinition,
 )
 from ezqens.gui.icons import IconName, apply_disclosure_icon, load_icon
+from ezqens.gui.result_presentation import SERIES_ALIAS_NOTE
+from ezqens.gui.scientific_canvas import SCIENTIFIC_LORENTZIAN_COLORS
 from ezqens.workflow import (
     ManualComponentKind,
     ManualModelState,
@@ -174,6 +176,7 @@ class ManualFitEditor(QFrame):
     new_tie_group_requested = Signal(object)
     join_tie_requested = Signal(object, str)
     component_removal_requested = Signal(object)
+    series_swap_requested = Signal(object, object)
     apply_resolution_requested = Signal()
     run_requested = Signal()
     fit_all_q_requested = Signal()
@@ -539,10 +542,22 @@ class ManualFitEditor(QFrame):
         result_outcome: MultiQFitOutcome | None = None,
         result_metadata: tuple[ParameterMetadata, ...] = (),
         saved_result_name: str | None = None,
+        series_slots: dict[ComponentIdentity, int] | None = None,
+        swap_enabled: bool = False,
     ) -> None:
         """Render immutable workflow state without deriving scientific values."""
 
         self._model = model
+        self._series_slots = dict(series_slots or {})
+        for source in (
+            fit_result.fitted_model if fit_result is not None else None,
+            model,
+        ):
+            if source is not None:
+                for component in source.lorentzians:
+                    if component.identity not in self._series_slots:
+                        self._series_slots[component.identity] = len(self._series_slots)
+        self._swap_enabled = swap_enabled
         self._metadata = {item.reference: item for item in metadata}
         self._result_metadata = {
             item.reference: item for item in (result_metadata or metadata)
@@ -790,6 +805,15 @@ class ManualFitEditor(QFrame):
                 reference, _fallback_metadata(reference)
             )
             name = QLabel(name_text)
+            if reference.component in self._series_slots:
+                name.setToolTip(SERIES_ALIAS_NOTE)
+                name.setProperty(
+                    "lorentzianSeries",
+                    str(
+                        self._series_slots[reference.component]
+                        % len(SCIENTIFIC_LORENTZIAN_COLORS)
+                    ),
+                )
             value = QLabel(_result_float(estimate.value))
             uncertainty = QLabel(
                 "—"
@@ -797,7 +821,11 @@ class ManualFitEditor(QFrame):
                 else _result_float(estimate.standard_error)
             )
             for label in (name, value, uncertainty):
-                label.setToolTip(metadata.unit)
+                label.setToolTip(
+                    f"{metadata.unit}\n{SERIES_ALIAS_NOTE}"
+                    if label is name and reference.component in self._series_slots
+                    else metadata.unit
+                )
             details_parts: list[str] = []
             group_id = _result_group_id(result.configuration, reference)
             if group_id is not None:
@@ -889,11 +917,7 @@ class ManualFitEditor(QFrame):
         elif reference.component == BACKGROUND_COMPONENT:
             component = "Background"
         else:
-            component = next(
-                f"L{index}"
-                for index, item in enumerate(result.configuration.lorentzians, start=1)
-                if item.identity == reference.component
-            )
+            component = f"L{self._series_slots[reference.component] + 1}"
         metadata = self._result_metadata.get(reference, _fallback_metadata(reference))
         return f"{component} {metadata.display_label}"
 
@@ -1041,7 +1065,9 @@ class ManualFitEditor(QFrame):
                 layout.addWidget(self._parameter_header(reference), 1, column)
         for row, identity in enumerate(identities, start=2):
             layout.addWidget(
-                self._component_menu_button(identity, f"L{row - 1}"),
+                self._component_menu_button(
+                    identity, f"L{self._series_slots[identity] + 1}"
+                ),
                 row,
                 0,
             )
@@ -1090,6 +1116,11 @@ class ManualFitEditor(QFrame):
         button = QToolButton()
         button.setObjectName("manualComponentRowLabel")
         button.setText(text)
+        button.setToolTip(SERIES_ALIAS_NOTE)
+        button.setProperty(
+            "lorentzianSeries",
+            str(self._series_slots[identity] % len(SCIENTIFIC_LORENTZIAN_COLORS)),
+        )
         button.setFixedWidth(32)
         button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         button.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
@@ -1101,6 +1132,16 @@ class ManualFitEditor(QFrame):
         menu = QMenu(button)
         action = menu.addAction("Remove Lorentzian")
         action.triggered.connect(self._component_removal_emitter(identity))
+        for other in self._lorentzian_identities():
+            if other == identity:
+                continue
+            swap = menu.addAction(f"Swap series with L{self._series_slots[other] + 1}")
+            swap.setEnabled(self._swap_enabled)
+            swap.triggered.connect(
+                lambda _checked=False, first=identity, second=other: (
+                    self.series_swap_requested.emit(first, second)
+                )
+            )
         button.setMenu(menu)
         button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         return button
