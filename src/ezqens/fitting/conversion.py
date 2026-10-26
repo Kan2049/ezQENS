@@ -11,7 +11,6 @@ from .models import (
     BACKGROUND_COMPONENT,
     BackgroundModel,
     CenterGroup,
-    ComponentIdentity,
     FitResult,
     ParameterConfiguration,
     ParameterEstimate,
@@ -19,59 +18,6 @@ from .models import (
     ParameterReference,
     SpectralModelDefinition,
 )
-
-
-def relabel_fit_components(
-    fit: FitResult,
-    identities: dict[ComponentIdentity, ComponentIdentity],
-) -> FitResult:
-    """Exactly relabel Lorentzian identities without moving numerical evidence."""
-
-    original = {item.identity for item in fit.configuration.lorentzians}
-    if set(identities) != original or len(set(identities.values())) != len(identities):
-        raise ValueError("component relabel must be a one-to-one complete mapping")
-    if (
-        fit.fitted_model is None
-        or {item.identity for item in fit.fitted_model.lorentzians} != original
-    ):
-        raise ValueError("fitted component identities differ from configuration")
-
-    def reference(value: ParameterReference) -> ParameterReference:
-        replacement = identities.get(value.component)
-        return value if replacement is None else replace(value, component=replacement)
-
-    def model(value: SpectralModelDefinition) -> SpectralModelDefinition:
-        return replace(
-            value,
-            lorentzians=tuple(
-                replace(item, identity=identities[item.identity])
-                for item in value.lorentzians
-            ),
-            parameter_ties=tuple(
-                replace(tie, members=tuple(reference(item) for item in tie.members))
-                for tie in value.parameter_ties
-            ),
-        )
-
-    return replace(
-        fit,
-        configuration=model(fit.configuration),
-        fitted_model=model(fit.fitted_model),
-        parameters=tuple(
-            replace(item, references=tuple(reference(ref) for ref in item.references))
-            for item in fit.parameters
-        ),
-        evaluation=replace(
-            fit.evaluation,
-            component_curves=tuple(
-                replace(
-                    curve,
-                    component=identities.get(curve.component, curve.component),
-                )
-                for curve in fit.evaluation.component_curves
-            ),
-        ),
-    )
 
 
 def _require_standard_model(model: SpectralModelDefinition) -> None:

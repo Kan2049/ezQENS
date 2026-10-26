@@ -61,8 +61,8 @@ from ezqens.workflow import (
     CenterTieIdentity,
     CenterTieKind,
     FittingWorkspaceState,
-    IdentityMark,
     ManualCenterGroupState,
+    ManualComponentKind,
     ManualFitContext,
     ManualFitDraft,
     ManualLorentzianState,
@@ -73,6 +73,7 @@ from ezqens.workflow import (
     MethodTransferOptions,
     MethodTransferOverrides,
     MultiQConstraintTransferPolicy,
+    NumberingMark,
     ProjectDataset,
     QResult,
     ResultDisplayStatus,
@@ -95,8 +96,10 @@ from ezqens.workflow import (
     apply_manual_setup_to_all_groups,
     apply_resolution,
     auto_fit_all_q,
+    begin_component_interaction,
     capture_fitting_method,
     commit_fitting_selection,
+    complete_lorentzian_interaction,
     continue_selected_auto_fit_candidates,
     create_parameter_tie,
     create_project,
@@ -111,6 +114,7 @@ from ezqens.workflow import (
     load_saved_result,
     materialize_manual_model,
     open_manual_fit_draft,
+    remove_manual_component,
     remove_saved_result,
     rename_saved_result,
     replace_current_q_result,
@@ -127,7 +131,7 @@ from ezqens.workflow import (
     set_best_saved_result,
     set_current_result,
     set_working_method,
-    swap_current_lorentzian_identities,
+    swap_current_lorentzian_positions,
     unsaved_result_items,
     update_manual_parameter,
     update_working_draft,
@@ -4425,7 +4429,97 @@ def test_open_saved_working_copies_preserves_per_q_display_validity(
     )
 
 
-def test_unified_identity_swap_is_exact_and_derived_series_follow_identity(
+@pytest.mark.parametrize("foreign_field", ["project", "sample"])
+def test_position_swap_rejects_foreign_draft_reusing_fit_state_before_issuance(
+    workspace_problem: tuple[ManualFitDraft, ResultSnapshot],
+    monkeypatch: pytest.MonkeyPatch,
+    foreign_field: str,
+) -> None:
+    draft, snapshot = workspace_problem
+    state = save_current_result_as(
+        set_current_result(FittingWorkspaceState(), snapshot, draft=draft), "A"
+    )
+    foreign = replace(
+        draft,
+        project_id="foreign-project"
+        if foreign_field == "project"
+        else draft.project_id,
+        sample_id="foreign-sample" if foreign_field == "sample" else draft.sample_id,
+    ).with_model(0, _manual_model())
+    assert foreign.setup(2).model is snapshot.working_states[2]
+    before_setups = foreign.setups
+    before_entry = state.saved_results[0]
+
+    def must_not_issue(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("foreign draft reached Result/working-copy issuance")
+
+    for name in ("_replace_result_point", "_issue_working_copy", "_issue_saved_result"):
+        monkeypatch.setattr(multi_q_workflow, name, must_not_issue)
+    with pytest.raises(ValueError, match="another Sample or Project"):
+        swap_current_lorentzian_positions(state, foreign, 2, 1, 2)
+    assert state.current is snapshot
+    assert state.active_item is before_entry
+    assert before_entry.modified_copy is None
+    assert before_entry.draft_states == snapshot.working_states
+    assert foreign.setups is before_setups
+    assert draft.setup(0).model is None
+
+
+@pytest.mark.parametrize("foreign_field", ["project", "sample"])
+@pytest.mark.parametrize("active", [False, True])
+@pytest.mark.parametrize(
+    "operation", ["update", "install", "fresh", "revert", "set", "merge", "load"]
+)
+def test_working_copy_seams_reject_foreign_drafts_before_issuance(
+    workspace_problem: tuple[ManualFitDraft, ResultSnapshot],
+    monkeypatch: pytest.MonkeyPatch,
+    foreign_field: str,
+    active: bool,
+    operation: str,
+) -> None:
+    draft, snapshot = workspace_problem
+    state = save_current_result_as(
+        set_current_result(FittingWorkspaceState(), snapshot, draft=draft), "A"
+    )
+    if not active:
+        state = replace(state, active_item=None)
+    entry = state.saved_results[0]
+    foreign = replace(
+        draft,
+        project_id="foreign-project"
+        if foreign_field == "project"
+        else draft.project_id,
+        sample_id="foreign-sample" if foreign_field == "sample" else draft.sample_id,
+    ).with_model(0, _manual_model())
+    before_setups = foreign.setups
+
+    def must_not_issue(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("foreign draft reached Result/working-copy issuance")
+
+    for name in ("_replace_result_point", "_issue_working_copy", "_issue_saved_result"):
+        monkeypatch.setattr(multi_q_workflow, name, must_not_issue)
+    with pytest.raises(ValueError, match="another Sample"):
+        if operation == "update":
+            update_working_draft(state, foreign)
+        elif operation == "install":
+            active_manual_draft(state, foreign)
+        elif operation == "fresh":
+            fresh_analysis(state, foreign)
+        elif operation == "revert":
+            revert_saved_result(state, foreign, entry)
+        elif operation == "set":
+            set_current_result(state, snapshot, draft=foreign)
+        elif operation == "merge":
+            replace_current_q_result(state, snapshot, draft=foreign)
+        else:
+            load_saved_result(state, foreign, entry)
+    assert state.saved_results[0] is entry and entry.modified_copy is None
+    assert state.current is (snapshot if active else None)
+    assert foreign.setups is before_setups
+    assert draft.setup(0).model is None
+
+
+def test_position_swap_keeps_evidence_current_and_updates_number_series(
     multi_q_problem: tuple[
         PreparedResolution,
         FittingSelection,
@@ -4445,7 +4539,7 @@ def test_unified_identity_swap_is_exact_and_derived_series_follow_identity(
     state = save_current_result_as(
         set_current_result(FittingWorkspaceState(), snapshot), "before swap"
     )
-    state, draft = swap_current_lorentzian_identities(state, draft, 2, L1, L2)
+    state, draft = swap_current_lorentzian_positions(state, draft, 2, 1, 2)
     assert state.current is not None
     assert state.saved_results[0].snapshot is snapshot
     assert has_unsaved_result_changes(state, draft)
@@ -4455,11 +4549,9 @@ def test_unified_identity_swap_is_exact_and_derived_series_follow_identity(
     assert swapped.fitted_model is not None
     swapped_draft = draft.setup(2).model
     assert swapped_draft is not None
-    assert point.identity_marks == (IdentityMark.USER_SWAP,)
-    assert tuple(item.identity for item in swapped.fitted_model.lorentzians) == (
-        L2,
-        L1,
-    )
+    assert point.numbering_marks == (NumberingMark.POSITION_SWAP,)
+    assert swapped is anchor
+    assert point.working_state is swapped_draft
     assert tuple(item.identity for item in swapped_draft.lorentzians) == (
         L2,
         L1,
@@ -4468,7 +4560,7 @@ def test_unified_identity_swap_is_exact_and_derived_series_follow_identity(
     np.testing.assert_array_equal(swapped.evaluation.total, anchor.evaluation.total)
     np.testing.assert_array_equal(swapped.raw_residuals, anchor.raw_residuals)
     np.testing.assert_array_equal(swapped.covariance, anchor.covariance)
-    for before, after in ((L1, L2), (L2, L1)):
+    for before, after in ((L1, L1), (L2, L2)):
         for family in (ParameterFamily.AREA, ParameterFamily.FWHM):
             original = anchor.parameter_by_reference(ParameterReference(before, family))
             relabeled = swapped.parameter_by_reference(
@@ -4483,7 +4575,7 @@ def test_unified_identity_swap_is_exact_and_derived_series_follow_identity(
         )
     assert (
         swapped.parameter_by_reference(
-            ParameterReference(L2, ParameterFamily.FWHM)
+            ParameterReference(L1, ParameterFamily.FWHM)
         ).value
         == anchor.parameter_by_reference(
             ParameterReference(L1, ParameterFamily.FWHM)
@@ -4495,12 +4587,25 @@ def test_unified_identity_swap_is_exact_and_derived_series_follow_identity(
         state.current.result, q_bins, context_valid=(False, False, True, False, False)
     )
     assert derived.point(2).derivation_status is DerivedPointStatus.AVAILABLE
-    assert derived.lorentzian_series(L2)[2] is not None
-    assert derived.lorentzian_series(L1)[2] is not None
+    assert derived.lorentzian_series(2)[2] is not None
+    assert derived.lorentzian_series(1)[2] is not None
     assert derived.point(1).derivation_status is DerivedPointStatus.NOT_APPLICABLE
+    before_derived = derive_unified_qens(
+        snapshot.result, q_bins, context_valid=(False, False, True, False, False)
+    )
+    assert derived.lorentzian_series(1)[2] == before_derived.lorentzian_series(2)[2]
+    assert derived.lorentzian_series(2)[2] == before_derived.lorentzian_series(1)[2]
+    assert derived.point(2).eisf == before_derived.point(2).eisf
+    context = resolve_manual_fit_context(project, project.datasets[0], 2).context
+    assert context is not None
+    assert (
+        result_q_display_status(state, draft, 2, context)
+        is ResultDisplayStatus.FITTED_CURRENT
+    )
+    assert state.current.result.point(1) is snapshot.result.point(1)
 
 
-def test_unified_derivation_links_identity_across_mixed_compositions(
+def test_unified_derivation_links_numbers_across_mixed_compositions(
     multi_q_problem: tuple[
         PreparedResolution,
         FittingSelection,
@@ -4512,9 +4617,16 @@ def test_unified_derivation_links_identity_across_mixed_compositions(
     q_bins = prepared.sample_dataset.q_bins
     assert q_bins is not None
     two_state = _manual_model(background=BackgroundModel.CONSTANT)
-    one_state = replace(two_state, lorentzians=two_state.lorentzians[:1])
+    separate_identity = ComponentIdentity(ComponentFamily.LORENTZIAN, "unrelated-one")
+    one_state = replace(
+        two_state,
+        lorentzians=(replace(two_state.lorentzians[0], identity=separate_identity),),
+    )
     one_config = replace(
-        configurations[1], lorentzians=configurations[1].lorentzians[:1]
+        configurations[1],
+        lorentzians=(
+            replace(configurations[1].lorentzians[0], identity=separate_identity),
+        ),
     )
     one_fit = fit_single_q(prepared, selection, 1, one_config)
     first = _issue_result_snapshot(
@@ -4537,10 +4649,12 @@ def test_unified_derivation_links_identity_across_mixed_compositions(
     )
     assert derived.point(1).derivation_status is DerivedPointStatus.AVAILABLE
     assert derived.point(2).derivation_status is DerivedPointStatus.AVAILABLE
-    assert derived.lorentzian_series(L1)[1] is not None
-    assert derived.lorentzian_series(L1)[2] is not None
-    assert derived.lorentzian_series(L2)[1] is None
-    assert derived.lorentzian_series(L2)[2] is not None
+    assert derived.lorentzian_series(1)[1] is not None
+    assert derived.lorentzian_series(1)[2] is not None
+    one_quantity = derived.lorentzian_series(1)[1]
+    assert one_quantity is not None and one_quantity.component == separate_identity
+    assert derived.lorentzian_series(2)[1] is None
+    assert derived.lorentzian_series(2)[2] is not None
     assert derived.eisf_series[1] is not None
     assert derived.eisf_series[2] is not None
     assert len(derived.eisf_series[1].quasielastic_areas) == 1
@@ -4561,10 +4675,95 @@ def test_unified_derivation_links_identity_across_mixed_compositions(
         context_valid=(False, True, True, False, False),
     )
     assert excluded.point(2).derivation_status is DerivedPointStatus.EXCLUDED
-    assert excluded.lorentzian_series(L2)[2] is None
+    assert excluded.lorentzian_series(2)[2] is None
 
 
-def test_autofit_adoption_identity_inherit_width_pair_and_fresh_runs(
+def test_manual_add_remove_compacts_numbers_only_at_edited_q(
+    multi_q_problem: tuple[
+        PreparedResolution,
+        FittingSelection,
+        tuple[SpectralModelDefinition, ...],
+        FitResult,
+    ],
+) -> None:
+    prepared, selection, _configs, _fit = multi_q_problem
+    project, _sample, draft = _workflow_problem(prepared, selection)
+    untouched = draft.setup(1).model
+    original = draft.setup(2).model
+    assert original is not None
+    pending = begin_component_interaction(draft, 2, ManualComponentKind.LORENTZIAN)
+    draft = complete_lorentzian_interaction(
+        project,
+        draft,
+        pending,
+        component_peak_center=0.01,
+        component_peak_height=0.5,
+        width_endpoint_energy=0.2,
+    )
+    added = draft.setup(2).model
+    assert added is not None and len(added.lorentzians) == 3
+    assert added.lorentzian_numbers[:2] == original.lorentzian_numbers
+    assert added.lorentzian_number(added.lorentzians[2].identity) == 3
+    draft = remove_manual_component(draft, 2, added.lorentzians[0].identity)
+    remaining = draft.setup(2).model
+    assert remaining is not None
+    assert remaining.lorentzian_numbers == (
+        (added.lorentzians[1].identity, 1),
+        (added.lorentzians[2].identity, 2),
+    )
+    assert draft.setup(1).model is untouched
+
+
+def test_fit_canonical_width_order_does_not_define_numbers_or_continuation_order(
+    multi_q_problem: tuple[
+        PreparedResolution,
+        FittingSelection,
+        tuple[SpectralModelDefinition, ...],
+        FitResult,
+    ],
+) -> None:
+    prepared, selection, _configs, _fit = multi_q_problem
+    project, sample, draft = _workflow_problem(prepared, selection)
+    model = draft.setup(2).model
+    assert model is not None
+    # Anchor's broad component is deliberately first in editable order.
+    model = replace(model, lorentzians=tuple(reversed(model.lorentzians)))
+    draft = draft.with_model(2, model)
+    execution = run_and_adopt_manual_fit(project, draft, 2)
+    assert execution.success and execution.snapshot is not None
+    assert execution.adopted_draft is not None and execution.fit_result is not None
+    current = execution.snapshot.result.point(2)
+    fitted = execution.fit_result.fitted_model
+    assert fitted is not None
+    assert tuple(item.identity for item in fitted.lorentzians) != tuple(
+        identity for identity, _ in current.lorentzian_numbers
+    )
+    assert current.lorentzian_numbers == model.lorentzian_numbers
+    contexts = _contexts_for(project, sample)
+    assert sample.dataset.q_bins is not None
+    derived = derive_result_in_context(
+        execution.snapshot, sample.dataset.q_bins, contexts
+    )
+    quantity = derived.lorentzian_series(1)[2]
+    assert quantity is not None and quantity.component == model.lorentzians[0].identity
+    assert (
+        quantity.fwhm_mev
+        == execution.fit_result.parameter_by_reference(
+            ParameterReference(quantity.component, ParameterFamily.FWHM)
+        ).value
+    )
+    continued = fit_all_q_from_current_with_adoption(
+        project,
+        execution.adopted_draft,
+        anchor_group_index=2,
+        current_fit=execution.fit_result,
+    )
+    for point in continued.snapshot.result.points:
+        assert point.status is MultiQFitStatus.SUCCESS
+        assert point.lorentzian_numbers == model.lorentzian_numbers
+
+
+def test_failed_autofit_qs_later_manual_components_link_only_l1_l2(
     selected_auto_problem: tuple[
         WorkflowProject,
         ProjectDataset,
@@ -4572,134 +4771,86 @@ def test_autofit_adoption_identity_inherit_width_pair_and_fresh_runs(
         SingleQAutoFitOutcome,
         tuple[CandidateFitResult, CandidateFitResult],
     ],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    project, _sample, draft, evaluation, evidence = selected_auto_problem
-    adopted_by_candidate: dict[StandardModelCandidate, ResultSnapshot] = {}
-    for candidate in evidence:
-        first = adopt_single_q_auto_fit_candidate(
-            project, draft, evaluation, candidate, center_group_id="group"
-        )
-        independent = adopt_single_q_auto_fit_candidate(
-            project, draft, evaluation, candidate, center_group_id="group"
-        )
-        assert first.success and independent.success
-        assert first.snapshot is not None and independent.snapshot is not None
-        adopted_by_candidate[candidate.candidate] = first.snapshot
-        first_fit = first.fit_result
-        independent_fit = independent.fit_result
-        assert first_fit is not None and independent_fit is not None
-        first_model = first_fit.fitted_model
-        independent_model = independent_fit.fitted_model
-        assert first_model is not None and independent_model is not None
-        first_ids = {item.identity for item in first_model.lorentzians}
-        independent_ids = {item.identity for item in independent_model.lorentzians}
-        assert first_ids.isdisjoint(independent_ids)
-        assert all(
-            not item.component_id.startswith("standard_lorentzian_")
-            for item in first_ids
-        )
+    project, sample, draft, evaluation, evidence = selected_auto_problem
+    original = fit_single_q
 
-        paired = adopt_single_q_auto_fit_candidate(
-            project,
-            draft,
-            evaluation,
-            candidate,
-            center_group_id="group",
-            current=first.snapshot,
-        )
-        assert paired.success and paired.fit_result is not None
-        assert paired.snapshot is not None
-        paired_model = paired.fit_result.fitted_model
-        paired_fit = paired.fit_result
-        assert paired_model is not None
-        assert {item.identity for item in paired_model.lorentzians} == first_ids
-        if len(first_ids) == 2:
-            assert paired.snapshot.result.point(2).identity_marks == (
-                IdentityMark.PAIRED_BY_WIDTH,
+    def fail_first_two(
+        prepared: PreparedResolution,
+        selection: FittingSelection,
+        group: int,
+        model: SpectralModelDefinition,
+        *,
+        max_nfev: int,
+    ) -> FitResult:
+        fit = original(prepared, selection, group, model, max_nfev=max_nfev)
+        if group in (0, 1):
+            return replace(
+                fit,
+                diagnostics=replace(
+                    fit.diagnostics,
+                    optimizer_success=False,
+                    optimizer_status=0,
+                    optimizer_message="synthetic nonconvergence",
+                ),
             )
+        return fit
 
-            def width(fit: FitResult, identity: ComponentIdentity) -> float:
-                return fit.parameter_by_reference(
-                    ParameterReference(identity, ParameterFamily.FWHM)
-                ).value
-
-            for old, new in zip(
-                sorted(
-                    first_model.lorentzians,
-                    key=lambda item: width(first_fit, item.identity),
-                ),
-                sorted(
-                    paired_model.lorentzians,
-                    key=lambda item: width(paired_fit, item.identity),
-                ),
-                strict=True,
-            ):
-                assert old.identity == new.identity
-        else:
-            assert paired.snapshot.result.point(2).identity_marks == ()
-
-    two, one = evidence
-    cross_composition = adopt_single_q_auto_fit_candidate(
-        project,
-        draft,
-        evaluation,
-        one,
-        center_group_id="group",
-        current=adopted_by_candidate[two.candidate],
-    )
-    assert cross_composition.success and cross_composition.fit_result is not None
-    assert cross_composition.snapshot is not None
-    old_fit = adopted_by_candidate[two.candidate].result.point(2).fit_result
-    assert old_fit is not None and old_fit.fitted_model is not None
-    assert cross_composition.fit_result.fitted_model is not None
-    assert {item.identity for item in old_fit.fitted_model.lorentzians}.isdisjoint(
-        item.identity for item in cross_composition.fit_result.fitted_model.lorentzians
-    )
-    assert cross_composition.snapshot.result.point(2).identity_marks == ()
-
+    monkeypatch.setattr(batch_core, "fit_single_q", fail_first_two)
     branch = continue_selected_auto_fit_candidates(
         project, draft, evaluation, (evidence[0].candidate,), max_nfev=800
     ).branches[0]
-    adopted_branch = adopt_selected_auto_fit_branch(
-        project, draft, evaluation, branch, center_group_id="branch-group"
+    adopted = adopt_selected_auto_fit_branch(
+        project, draft, evaluation, branch, center_group_id="numbers"
     )
-    ids_by_q = []
-    for outcome in adopted_branch.branch_result.outcomes:
-        fit = outcome.fit_result
-        if fit is not None:
-            assert fit.fitted_model is not None
-            ids_by_q.append({item.identity for item in fit.fitted_model.lorentzians})
-    assert ids_by_q and all(ids == ids_by_q[0] for ids in ids_by_q)
-    assert ids_by_q[0].isdisjoint(first_ids)
-    assert adopted_branch.snapshot is not None
-    branch_current = set_current_result(
-        FittingWorkspaceState(), adopted_branch.snapshot
+    state = set_current_result(
+        FittingWorkspaceState(), adopted.snapshot, draft=adopted.adopted_draft
     )
-    single = adopt_single_q_auto_fit_candidate(
-        project,
-        draft,
-        evaluation,
-        evidence[1],
-        center_group_id="post-branch-single",
-        current=branch_current.current,
+    draft = adopted.adopted_draft
+    for group in (0, 1):
+        assert adopted.snapshot.result.point(group).status is MultiQFitStatus.FAILED
+        assert adopted.snapshot.result.point(group).fit_result is None
+        for width in (0.05, 0.2):
+            pending = begin_component_interaction(
+                draft, group, ManualComponentKind.LORENTZIAN
+            )
+            draft = complete_lorentzian_interaction(
+                project,
+                draft,
+                pending,
+                component_peak_center=0.01,
+                component_peak_height=1.0,
+                width_endpoint_energy=0.01 + width,
+            )
+        executed = run_and_adopt_manual_fit(project, draft, group)
+        assert executed.success and executed.snapshot is not None
+        assert executed.adopted_draft is not None
+        draft = executed.adopted_draft
+        state = replace_current_q_result(state, executed.snapshot, draft=draft)
+    assert state.current is not None and sample.dataset.q_bins is not None
+    derived = derive_result_in_context(
+        state.current, sample.dataset.q_bins, _contexts_for(project, sample)
     )
-    assert single.success and single.snapshot is not None
-    merged = replace_current_q_result(branch_current, single.snapshot)
-    assert merged.current is not None
-    assert merged.current.result.point(2).fit_result is single.fit_result
-    assert any(
-        point.fit_result is not None
-        for index, point in enumerate(adopted_branch.snapshot.result.points)
-        if index != 2
-    )
-    for index in (0, 1, 3, 4):
-        assert merged.current.result.point(
-            index
-        ) is adopted_branch.snapshot.result.point(index)
+    anchor_ids = {
+        identity for identity, _ in state.current.result.point(2).lorentzian_numbers
+    }
+    for group in (0, 1):
+        assert anchor_ids.isdisjoint(
+            identity
+            for identity, _ in state.current.result.point(group).lorentzian_numbers
+        )
+        assert derived.lorentzian_series(1)[group] is not None
+        assert derived.lorentzian_series(2)[group] is not None
+    assert derived.lorentzian_series(3) == (None,) * len(draft.setups)
+    for invalid in (0, -1, True):
+        with pytest.raises(ValueError, match="positive integer"):
+            derived.lorentzian_series(invalid)
 
 
-@pytest.mark.parametrize("tied_side", ("previous", "new", "both"))
-def test_exact_width_ties_adopt_fresh_identities(
+@pytest.mark.parametrize("equal_widths", [False, True])
+@pytest.mark.parametrize("reverse_order", [False, True])
+def test_autofit_adoption_keeps_order_and_does_not_pair_identities(
     selected_auto_problem: tuple[
         WorkflowProject,
         ProjectDataset,
@@ -4707,49 +4858,59 @@ def test_exact_width_ties_adopt_fresh_identities(
         SingleQAutoFitOutcome,
         tuple[CandidateFitResult, CandidateFitResult],
     ],
-    tied_side: str,
+    equal_widths: bool,
+    reverse_order: bool,
 ) -> None:
     project, _sample, draft, evaluation, evidence = selected_auto_problem
     candidate = evidence[0]
     assert candidate.fit is not None
-    context = evaluation.scientific_context
-    config = replace(
-        candidate.fit.configuration,
-        lorentzians=tuple(
-            replace(
-                component, fwhm=replace(component.fwhm, initial_value=0.2, free=False)
+    if equal_widths or reverse_order:
+        context = evaluation.scientific_context
+        config = replace(
+            candidate.fit.configuration,
+            lorentzians=tuple(
+                replace(item, fwhm=replace(item.fwhm, initial_value=0.2, free=False))
+                if equal_widths
+                else item
+                for item in (
+                    tuple(reversed(candidate.fit.configuration.lorentzians))
+                    if reverse_order
+                    else candidate.fit.configuration.lorentzians
+                )
+            ),
+        )
+        fit = fit_single_q(context.prepared_resolution, context.selection, 2, config)
+        candidate = CandidateFitResult(candidate.candidate, fit)
+        evaluation = _single_q_auto_outcome(
+            context, (candidate,), most_recommended=candidate
+        )
+    first = adopt_single_q_auto_fit_candidate(project, draft, evaluation, candidate)
+    second = adopt_single_q_auto_fit_candidate(project, draft, evaluation, candidate)
+    assert first.success and second.success
+    assert first.snapshot is not None and second.snapshot is not None
+    assert candidate.fit is not None
+    assert first.adopted_draft is not None and candidate.fit.fitted_model is not None
+    expected = tuple(item.identity for item in candidate.fit.configuration.lorentzians)
+    assert first.snapshot.result.point(2).lorentzian_numbers == tuple(
+        (identity, number) for number, identity in enumerate(expected, 1)
+    )
+    assert (
+        second.snapshot.result.point(2).lorentzian_numbers
+        == first.snapshot.result.point(2).lorentzian_numbers
+    )
+    assert first.snapshot.result.point(2).numbering_marks == ()
+    branch = continue_selected_auto_fit_candidates(
+        project, draft, evaluation, (candidate.candidate,), max_nfev=800
+    ).branches[0]
+    adopted = adopt_selected_auto_fit_branch(
+        project, draft, evaluation, branch, center_group_id="branch-order"
+    )
+    for point in adopted.snapshot.result.points:
+        if point.status is MultiQFitStatus.SUCCESS:
+            assert (
+                tuple(identity for identity, _ in point.lorentzian_numbers) == expected
             )
-            for component in candidate.fit.configuration.lorentzians
-        ),
-    )
-    tied_fit = fit_single_q(context.prepared_resolution, context.selection, 2, config)
-    tied = CandidateFitResult(candidate.candidate, tied_fit)
-    tied_evaluation = _single_q_auto_outcome(context, (tied,), most_recommended=tied)
-    previous = adopt_single_q_auto_fit_candidate(
-        project,
-        draft,
-        tied_evaluation if tied_side in ("previous", "both") else evaluation,
-        tied if tied_side in ("previous", "both") else candidate,
-        center_group_id="exact-tie",
-    )
-    assert previous.success and previous.snapshot is not None
-    current = adopt_single_q_auto_fit_candidate(
-        project,
-        draft,
-        tied_evaluation if tied_side in ("new", "both") else evaluation,
-        tied if tied_side in ("new", "both") else candidate,
-        current=previous.snapshot,
-        center_group_id="exact-tie",
-    )
-    assert current.success and current.snapshot is not None
-    old_fit = previous.fit_result
-    new_fit = current.fit_result
-    assert old_fit is not None and old_fit.fitted_model is not None
-    assert new_fit is not None and new_fit.fitted_model is not None
-    assert {item.identity for item in old_fit.fitted_model.lorentzians}.isdisjoint(
-        item.identity for item in new_fit.fitted_model.lorentzians
-    )
-    assert current.snapshot.result.point(2).identity_marks == ()
+            assert point.numbering_marks == ()
 
 
 def test_three_lorentzian_swap_preserves_tie_and_exact_evidence(
@@ -4791,17 +4952,17 @@ def test_three_lorentzian_swap_preserves_tie_and_exact_evidence(
     assert executed.success and executed.snapshot is not None
     assert executed.adopted_draft is not None and executed.fit_result is not None
     before = executed.fit_result
-    state, swapped_draft = swap_current_lorentzian_identities(
+    state, swapped_draft = swap_current_lorentzian_positions(
         set_current_result(FittingWorkspaceState(), executed.snapshot),
         executed.adopted_draft,
         2,
-        L1,
-        L2,
+        1,
+        2,
     )
     assert state.current is not None
     after = state.current.result.point(2).fit_result
     assert after is not None and after.fitted_model is not None
-    mapping = {L1: L2, L2: L1, third: third}
+    mapping = {L1: L1, L2: L2, third: third}
     for parameter in before.parameters:
         reference = parameter.references[0]
         relabeled = replace(
@@ -4826,7 +4987,7 @@ def test_three_lorentzian_swap_preserves_tie_and_exact_evidence(
     assert after.statistics is before.statistics
     assert after.diagnostics is before.diagnostics
     assert set(after.fitted_model.parameter_ties[0].members) == {
-        ParameterReference(L2, ParameterFamily.AREA),
+        ParameterReference(L1, ParameterFamily.AREA),
         ParameterReference(third, ParameterFamily.AREA),
     }
     working = swapped_draft.setup(2).model

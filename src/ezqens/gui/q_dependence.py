@@ -39,7 +39,7 @@ from ezqens.gui.scientific_canvas import (
     zoom_limits,
 )
 from ezqens.gui.theme import Q_NAVIGATION_SELECTION
-from ezqens.workflow import IdentityMark, ResultDisplayStatus
+from ezqens.workflow import NumberingMark, ResultDisplayStatus
 
 
 class ParameterViewer(QDialog):
@@ -109,19 +109,33 @@ class ParameterViewer(QDialog):
     def _panels_changed(self) -> None:
         self._draw()
 
-    def _component_name(self, identity: ComponentIdentity) -> str:
+    def _component_name(
+        self, identity: ComponentIdentity, group: int | None = None
+    ) -> str:
         if identity == ELASTIC_COMPONENT:
             return "δ"
         if identity == BACKGROUND_COMPONENT:
             return "Background"
-        return f"L{self.slots[identity] + 1}"
+        return f"L{self._component_number(identity, group)}"
+
+    def _component_number(
+        self, identity: ComponentIdentity, group: int | None = None
+    ) -> int:
+        if self.derived is not None:
+            points = self.derived.source_result.points
+            candidates = points if group is None else (points[group],)
+            for point in candidates:
+                for component, number in point.lorentzian_numbers:
+                    if component == identity:
+                        return number
+        return self.slots[identity] + 1
 
     def _parameter_color(self, metadata: ParameterMetadata) -> str:
         if metadata.component == ELASTIC_COMPONENT:
             return SCIENTIFIC_ELASTIC_COLOR
         if metadata.component == BACKGROUND_COMPONENT:
             return SCIENTIFIC_BACKGROUND_COLOR
-        return series_color(self.slots[metadata.component])
+        return series_color(self._component_number(metadata.component) - 1)
 
     def _populate_add_menu(self) -> None:
         self.add_menu.clear()
@@ -185,7 +199,8 @@ class ParameterViewer(QDialog):
             for item in items:
                 if item.family is ParameterFamily.FWHM:
                     continue
-                name = f"{self._component_name(item.component)} {item.display_label}"
+                component_name = self._component_name(item.component, index)
+                name = f"{component_name} {item.display_label}"
                 self._parameter_items.setdefault(name, {})[index] = item
         for name, button in self.panel_buttons.items():
             if name not in {"fwhm", "tau", "eisf"}:
@@ -286,8 +301,18 @@ class ParameterViewer(QDialog):
                 else [(None, "EISF", SCIENTIFIC_ELASTIC_COLOR)]
                 if panel == "eisf"
                 else [
-                    (identity, f"L{slot + 1}", series_color(slot))
-                    for identity, slot in self.slots.items()
+                    (number, f"L{number}", series_color(number - 1))
+                    for number in range(
+                        1,
+                        1
+                        + max(
+                            (
+                                len(point.lorentzian_numbers)
+                                for point in derived.source_result.points
+                            ),
+                            default=0,
+                        ),
+                    )
                 ]
             )
             reasons: dict[int, list[str]] = {}
@@ -382,21 +407,11 @@ class ParameterViewer(QDialog):
                             )
                         )
                     )
-                    marks = derived.source_result.point(group).identity_marks
+                    marks = derived.source_result.point(group).numbering_marks
                     marker = "o"
-                    paired, swapped = (
-                        IdentityMark.PAIRED_BY_WIDTH in marks,
-                        IdentityMark.USER_SWAP in marks,
-                    )
-                    if paired and swapped:
-                        marker = "*"
-                        explanations["Paired by width + user swap"] = marker
-                    elif swapped:
+                    if NumberingMark.POSITION_SWAP in marks:
                         marker = "^"
                         explanations["User swap"] = marker
-                    elif paired:
-                        marker = "s"
-                        explanations["Paired by width"] = marker
                     text = f"{label}: {value:.6g}" + (
                         f" ± {error:.6g}"
                         if error is not None

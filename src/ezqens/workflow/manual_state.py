@@ -203,6 +203,20 @@ class ManualModelState:
         object.__setattr__(self, "parameter_ties", tuple(self.parameter_ties))
         _structural_model(self)
 
+    @property
+    def lorentzian_numbers(self) -> tuple[tuple[ComponentIdentity, int], ...]:
+        """Map component identities to compact, Q-local one-based positions."""
+
+        return tuple(
+            (item.identity, number) for number, item in enumerate(self.lorentzians, 1)
+        )
+
+    def lorentzian_number(self, identity: ComponentIdentity) -> int:
+        for component, number in self.lorentzian_numbers:
+            if component == identity:
+                return number
+        raise KeyError(identity)
+
     def parameter_references(self) -> tuple[ParameterReference, ...]:
         """Return stable component-owned references in display order."""
 

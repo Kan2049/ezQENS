@@ -298,14 +298,14 @@ def test_swap_uses_workflow_and_updates_all_identity_projections(
     current = session.result_workspace.current_result
     assert current is not None and current is not original
     assert session.result_workspace.saved_results[0].modified_copy is not None
-    assert "user swap" in next(hit[4] for hit in view.hits if hit[1] == 1)
+    assert "position swap" in next(hit[4] for hit in view.hits if hit[1] == 1)
     before_fit, after_fit = original.point(1).fit_result, current.point(1).fit_result
     assert before_fit is not None and after_fit is not None
     np.testing.assert_array_equal(
         before_fit.evaluation.component_curve(first),
-        after_fit.evaluation.component_curve(second),
+        after_fit.evaluation.component_curve(first),
     )
-    assert lorentzian_slots(current) == view.slots
+    assert lorentzian_slots(current, group_index=1) == view.slots
     for ref, widgets in window.manual_fit_editor._result_rows.items():
         if ref.component in view.slots:
             assert widgets.name.text().startswith(f"L{view.slots[ref.component] + 1} ")
@@ -342,20 +342,21 @@ def test_series_stop_only_l2_and_single_lorentzian_swap_absent(fitted: Problem) 
     window._run_manual_fit()
     view = _view(fitted)
     assert view.derived is not None
-    assert view.derived.lorentzian_series(model.lorentzians[0].identity)[2] is None
-    assert view.derived.lorentzian_series(model.lorentzians[1].identity)[0] is None
+    assert view.derived.lorentzian_series(1)[2] is not None
+    assert view.derived.lorentzian_series(2)[0] is None
+    assert view.derived.lorentzian_series(2)[2] is None
     buttons = [
         b
         for b in window.manual_fit_editor.findChildren(QToolButton)
         if b.objectName() == "manualComponentRowLabel"
         and b.isVisibleTo(window.manual_fit_editor)
     ]
-    assert [b.text() for b in buttons] == ["L2"]
+    assert [b.text() for b in buttons] == ["L1"]
     menu = buttons[0].menu()
     assert menu is not None and not any("Swap" in a.text() for a in menu.actions())
     assert window.dataset_view.spectrum_axes is not None
     assert {line.get_label() for line in window.dataset_view.spectrum_axes.lines} >= {
-        "L2"
+        "L1"
     }
 
 
@@ -781,7 +782,7 @@ def test_real_available_uncertainty_matches_info_and_capped_bars(
         estimate.standard_error, abs=0.00051
     )
     assert view.derived is not None
-    quantity = view.derived.lorentzian_series(reference.component)[0]
+    quantity = view.derived.lorentzian_series(1)[0]
     assert quantity is not None
     assert quantity.fwhm_standard_error_mev == estimate.standard_error
     for panel, value, error in (
@@ -804,7 +805,7 @@ def test_real_available_uncertainty_matches_info_and_capped_bars(
     assert not qt_slot_errors
 
 
-def test_core_width_pairing_marks_are_legend_visible(
+def test_adoption_has_no_obsolete_width_pairing_marks(
     state: LifecycleProblem, qt_slot_errors: list[BaseException]
 ) -> None:
     _seed_single(state)
@@ -813,7 +814,6 @@ def test_core_width_pairing_marks_are_legend_visible(
         state.session.draft,
         state.evaluation,
         state.candidates[1],
-        current=state.session.result_workspace.current,
     )
     assert adopted.snapshot is not None and adopted.adopted_draft is not None
     state.session.result_workspace = set_current_result(
@@ -825,10 +825,10 @@ def test_core_width_pairing_marks_are_legend_visible(
     assert view is not None
     for axes in view.axes.values():
         legend = axes.get_legend()
-        assert legend is not None and "Paired by width" in [
+        assert legend is not None and "Paired by width" not in [
             text.get_text() for text in legend.get_texts()
         ]
-    assert "paired by width" in view.hits[0][4]
+    assert "paired by width" not in view.hits[0][4]
     assert not qt_slot_errors
 
 

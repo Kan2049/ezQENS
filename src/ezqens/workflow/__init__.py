@@ -98,7 +98,7 @@ from ezqens.workflow.multi_q import (
     set_best_saved_result,
     set_current_result,
     set_working_method,
-    swap_current_lorentzian_identities,
+    swap_current_lorentzian_positions,
     unsaved_result_items,
     update_working_draft,
 )
@@ -128,7 +128,7 @@ from ezqens.workflow.project import (
     resolve_manual_fit_context,
 )
 from ezqens.workflow.results import (
-    IdentityMark,
+    NumberingMark,
     QResult,
     ResultOrigin,
     ResultSnapshot,
@@ -148,7 +148,7 @@ __all__ = [
     "CommittedFittingSelection",
     "FittingMethod",
     "FittingWorkspaceState",
-    "IdentityMark",
+    "NumberingMark",
     "QResult",
     "ResultDisplayStatus",
     "ResultWorkingCopy",
@@ -229,7 +229,7 @@ __all__ = [
     "result_q_display_status",
     "revert_saved_result",
     "set_best_saved_result",
-    "swap_current_lorentzian_identities",
+    "swap_current_lorentzian_positions",
     "unsaved_result_items",
     "update_working_draft",
     "join_center_group",

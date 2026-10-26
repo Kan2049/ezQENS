@@ -23,7 +23,6 @@ from ezqens.fitting.auto import (
 )
 from ezqens.fitting.conversion import (
     convert_standard_auto_fit_result_to_manual,
-    relabel_fit_components,
 )
 from ezqens.fitting.core import (
     FittingError,
@@ -142,7 +141,6 @@ __all__ = [
     "StandardModelCandidate",
     "auto_fit_single_q",
     "convert_standard_auto_fit_result_to_manual",
-    "relabel_fit_components",
     "evaluate_spectral_model",
     "evaluate_standard_candidates",
     "fit_single_q",

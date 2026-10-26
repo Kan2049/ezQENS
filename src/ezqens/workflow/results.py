@@ -11,7 +11,6 @@ from ezqens.batch import MultiQBranchResult, MultiQFitOutcome, MultiQFitStatus
 from ezqens.fitting import (
     ComponentIdentity,
     FitResult,
-    ParameterReference,
     StandardModelCandidate,
 )
 
@@ -97,9 +96,8 @@ class ResultOrigin(StrEnum):
     AUTO_FIT_BRANCH = "auto_fit_branch"
 
 
-class IdentityMark(StrEnum):
-    PAIRED_BY_WIDTH = "paired_by_width"
-    USER_SWAP = "user_swap"
+class NumberingMark(StrEnum):
+    POSITION_SWAP = "position_swap"
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,7 +108,7 @@ class QResult:
     working_state: ManualModelState | None = None
     origin: ResultOrigin | None = None
     candidate: StandardModelCandidate | None = None
-    identity_marks: tuple[IdentityMark, ...] = ()
+    numbering_marks: tuple[NumberingMark, ...] = ()
     optimizer_status: int | None = None
     optimizer_message: str | None = None
 
@@ -159,16 +157,24 @@ class QResult:
             raise ValueError("candidate is only valid for AutoFit provenance")
         if auto and not isinstance(self.candidate, StandardModelCandidate):
             raise ValueError("AutoFit Q requires its typed candidate")
-        marks = tuple(self.identity_marks)
+        marks = tuple(self.numbering_marks)
         if not fitted and marks:
-            raise ValueError("unfitted Q cannot carry identity marks")
-        if any(not isinstance(mark, IdentityMark) for mark in marks):
-            raise ValueError("identity marks must be typed")
-        object.__setattr__(self, "identity_marks", marks)
+            raise ValueError("unfitted Q cannot carry numbering marks")
+        if any(not isinstance(mark, NumberingMark) for mark in marks):
+            raise ValueError("numbering marks must be typed")
+        object.__setattr__(self, "numbering_marks", marks)
 
     @property
     def status(self) -> MultiQFitStatus:
         return self.outcome.status
+
+    @property
+    def lorentzian_numbers(self) -> tuple[tuple[ComponentIdentity, int], ...]:
+        """Return fit-time numbering, independent of FitResult canonical order."""
+
+        return (
+            () if self.working_state is None else self.working_state.lorentzian_numbers
+        )
 
     @property
     def fit_result(self) -> FitResult | None:
@@ -361,39 +367,6 @@ def _replace_result_point(snapshot: ResultSnapshot, point: QResult) -> ResultSna
     points = list(snapshot.result.points)
     points[index] = point
     return _issue_unified_result(replace(snapshot.result, points=tuple(points)))
-
-
-def _relabel_manual_state(
-    state: ManualModelState,
-    identities: dict[ComponentIdentity, ComponentIdentity],
-) -> ManualModelState:
-    """Keep each component's editable state and ties with its exact identity."""
-
-    def reference(item: ParameterReference) -> ParameterReference:
-        replacement = identities.get(item.component)
-        return item if replacement is None else replace(item, component=replacement)
-
-    return replace(
-        state,
-        lorentzians=tuple(
-            replace(item, identity=identities.get(item.identity, item.identity))
-            for item in state.lorentzians
-        ),
-        parameter_ties=tuple(
-            replace(tie, members=tuple(reference(item) for item in tie.members))
-            for tie in state.parameter_ties
-        ),
-    )
-
-
-def _mark_result_point(
-    snapshot: ResultSnapshot, group_index: int, mark: IdentityMark
-) -> ResultSnapshot:
-    point = snapshot.result.point(group_index)
-    return _replace_result_point(
-        snapshot,
-        replace(point, identity_marks=(*point.identity_marks, mark)),
-    )
 
 
 def _is_issued_result_snapshot(value: object) -> bool:

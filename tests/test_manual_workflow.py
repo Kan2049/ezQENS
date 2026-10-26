@@ -306,8 +306,8 @@ def test_single_q_autofit_adopts_typed_fitted_candidate_without_label_parsing() 
     assert adopted.elastic_area.user_lower_limit == 0.0
     assert len(adopted.lorentzians) == len(fitted.lorentzians)
     assert all(
-        not item.identity.component_id.startswith("standard_lorentzian_")
-        for item in adopted.lorentzians
+        item.identity == chosen.fit.configuration.lorentzians[index].identity
+        for index, item in enumerate(adopted.lorentzians)
     )
     assert all(item.area.user_lower_limit == 0.0 for item in adopted.lorentzians)
     assert all(

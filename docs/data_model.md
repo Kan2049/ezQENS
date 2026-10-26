@@ -542,7 +542,8 @@ Only fitted values for target-free parameters are propagated as execution-time
 starts; target fixed values, bounds, Free/Fixed state, fitting selection,
 prepared resolution, convolution plan, and legality validation stay
 target-local. Component and parameter references are matched by stable identity,
-never reordered or rematched by fitted values.
+never rematched by fitted values. Manual continuation orders target working
+components like the anchor through their typed identities.
 `seed_group_index` is populated only after a predecessor Result has actually
 been materialized into the target's seeded model. A blocker detected before
 that operation records no seed group. An optimizer-unsuccessful Result remains
@@ -706,7 +707,7 @@ different Q-group counts after regrouping. Q-count alignment is enforced within
 each snapshot/working copy, not across the workspace.
 A successful Single-Q Manual Run or AutoFit adoption replaces only its Q in
 Current; a complete Manual or selected-AutoFit Multi-Q adoption replaces all Q.
-These operations, draft edits, and identity swaps update only the active item's
+These operations, draft edits, and position swaps update only the active item's
 copy; a fit without an active item creates untitled work. Failed Manual Run
 leaves Current unchanged. A Q is fitted-current only while
 its draft references that exact fit-time working-state object and its active
@@ -719,6 +720,21 @@ equal objects remain current, and changing another Q has no effect. Edited or
 non-current fitted Qs need refitting and non-current evidence is omitted from
 derived values. Fit-to-all-Q requires a current anchor under this same rule;
 strict running-execution and AutoFit-adoption guards are separate.
+
+Unified Lorentzian numbering is local to each Q's working-state list, not the
+FitResult's FWHM-canonicalized list. `ManualModelState.lorentzian_numbers` and
+`QResult.lorentzian_numbers` expose typed identity/one-based-number pairs;
+`ManualModelState.lorentzian_number(identity)` resolves one component.
+Add appends and remove compacts numbers at that Q only. Unified FWHM/tau series
+use `DerivedUnifiedQENSResult.lorentzian_series(number)` across compositions,
+including unrelated internal identities; per-Q quantities and EISF are unchanged.
+Branch-only derivation keeps its separate identity-based contract.
+AutoFit adoption does not pair with previous fits or relabel for cross-Q links.
+Adopted branch and Manual-continuation working states follow anchor order.
+`swap_current_lorentzian_positions(state, draft, group_index, first, second)`
+swaps two one-based numbers at a fitted-current Q. It installs one reordered
+state in both Current and draft, retains the exact FitResult evidence, and
+records `NumberingMark.POSITION_SWAP` in `QResult.numbering_marks`.
 
 Working-copy transitions are immutable and atomic:
 

@@ -157,7 +157,7 @@ from ezqens.workflow import (
     save_current_result_as,
     set_best_saved_result,
     set_current_result,
-    swap_current_lorentzian_identities,
+    swap_current_lorentzian_positions,
     unsaved_result_items,
     untie_center_group_parameter,
     untie_parameter,
@@ -2066,7 +2066,6 @@ class MainWindow(QMainWindow):
                         dialog.outcome,
                         selection,
                         group_index=self.dataset_view.current_group_index,
-                        current=workspace.current if action == "apply" else None,
                     )
                     if not single_adoption.success:
                         raise WorkflowError(single_adoption.diagnostics)
@@ -3573,7 +3572,7 @@ class MainWindow(QMainWindow):
         )
         current_result = session.result_workspace.current_result
         model = self._manual_draft.setup(group_index).model
-        slots = lorentzian_slots(current_result, model)
+        slots = lorentzian_slots(current_result, model, group_index=group_index)
         self.dataset_view.series_slots = slots
         current_point = (
             current_result.point(group_index) if current_result is not None else None
@@ -3778,7 +3777,10 @@ class MainWindow(QMainWindow):
         self._parameter_viewer_key = key
         view.set_result(
             derived,
-            lorentzian_slots(session.result_workspace.current_result),
+            lorentzian_slots(
+                session.result_workspace.current_result,
+                group_index=self.dataset_view.current_group_index,
+            ),
             statuses,
             self.dataset_view.current_group_index,
             title,
@@ -3804,9 +3806,16 @@ class MainWindow(QMainWindow):
         result = session.result_workspace.current_result
         if result is None or result.point(group).fit_result is None:
             return
+        working = result.point(group).working_state
+        if working is None:
+            return
         try:
-            state, draft = swap_current_lorentzian_identities(
-                session.result_workspace, session.draft, group, first, second
+            state, draft = swap_current_lorentzian_positions(
+                session.result_workspace,
+                session.draft,
+                group,
+                working.lorentzian_number(first),
+                working.lorentzian_number(second),
             )
         except WorkflowError as error:
             self._show_workflow_error("Swap series", error)

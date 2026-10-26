@@ -3096,7 +3096,7 @@ def test_autofit_dialog_preview_and_explicit_adoption_are_group_local(
     assert first_session.draft is before_focus
 
     initial = adopt_single_q_auto_fit_candidate(
-        workflow, first_session.draft, outcome, chosen, current=None
+        workflow, first_session.draft, outcome, chosen
     )
     assert initial.snapshot is not None and initial.adopted_draft is not None
     first_session.result_workspace = set_current_result(

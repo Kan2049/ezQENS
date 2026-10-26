@@ -245,7 +245,6 @@ def _seed_single(problem: LifecycleProblem, name: str | None = None) -> FitResul
         problem.session.draft,
         problem.evaluation,
         problem.candidates[1],
-        current=None,
     )
     assert adopted.success and adopted.snapshot is not None
     assert adopted.adopted_draft is not None

@@ -6,7 +6,6 @@ import math
 from collections.abc import Callable, Collection, Sequence
 from dataclasses import InitVar, dataclass, field, replace
 from enum import StrEnum
-from uuid import uuid4
 
 import numpy as np
 
@@ -33,7 +32,6 @@ from ezqens.fitting import (
     SpectralModelDefinition,
     StandardModelCandidate,
     convert_standard_auto_fit_result_to_manual,
-    relabel_fit_components,
 )
 from ezqens.preprocessing import EdgePaddingDetectionResult, FittingSelection
 from ezqens.resolution import PreparedResolution
@@ -42,7 +40,7 @@ from .manual import (
     ManualFitDraft,
     SingleQAutoFitOutcome,
     _adopt_manual_fit_values,
-    _manual_state_from_fitted_model,
+    _manual_state_from_configuration,
     _manual_state_from_standard_auto_state,
     _single_q_auto_fit_context_unchanged,
     run_single_q_auto_fit,
@@ -62,13 +60,12 @@ from .project import (
     resolve_manual_fit_context,
 )
 from .results import (
-    IdentityMark,
+    NumberingMark,
     ResultOrigin,
     ResultSnapshot,
     UnifiedResult,
     _is_issued_result_snapshot,
     _issue_result_snapshot,
-    _relabel_manual_state,
     _replace_result_point,
     fit_evidence_is_current,
 )
@@ -1480,11 +1477,27 @@ def _store_working_copy(
     return replace(state, untitled=copy, active_item=copy)
 
 
+def _require_workspace_draft_owner(
+    state: FittingWorkspaceState, draft: ManualFitDraft
+) -> None:
+    copy = state.active_working_copy
+    owner = (
+        copy.sample_identity
+        if copy is not None
+        else state.saved_results[0].snapshot.result.sample_identity
+        if state.saved_results
+        else None
+    )
+    if owner is not None and owner != (draft.project_id, draft.sample_id):
+        raise ValueError("draft belongs to another Sample or Project")
+
+
 def update_working_draft(
     state: FittingWorkspaceState, draft: ManualFitDraft
 ) -> FittingWorkspaceState:
     """Cache parameter edits on the active item without changing fitted evidence."""
 
+    _require_workspace_draft_owner(state, draft)
     states = tuple(setup.model for setup in draft.setups)
     current = state.active_working_copy
     identity = (draft.project_id, draft.sample_id)
@@ -1508,6 +1521,7 @@ def active_manual_draft(
 ) -> ManualFitDraft:
     """Install the active item's cached parameters, or raw/empty analysis state."""
 
+    _require_workspace_draft_owner(state, template)
     copy = state.active_working_copy
     states = (None,) * len(template.setups) if copy is None else copy.draft_states
     if copy is not None and (
@@ -1532,6 +1546,8 @@ def set_current_result(
 
     if not _is_issued_result_snapshot(snapshot):
         raise ValueError("Current must be a ResultSnapshot created at execution")
+    if draft is not None:
+        _require_workspace_draft_owner(state, draft)
     states = (
         snapshot.working_states
         if draft is None
@@ -1557,6 +1573,8 @@ def replace_current_q_result(
 
     if not _is_issued_result_snapshot(snapshot):
         raise ValueError("Single-Q adoption requires an issued snapshot")
+    if draft is not None:
+        _require_workspace_draft_owner(state, draft)
     fitted = [
         point
         for point in snapshot.result.points
@@ -1785,6 +1803,7 @@ def _require_discard_consent(
 def _retain_outgoing_draft(
     state: FittingWorkspaceState, draft: ManualFitDraft
 ) -> FittingWorkspaceState:
+    _require_workspace_draft_owner(state, draft)
     copy = state.active_working_copy
     if copy is not None and len(copy.draft_states) != len(draft.setups):
         if copy.sample_identity != (draft.project_id, draft.sample_id):
@@ -1851,6 +1870,7 @@ def revert_saved_result(
 ) -> tuple[FittingWorkspaceState, ManualFitDraft]:
     """Drop modifications and restore the saved Result and whole draft baseline."""
 
+    _require_workspace_draft_owner(state, draft)
     active = state.active_item is entry
     updated = _issue_saved_result(
         entry.name,
@@ -1862,59 +1882,56 @@ def revert_saved_result(
     return state, active_manual_draft(state, draft) if active else draft
 
 
-def swap_current_lorentzian_identities(
+def swap_current_lorentzian_positions(
     state: FittingWorkspaceState,
     draft: ManualFitDraft,
     group_index: int,
-    first: ComponentIdentity,
-    second: ComponentIdentity,
+    first: int,
+    second: int,
 ) -> tuple[FittingWorkspaceState, ManualFitDraft]:
-    """Relabel exactly two fitted components at one Q without refitting."""
+    """Swap two one-based positions without changing any FitResult evidence."""
 
-    if state.current is None or first == second:
-        raise ValueError("swap requires two distinct identities in Current")
+    if state.current is None:
+        raise ValueError("swap requires a fitted Current Q")
+    _require_workspace_draft_owner(state, draft)
     point = state.current.result.point(group_index)
-    fit = point.fit_result
     working = point.working_state
-    draft_model = draft.setup(group_index).model
-    if fit is None or working is None or draft_model is None:
-        raise ValueError("swap requires fitted Q and editable Manual state")
-    fitted = fit.fitted_model
-    if fitted is None or {first, second} - {
-        item.identity for item in fitted.lorentzians
-    }:
-        raise ValueError("swap identities must belong to the fitted Q")
-    mapping = {item.identity: item.identity for item in fitted.lorentzians}
-    mapping.update({first: second, second: first})
-    if {first, second} - {item.identity for item in draft_model.lorentzians}:
-        raise ValueError("draft topology no longer matches the fitted identities")
-    relabeled_fit = relabel_fit_components(fit, mapping)
-    relabeled_working = _relabel_manual_state(working, mapping)
-    relabeled_draft = (
-        relabeled_working
-        if draft_model is working
-        else _relabel_manual_state(draft_model, mapping)
+    if point.fit_result is None or working is None:
+        raise ValueError("swap requires a fitted Q")
+    if draft.setup(group_index).model is not working:
+        raise ValueError("swap requires the unchanged fit-time working state")
+    count = len(working.lorentzians)
+    if (
+        any(
+            isinstance(n, bool) or not isinstance(n, int) or not 1 <= n <= count
+            for n in (first, second)
+        )
+        or first == second
+    ):
+        raise ValueError("swap requires two distinct valid Lorentzian numbers")
+    components = list(working.lorentzians)
+    components[first - 1], components[second - 1] = (
+        components[second - 1],
+        components[first - 1],
     )
+    swapped = replace(working, lorentzians=tuple(components))
     updated = replace(
         point,
-        outcome=replace(point.outcome, fit_result=relabeled_fit),
-        working_state=relabeled_working,
-        identity_marks=(*point.identity_marks, IdentityMark.USER_SWAP),
+        working_state=swapped,
+        numbering_marks=(*point.numbering_marks, NumberingMark.POSITION_SWAP),
     )
     current = _replace_result_point(state.current, updated)
+    adopted = draft.with_model(group_index, swapped)
     return (
         _store_working_copy(
             state,
             _issue_working_copy(
                 current,
-                tuple(
-                    setup.model
-                    for setup in draft.with_model(group_index, relabeled_draft).setups
-                ),
+                tuple(setup.model for setup in adopted.setups),
                 current.result.sample_identity,
             ),
         ),
-        draft.with_model(group_index, relabeled_draft),
+        adopted,
     )
 
 
@@ -2475,7 +2492,12 @@ def _s5_target_model(
         )
     resolved_intents = _resolved_s5_parameter_intents(source, base, policy)
     base = _apply_s5_center_ties(source, base, policy, resolved_intents)
-    return _apply_resolved_s5_parameter_intents(base, resolved_intents)
+    resolved = _apply_resolved_s5_parameter_intents(base, resolved_intents)
+    by_identity = {item.identity: item for item in resolved.lorentzians}
+    return replace(
+        resolved,
+        lorentzians=tuple(by_identity[item.identity] for item in source.lorentzians),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -2834,7 +2856,7 @@ def continue_selected_auto_fit_candidates(
             background=anchor_fit.configuration.background,
         )
         working_states = tuple(
-            _manual_state_from_fitted_model(anchor_fitted_model)
+            _manual_state_from_configuration(anchor_fit.configuration)
             if group_index == anchor_group_index
             else _default_model(composition)
             for group_index in range(len(draft.setups))
@@ -2920,12 +2942,9 @@ def adopt_selected_auto_fit_branch(
     adopted = draft
     converted_outcomes: list[MultiQFitOutcome] = []
     snapshot_states: list[ManualModelState | None] = [None] * len(draft.setups)
-    anchor_fit = selected_branch.anchor_evidence.fit
-    assert anchor_fit is not None
-    identities = {
-        item.identity: ComponentIdentity(ComponentFamily.LORENTZIAN, uuid4().hex)
-        for item in anchor_fit.configuration.lorentzians
-    }
+    anchor_state = selected_branch.working_states[anchor]
+    if anchor_state is None:
+        raise ValueError("selected branch lost its anchor working state")
     for branch_outcome in selected_branch.branch_result.outcomes:
         if branch_outcome.status is not MultiQFitStatus.SUCCESS:
             converted_outcomes.append(branch_outcome)
@@ -2940,8 +2959,6 @@ def adopt_selected_auto_fit_branch(
             active_fit,
             center_group_id=center_group_id,
         )
-        if identities:
-            converted_fit = relabel_fit_components(converted_fit, identities)
         converted_outcomes.append(replace(branch_outcome, fit_result=converted_fit))
         working = selected_branch.working_states[branch_outcome.group_index]
         if working is None:
@@ -2949,8 +2966,13 @@ def adopt_selected_auto_fit_branch(
         model = _manual_state_from_standard_auto_state(
             working, center_group_id=center_group_id
         )
-        if identities:
-            model = _relabel_manual_state(model, identities)
+        by_identity = {item.identity: item for item in model.lorentzians}
+        model = replace(
+            model,
+            lorentzians=tuple(
+                by_identity[item.identity] for item in anchor_state.lorentzians
+            ),
+        )
         materialized = materialize_manual_model(
             model,
             context.prepared_resolution,

@@ -496,7 +496,7 @@ The Parameter Viewer action beside Manual Fit / AutoFit opens or raises one
 owned, non-modal `Parameter Viewer — <Dataset> · <Result | Untitled>` window.
 FWHM, τ and EISF are three independently checkable, visibly toggled panels,
 all initially shown. All may be off (`No panel selected`). The + menu lists
-active-Result fitted parameters per function (δ, Result-local L aliases and
+active-Result fitted parameters per function (δ, per-Q Lorentzian numbers and
 Background), excluding Lorentzian FWHM and already-added panels. Added parameter
 toggles/panels can be removed through their context menu. Panel choices are
 window-only state shared across Results, keyed by display name: an absent item
@@ -515,7 +515,7 @@ Derivation follows active item, Result, draft and scientific-context changes,
 and runs only while the viewer is open (or on opening). Without a Result it
 shows `No Result open`.
 
-Values, uncertainties, statuses, identity marks and warnings come from workflow.
+Values, uncertainties, statuses, numbering marks and warnings come from workflow.
 All panels use a stable physical-Q display ordering, including unavailable
 NaN gaps; no segment bridges an unavailable Q, and navigation retains original
 group indices. Added parameter panels read values/standard errors directly by
@@ -526,26 +526,33 @@ function. No values are derived or converted in these panels.
 Stored Results are never reordered. Available error bars have
 caps and hollow point markers, without enlarging scientific errors. Missing
 uncertainty is marked and explained with its core uncertainty status, never
-synthesized. Paired-by-width, user-swap, warning and uncertainty-unavailable
+synthesized. Position-swap, warning and uncertainty-unavailable
 markers are explained in the legend. EISF/δ use elastic colors, Background uses
 its scientific color and Lorentzians their shared series palette. Warning and
 uncertainty-unavailable markers share a neutral color distinct from series and
 the current-Q marker. `Unavailable series at Q` have subtle axis ticks and
 tooltips with their reasons. Point tooltips also show values, uncertainties,
-Q status and identity provenance. Closing only closes the view.
+Q status and numbering provenance. Closing only closes the view.
 
-Within each active Result, L1, L2, … and their scientific colors follow typed
-Lorentzian identities numbered by first appearance in Result Q order, then
-component order at that Q. The same mapping is used by Parameter Viewer, Fitting
-Parameters, Fitting Info and spectrum curves; a Q can contain only L2. Without
-a Result the editable draft's order is used. For a fitted Q with two or
-more Lorentzians, each component menu offers `Swap series with Lk`. This invokes
-the workflow identity-swap operation without a refit, modifies only the active
-working copy and immediately updates the projections. No GUI correspondence,
-derived-value calculation or cross-Result component matching is performed.
-These L numbers/colors are per-Result display aliases and may renumber. The
-viewer displays `Series labels apply to this Result only`, also present in the
-Fitting Parameters/Info Lorentzian-label tooltips.
+At each Q, L1, L2, … are compact one-based positions in that Q's ordered
+working state (fit-time state for Result evidence, draft state for editing).
+Adding appends; removing shifts later numbers down only at that Q. A single
+Lorentzian is always L1, never a lone L2. Equal numbers across Q form one
+FWHM/τ series regardless of internal identities or composition; EISF remains
+per Q and includes every Lorentzian. AutoFit order is adopted as-is from its
+submitted working configuration, not paired with a previous fit or renumbered
+by fitted linewidth. Branch targets follow the anchor's order.
+For a fitted-current Q with two or more Lorentzians, each component menu offers
+`Swap series with Lk`. This invokes the workflow position swap at that Q,
+without refitting or changing FitResult evidence, and modifies only the active
+working copy. Other Qs retain their numbers. The GUI performs no correspondence,
+derived-value calculation or cross-Result component matching.
+Number labels/colors in Parameter Viewer, Fitting Parameters, Fitting Info,
+spectrum curves and their tooltips must consume this per-Q mapping. Any display
+details not yet conforming to it remain pending GUI sync; first-appearance
+identity aliases and width-pairing marks are retired requirements. The existing
+`Series labels apply to this Result only` presentation text and tooltip details
+are also subject to that GUI sync.
 
 Dataset dots represent readiness, not fit coverage. Result rows show fitted Qs
 out of counted Qs (core total minus core EXCLUDED count), a status breakdown,

@@ -556,13 +556,23 @@ class DerivedUnifiedQENSResult:
         return self.points[group_index]
 
     def lorentzian_series(
-        self, identity: ComponentIdentity
+        self, number: int
     ) -> tuple[LorentzianDerivedQuantity | None, ...]:
+        if isinstance(number, bool) or not isinstance(number, int) or number < 1:
+            raise ValueError("Lorentzian number must be a positive integer")
         return tuple(
             next(
-                (item for item in point.lorentzians if item.component == identity), None
+                (
+                    item
+                    for item in point.lorentzians
+                    if source.working_state is not None
+                    and source.working_state.lorentzian_number(item.component) == number
+                ),
+                None,
             )
-            for point in self.points
+            for point, source in zip(
+                self.points, self.source_result.points, strict=True
+            )
         )
 
     @property
@@ -1045,7 +1055,7 @@ def derive_unified_qens(
     *,
     context_valid: Sequence[bool],
 ) -> DerivedUnifiedQENSResult:
-    """Derive each fitted Q independently, linking only exact component identities."""
+    """Derive each fitted Q independently, linking working-state positions."""
 
     if len(result.points) != q_bins.group_count or len(context_valid) != len(
         result.points
@@ -1109,11 +1119,13 @@ def derive_unified_qens(
         fitted = fit.fitted_model
         if fitted is None:
             raise ValueError("successful FitResult has no fitted model")
-        identities = tuple(item.identity for item in fitted.lorentzians)
+        working = source.working_state
+        assert working is not None
+        identities = tuple(item.identity for item in working.lorentzians)
         lorentzians = tuple(
             _derive_lorentzian(fit, identity) for identity in identities
         )
-        eisf = _derive_eisf(fit, identities)
+        eisf = _derive_eisf(fit, tuple(item.identity for item in fitted.lorentzians))
         points.append(
             DerivedQENSPoint(
                 outcome.group_index,

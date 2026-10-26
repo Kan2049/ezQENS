@@ -295,8 +295,13 @@ Runtime object identity and changes to other Qs do not determine scientific
 validity. A saved Result of the same stable Sample and Q-group count can always
 be loaded; changed inputs retain the fit evidence and working state while
 making the affected Q need refitting and unavailable for derivation.
-FWHM and relaxation-time series link only identical stable
-Lorentzian identities across Q, even when other model components differ. The
+FWHM and relaxation-time series link equal Lorentzian numbers across Q,
+even when compositions or internal component identities differ. At each Q,
+L1, L2, ... are compact one-based positions in that Q's ordered working state:
+fit-time state for evidence, draft state for editing. Estimates are located by
+typed identity, then mapped to these positions; FitResult FWHM canonicalization
+does not define numbering. Adding appends; removing shifts later numbers down
+only at that Q. The
 EISF denominator uses every fitted Lorentzian at that Q. An EISF series includes
 Qs with an elastic component; no cross-Q composition matching or reconstruction
 is performed. Branch-only `derive_qens` retains its existing branch contract.
@@ -564,19 +569,19 @@ the branch. The workflow does not automatically relabel components by FWHM,
 area, or another matching heuristic. Ambiguous decomposition retains identity
 and exposes existing fit/identifiability limitations.
 
-At AutoFit adoption into the unified Current Result, fixed standard candidate
-Lorentzian identifiers are replaced by fresh identities; one selected branch
-uses those identities consistently across its Q fits. A Single-Q AutoFit
-adoption at a Q with an existing fit of the same elastic/background/Lorentzian
-composition inherits its one-Lorentzian identity, or pairs two Lorentzians by
-their fitted FWHM order (narrower to narrower) with explicit pairing provenance.
-An exact equality of the two FWHMs in either fit makes width pairing ambiguous:
-fresh identities are assigned without a pairing mark or near-equality threshold.
-Other compositions receive fresh identities. A user swap exchanges two
-Lorentzian identities at one fitted Q exactly, including typed references,
-evaluation-component labels, and editable state; it changes no fitted values,
-errors, covariance, statistics, or curves. Neither adoption nor derivation
-re-pairs components across Q by position, width, or value.
+AutoFit internal ordering and fitting rules remain unchanged. Adoption retains
+the submitted configuration's working-state order and adopts fitted values by
+typed reference, never taking numbering from the canonicalized fitted list.
+There is no pairing with a previous fit or
+generating fresh identities for cross-Q linking. All adopted branch targets
+follow the anchor's working-state order, as do Manual Fit-to-all-Q targets
+through typed component correspondence (not fitted-width matching).
+
+A user position swap at a fitted-current Q reorders only its fit-time working
+state and editable state, installing the same new state in both. The exact
+FitResult, values, errors, covariance, statistics and curves are unchanged.
+The Result records a position-swap provenance mark and becomes modified.
+Other Qs are unaffected.
 
 Per-Q execution states are `SUCCESS`, `FAILED`, `BLOCKED`, `EXCLUDED`, and
 `NOT_RUN`; branch states include `COMPLETED` and `CANCELLED`. Completed results
