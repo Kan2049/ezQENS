@@ -3539,6 +3539,34 @@ def _contexts_for(
     )
 
 
+def test_dataset_energy_relabel_marks_fit_evidence_stale_without_modifying_result(
+    two_fitted_qs: tuple[
+        WorkflowProject, ProjectDataset, ManualFitDraft, FittingWorkspaceState
+    ],
+) -> None:
+    project, sample, draft, state = two_fitted_qs
+    snapshot = state.current
+    assert snapshot is not None
+    changed = sample.dataset.assign_units(
+        energy_unit="unknown",
+        intensity_unit=sample.dataset.intensity_unit,
+        uncertainty_unit=sample.dataset.uncertainty_unit,
+    )
+    for index in (1, 2):
+        context = _contexts_for(project, sample)[index]
+        assert context is not None
+        fit = snapshot.result.point(index).fit_result
+        assert fit is not None and fit_evidence_is_current(fit, context, index)
+        changed_context = replace(context, sample=replace(sample, dataset=changed))
+        assert not fit_evidence_is_current(fit, changed_context, index)
+        assert (
+            result_q_display_status(state, draft, index, changed_context)
+            is ResultDisplayStatus.NEEDS_FIT
+        )
+        assert snapshot.result.point(index).fit_result is fit
+    assert state.current is snapshot
+
+
 def test_per_q_validity_range_change_preserves_other_q_and_anchor(
     two_fitted_qs: tuple[
         WorkflowProject, ProjectDataset, ManualFitDraft, FittingWorkspaceState

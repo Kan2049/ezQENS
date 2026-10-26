@@ -116,11 +116,31 @@ def _signed_dataset() -> ReducedDataset:
 
 def test_source_units_assignment_updates_metadata_without_array_conversion(
     application: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     window = MainWindow()
     project = window.workspace.new_project()
     state = window.workspace.add_dataset(project, _dataset())
     before = tuple(spectrum.intensity.copy() for spectrum in state.dataset.spectra)
+    original_assign = ReducedDataset.assign_units
+    calls: list[tuple[ReducedDataset, str, str, str]] = []
+
+    def assign(
+        source: ReducedDataset,
+        *,
+        energy_unit: str,
+        intensity_unit: str,
+        uncertainty_unit: str,
+    ) -> ReducedDataset:
+        calls.append((source, energy_unit, intensity_unit, uncertainty_unit))
+        return original_assign(
+            source,
+            energy_unit=energy_unit,
+            intensity_unit=intensity_unit,
+            uncertainty_unit=uncertainty_unit,
+        )
+
+    monkeypatch.setattr(ReducedDataset, "assign_units", assign)
 
     assigned = window.workspace.assign_source_units(
         project,
@@ -129,6 +149,7 @@ def test_source_units_assignment_updates_metadata_without_array_conversion(
         intensity_unit="counts",
     )
     assert assigned is not None
+    assert calls == [(state.dataset, "meV", "counts", "counts")]
     assigned = window.workspace.assign_q_bins(
         project,
         assigned,

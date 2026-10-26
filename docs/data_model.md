@@ -63,6 +63,18 @@ do not define the reduced scientific spectrum.
 The name intentionally does not imply that direct text import is its only
 possible producer.
 
+Every spectrum has the same `energy_unit`, `intensity_unit`, and
+`uncertainty_unit` as the first spectrum. Construction rejects the first
+mismatching group and names the differing field. Each label is uniform
+independently; uncertainty units need not equal intensity units.
+The read-only Dataset properties `energy_unit`, `intensity_unit`, and
+`uncertainty_unit` expose this common unit set.
+`assign_units(*, energy_unit, intensity_unit, uncertainty_unit)` returns a new
+Dataset with all spectra relabeled, preserving numerical values, invalid masks,
+Q bins, coverage, metadata and provenance. This operation neither guesses units
+nor converts values. The GUI's source-unit editor explicitly chooses the
+intensity label for uncertainty too; this is not a domain invariant.
+
 **Required fields**
 
 - `role`, shared by every contained spectrum; and

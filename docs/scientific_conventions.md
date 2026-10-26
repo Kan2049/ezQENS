@@ -20,6 +20,10 @@ only.
 - Relaxation time is represented in picoseconds.
 - Intensity and uncertainty units must be retained explicitly from input or
   labeled as unknown/arbitrary; they must never be guessed.
+- Each Dataset has one energy/intensity/uncertainty unit set shared exactly by
+  every spectrum. These three labels are independent (uncertainty need not use
+  the intensity label). Unit assignment relabels all spectra without numerical
+  conversion or inference; mixed-unit Datasets are rejected.
 - Every numerical array must retain its unit, source spectrum, Q association,
   processing state, and mask association.
 

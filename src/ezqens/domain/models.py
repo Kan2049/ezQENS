@@ -671,6 +671,14 @@ class ReducedDataset:
             range(len(self.spectra))
         ):
             raise ValueError("spectrum group indices must be ordered and contiguous")
+        first = self.spectra[0]
+        for spectrum in self.spectra[1:]:
+            for name in ("energy_unit", "intensity_unit", "uncertainty_unit"):
+                if getattr(spectrum, name) != getattr(first, name):
+                    raise ValueError(
+                        f"{name} differs from the first spectrum at group "
+                        f"{spectrum.group_index} ({spectrum.group_label})"
+                    )
         if self.source_columns:
             if len(self.source_columns) != len(self.spectra):
                 raise ValueError("source column metadata must match spectrum count")
@@ -710,6 +718,42 @@ class ReducedDataset:
                 raise ValueError(
                     "fractional coverage is bound to different ordered X/Y/E points"
                 )
+
+    @property
+    def energy_unit(self) -> str:
+        """Return the common energy unit label, without inference."""
+
+        return self.spectra[0].energy_unit
+
+    @property
+    def intensity_unit(self) -> str:
+        """Return the common intensity unit label, without inference."""
+
+        return self.spectra[0].intensity_unit
+
+    @property
+    def uncertainty_unit(self) -> str:
+        """Return the independently specified common uncertainty unit label."""
+
+        return self.spectra[0].uncertainty_unit
+
+    def assign_units(
+        self, *, energy_unit: str, intensity_unit: str, uncertainty_unit: str
+    ) -> ReducedDataset:
+        """Relabel every spectrum without numerical conversion or inference."""
+
+        return replace(
+            self,
+            spectra=tuple(
+                replace(
+                    spectrum,
+                    energy_unit=energy_unit,
+                    intensity_unit=intensity_unit,
+                    uncertainty_unit=uncertainty_unit,
+                )
+                for spectrum in self.spectra
+            ),
+        )
 
     def assign_q_bins(self, q_bins: QBins) -> ReducedDataset:
         """Return this dataset with validated dataset-level Q-bin identity."""

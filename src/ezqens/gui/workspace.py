@@ -835,19 +835,15 @@ class WorkspaceSidebar(QWidget):
         intensity = intensity_unit.strip()
         if not energy or not intensity:
             raise ValueError("source units must not be empty")
-        spectra = tuple(
-            replace(
-                spectrum,
-                energy_unit=energy,
-                intensity_unit=intensity,
-                uncertainty_unit=intensity,
-            )
-            for spectrum in dataset.dataset.spectra
+        replacement = dataset.dataset.assign_units(
+            energy_unit=energy,
+            intensity_unit=intensity,
+            uncertainty_unit=intensity,
         )
         return self._replace_dataset(
             project,
             dataset,
-            replace(dataset.dataset, spectra=spectra),
+            replacement,
         )
 
     def save_q_method(

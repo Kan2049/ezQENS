@@ -106,6 +106,23 @@ def diagnostic_code(error: QRebinError) -> QRebinDiagnosticCode:
     return error.diagnostics[0].code
 
 
+def test_rebin_preserves_independent_dataset_unit_labels() -> None:
+    source = make_rebin_dataset().assign_units(
+        energy_unit="meV", intensity_unit="counts", uncertainty_unit="sigma"
+    )
+    output = rebin_fractional_q(source, specification((0.0, 2.0, 4.0)))
+    assert (output.energy_unit, output.intensity_unit, output.uncertainty_unit) == (
+        "meV",
+        "counts",
+        "sigma",
+    )
+    assert all(
+        (s.energy_unit, s.intensity_unit, s.uncertainty_unit)
+        == (source.energy_unit, source.intensity_unit, source.uncertainty_unit)
+        for s in output.spectra
+    )
+
+
 def test_exact_overlap_formula_propagates_signal_uncertainty_and_coverage() -> None:
     source = make_rebin_dataset()
 

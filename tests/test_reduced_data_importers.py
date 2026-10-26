@@ -18,6 +18,35 @@ from ezqens.io.importers import import_reduced_data
 FIXTURES = Path(__file__).parent / "fixtures" / "reduced_data"
 
 
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "dave_multiple_groups.dat",
+        "mantid_xye_blocks.txt",
+        "wide_multiple_pairs.txt",
+        "single_valid.csv",
+    ],
+)
+def test_import_layouts_produce_one_dataset_unit_set(filename: str) -> None:
+    dataset = import_reduced_data(
+        FIXTURES / filename,
+        role=SpectrumRole.SAMPLE,
+        energy_unit="meV",
+        intensity_unit="counts",
+        uncertainty_unit="sigma",
+    )
+    assert (dataset.energy_unit, dataset.intensity_unit, dataset.uncertainty_unit) == (
+        "meV",
+        "counts",
+        "sigma",
+    )
+    assert all(
+        (s.energy_unit, s.intensity_unit, s.uncertainty_unit)
+        == (dataset.energy_unit, dataset.intensity_unit, dataset.uncertainty_unit)
+        for s in dataset.spectra
+    )
+
+
 def diagnostic_codes(error: ImportValidationError) -> set[str]:
     """Return diagnostic codes without inspecting source data."""
 

@@ -285,9 +285,9 @@ def rebin_fractional_q(
                 energy=representative.energy,
                 intensity=intensity,
                 uncertainty=uncertainty,
-                energy_unit=representative.energy_unit,
-                intensity_unit=representative.intensity_unit,
-                uncertainty_unit=representative.uncertainty_unit,
+                energy_unit=dataset.energy_unit,
+                intensity_unit=dataset.intensity_unit,
+                uncertainty_unit=dataset.uncertainty_unit,
             )
         )
         output_coverage.append(fractional_weight)

@@ -122,6 +122,77 @@ def test_dataset_role_must_match_spectrum_role() -> None:
         )
 
 
+@pytest.mark.parametrize("field", ["energy_unit", "intensity_unit", "uncertainty_unit"])
+def test_dataset_rejects_first_group_with_mismatched_unit(field: str) -> None:
+    first = make_spectrum()
+    second = make_spectrum(group_index=1)
+    third = make_spectrum(group_index=2)
+    if field == "energy_unit":
+        third = replace(third, energy_unit="different")
+    elif field == "intensity_unit":
+        third = replace(third, intensity_unit="different")
+    else:
+        third = replace(third, uncertainty_unit="different")
+    with pytest.raises(ValueError, match=rf"{field}.*group 2 \(group-2\)"):
+        ReducedDataset(role=SpectrumRole.SAMPLE, spectra=(first, second, third))
+
+
+def test_dataset_assign_units_preserves_values_masks_and_all_other_fields() -> None:
+    source = ReducedDataset(
+        role=SpectrumRole.SAMPLE,
+        spectra=(
+            make_spectrum(uncertainty=np.array([np.nan, 0.0, -1.0])),
+            make_spectrum(group_index=1),
+        ),
+        source_reference="synthetic.dat",
+        source_metadata=SourceMetadata(source_filename="synthetic.dat"),
+        q_bins=QBins.from_edges([0.0, 0.5, 1.0]),
+    ).confirm_unrebinned_source()
+    assigned = source.assign_units(
+        energy_unit="unknown", intensity_unit="counts", uncertainty_unit="sigma"
+    )
+    assert assigned is not source
+    assert (
+        assigned.energy_unit,
+        assigned.intensity_unit,
+        assigned.uncertainty_unit,
+    ) == ("unknown", "counts", "sigma")
+    assert source.energy_unit == "meV"
+    for name in (
+        "role",
+        "source_reference",
+        "source_layout",
+        "diagnostics",
+        "source_columns",
+        "source_metadata",
+        "q_bins",
+        "fractional_coverage",
+    ):
+        assert getattr(assigned, name) is getattr(source, name)
+    for before, after in zip(source.spectra, assigned.spectra, strict=True):
+        assert after.group_index == before.group_index
+        assert after.group_label == before.group_label
+        assert (after.energy_unit, after.intensity_unit, after.uncertainty_unit) == (
+            "unknown",
+            "counts",
+            "sigma",
+        )
+        for name in (
+            "energy",
+            "intensity",
+            "uncertainty",
+            "invalid_energy_mask",
+            "invalid_intensity_mask",
+            "invalid_uncertainty_mask",
+        ):
+            np.testing.assert_array_equal(getattr(after, name), getattr(before, name))
+            assert not getattr(after, name).flags.writeable
+    with pytest.raises(ValueError, match="units must not be empty"):
+        source.assign_units(
+            energy_unit="", intensity_unit="counts", uncertainty_unit="s"
+        )
+
+
 def test_dataset_grid_identity_is_derived() -> None:
     first = make_spectrum(group_index=0)
     matching = make_spectrum(group_index=1)
