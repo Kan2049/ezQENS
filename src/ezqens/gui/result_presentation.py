@@ -4,8 +4,6 @@ from ezqens.fitting import ComponentIdentity
 from ezqens.gui.scientific_canvas import SCIENTIFIC_LORENTZIAN_COLORS
 from ezqens.workflow import ManualModelState, UnifiedResult
 
-SERIES_ALIAS_NOTE = "Series labels apply to this Result only"
-
 
 def lorentzian_slots(
     result: UnifiedResult | None,

@@ -1955,16 +1955,11 @@ class MainWindow(QMainWindow):
         outcome: SingleQAutoFitOutcome,
     ) -> AutoFitCandidateDialog:
         owner = (project, dataset.workflow_dataset_id)
-        session = self._manual_sessions.get(owner)
-        workspace = (
-            FittingWorkspaceState() if session is None else session.result_workspace
-        )
         dialog = AutoFitCandidateDialog(
             outcome,
             self,
             project=workflow,
             draft=draft,
-            has_active_saved_result=workspace.associated_saved_result is not None,
         )
         dialog.finalization_requested.connect(
             lambda action, selections: self._finalize_auto_fit(
@@ -1989,9 +1984,22 @@ class MainWindow(QMainWindow):
         workspace = (
             FittingWorkspaceState() if session is None else session.result_workspace
         )
-        if action not in {"apply", "save"} or (
-            action == "apply"
-            and (workspace.associated_saved_result is None or len(selections) != 1)
+        if (
+            action not in {"apply", "save"}
+            or (
+                action == "apply"
+                and (
+                    len(selections) != 1
+                    or not isinstance(selections[0], CandidateFitResult)
+                )
+            )
+            or (
+                action == "save"
+                and any(
+                    not isinstance(item, AutoFitCandidateBranchResult)
+                    for item in selections
+                )
+            )
         ):
             return
         names: tuple[str, ...] = ()
@@ -2014,6 +2022,7 @@ class MainWindow(QMainWindow):
             naming = ResultNamesDialog(
                 tuple(defaults),
                 dialog,
+                save_as=False,
             )
             if naming.exec() != QDialog.DialogCode.Accepted:
                 return
@@ -2065,7 +2074,7 @@ class MainWindow(QMainWindow):
                         draft,
                         dialog.outcome,
                         selection,
-                        group_index=self.dataset_view.current_group_index,
+                        group_index=dialog.outcome.group_index,
                     )
                     if not single_adoption.success:
                         raise WorkflowError(single_adoption.diagnostics)
@@ -2110,9 +2119,6 @@ class MainWindow(QMainWindow):
             if load_first:
                 session.execution_by_group.clear()
                 self._activate_manual_session(session)
-            dialog.set_active_saved_result(
-                workspace.associated_saved_result is not None
-            )
             self._refresh_manual_result_actions()
             dialog.accept()
             return
@@ -3624,7 +3630,18 @@ class MainWindow(QMainWindow):
             result_metadata=result_metadata,
             series_slots=slots,
             swap_enabled=display_fit is not None
+            and current_point is not None
+            and current_point.working_state is model
+            and session.display_status(group_index)
+            is ResultDisplayStatus.FITTED_CURRENT
             and not self._fit_all_q_mutation_blocked(),
+            swap_block_reason=(
+                "Fit or revert this Q's changes before swapping"
+                if current_point is not None
+                and current_point.fit_result is not None
+                and current_point.working_state is not model
+                else ""
+            ),
         )
         self._refresh_manual_result_actions()
         if self._active_fit_all_q_generation is None:
@@ -3668,13 +3685,6 @@ class MainWindow(QMainWindow):
             fit_all_q_enabled=self._fit_all_q_available(session),
             running=self._active_fit_all_q_generation is not None,
         )
-        for dialog in self.findChildren(AutoFitCandidateDialog):
-            context = dialog.outcome.scientific_context
-            if (context.project_id, context.sample.dataset_id) == (
-                session.draft.project_id,
-                session.draft.sample_id,
-            ):
-                dialog.set_active_saved_result(associated is not None)
 
     def _result_fit_statuses(
         self,
@@ -3787,13 +3797,14 @@ class MainWindow(QMainWindow):
             tuple(
                 manual_parameter_metadata(
                     point.fit_result.configuration,
-                    energy_unit=dataset.dataset.spectra[index].energy_unit,
-                    intensity_unit=dataset.dataset.spectra[index].intensity_unit,
+                    energy_unit=dataset.dataset.energy_unit,
+                    intensity_unit=dataset.dataset.intensity_unit,
                 )
                 if point.fit_result is not None
                 else ()
-                for index, point in enumerate(derived.source_result.points)
+                for point in derived.source_result.points
             ),
+            energy_unit=dataset.dataset.energy_unit,
         )
 
     def _swap_result_series(
@@ -3818,10 +3829,10 @@ class MainWindow(QMainWindow):
                 working.lorentzian_number(second),
             )
         except WorkflowError as error:
-            self._show_workflow_error("Swap series", error)
+            self._show_workflow_error("Swap positions", error)
             return
         except ValueError as error:
-            show_message_dialog(self, "Swap series", str(error))
+            show_message_dialog(self, "Swap positions", str(error))
             return
         session.result_workspace = state
         session._template = draft

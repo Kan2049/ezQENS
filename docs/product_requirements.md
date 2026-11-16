@@ -543,16 +543,17 @@ per Q and includes every Lorentzian. AutoFit order is adopted as-is from its
 submitted working configuration, not paired with a previous fit or renumbered
 by fitted linewidth. Branch targets follow the anchor's order.
 For a fitted-current Q with two or more Lorentzians, each component menu offers
-`Swap series with Lk`. This invokes the workflow position swap at that Q,
+`Swap position with Lk`. This invokes the workflow position swap at that Q,
 without refitting or changing FitResult evidence, and modifies only the active
 working copy. Other Qs retain their numbers. The GUI performs no correspondence,
 derived-value calculation or cross-Result component matching.
 Number labels/colors in Parameter Viewer, Fitting Parameters, Fitting Info,
-spectrum curves and their tooltips must consume this per-Q mapping. Any display
-details not yet conforming to it remain pending GUI sync; first-appearance
-identity aliases and width-pairing marks are retired requirements. The existing
-`Series labels apply to this Result only` presentation text and tooltip details
-are also subject to that GUI sync.
+spectrum curves/legends and added parameter panels consume this per-Q mapping.
+There is no Result-only series-label hint or width-pairing presentation.
+Swaps require a fitted-current Q; with unfitted draft edits the action is
+disabled with `Fit or revert this Q's changes before swapping`. The viewer
+shows the workflow's position-swap mark. Parameter-panel units come from the
+Dataset's common unit set, never a per-spectrum mixed-unit presentation.
 
 Dataset dots represent readiness, not fit coverage. Result rows show fitted Qs
 out of counted Qs (core total minus core EXCLUDED count), a status breakdown,
@@ -560,21 +561,28 @@ and all/partial/none coverage using semantic colors and text. Cached modified
 copies have a marker. Best is first, then save order; the active entry is
 highlighted, or the Dataset for untitled/fresh analysis.
 
-AutoFit Save accepts one or more checked candidates. An executed selection saves
-its full issued Multi-Q branch; otherwise it saves original anchor evaluation
-evidence. All selections append atomically, without installing their adopted
-Manual drafts or changing existing active work. With no Result or draft edits,
-the first new entry is loaded. A successful Save closes the dialog and updates
-history immediately; a failed Save leaves the dialog open with its error.
-A naming dialog defaults to candidate labels, choosing the first
-free numeric suffix ` (1)`, ` (2)`, etc. only for defaults; user names need only
-be non-empty, not unique.
+The AutoFit dialog has one primary action, disabled with nothing checked.
+Exactly one checked candidate not run across Q shows `Apply`: adopt its original
+anchor evidence and replace only that Q in the active working copy. With no
+Result this creates untitled work; an open untitled item retains other Qs, and
+an open saved entry becomes modified. Apply closes on success.
 
-AutoFit Apply requires an active saved entry (clean or modified) and exactly one
-checked candidate. It adopts that original anchor candidate and replaces only
-its Q in the active entry's working copy, marks it modified, and closes. Cached
-Multi-Q execution does not widen Apply's scope. Recommendation/scientific
-semantics and Method Save behavior remain unchanged.
+One checked candidate run across Q, or multiple checked candidates, shows `Save`.
+If any checked selections have not been run across Q, prompt
+`N selected candidates have not been fit to all Q` with `Fit to all Q`,
+`Discard them and Save`, and `Cancel`. Fit runs the missing selections through
+the existing in-dialog progress workflow, then saves all checked branches;
+cancelled or failed execution saves nothing and leaves the dialog open with
+status. Discard saves only checked branches already run across Q; if none
+remain it saves nothing and reports that. Cancel changes nothing.
+
+Save appends all selected issued branches atomically, without installing their
+adopted drafts or changing the open item. Only raw state auto-opens the first
+new entry. A successful Save closes the dialog and updates history immediately;
+failure leaves it open with its error. Names default to candidate labels with
+the first free suffix ` (1)`, ` (2)`, etc.; user names must be non-empty but need
+not be unique. There is no Save As action in this dialog. Recommendation and
+scientific semantics and Method Save behavior remain unchanged.
 
 The former `.qensfit` project-container proposal is not a permanent contract.
 The final container format and extension remain unresolved until persistence

@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMenu,
+    QMessageBox,
     QProgressBar,
     QPushButton,
     QScrollArea,
@@ -83,6 +84,7 @@ from ezqens.workflow import (
     SelectedAutoFitProgressEvent,
     SingleQAutoFitOutcome,
     WorkflowProject,
+    adopt_single_q_auto_fit_candidate,
     continue_selected_auto_fit_candidates,
 )
 
@@ -100,9 +102,11 @@ type _ComparisonEntry = tuple[CandidateFitResult, FitResult | None, str]
 class ResultNamesDialog(QDialog):
     """Collect one explicit saved name for each selected AutoFit Result."""
 
-    def __init__(self, defaults: tuple[str, ...], parent: QWidget) -> None:
+    def __init__(
+        self, defaults: tuple[str, ...], parent: QWidget, *, save_as: bool = True
+    ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Save Results As")
+        self.setWindowTitle("Save Results As" if save_as else "Save Results")
         self.name_edits = tuple(QLineEdit(name) for name in defaults)
         layout = QVBoxLayout(self)
         for label, edit in zip(defaults, self.name_edits, strict=True):
@@ -115,7 +119,7 @@ class ResultNamesDialog(QDialog):
         buttons.addStretch(1)
         cancel = QPushButton("Cancel")
         cancel.clicked.connect(self.reject)
-        self.save_button = QPushButton("Save As")
+        self.save_button = QPushButton("Save As" if save_as else "Save")
         self.save_button.setDefault(True)
         self.save_button.clicked.connect(self.accept)
         buttons.addWidget(cancel)
@@ -331,7 +335,6 @@ class AutoFitCandidateDialog(QDialog):
         *,
         project: WorkflowProject | None = None,
         draft: ManualFitDraft | None = None,
-        has_active_saved_result: bool = False,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("autoFitDialog")
@@ -342,7 +345,6 @@ class AutoFitCandidateDialog(QDialog):
         self.outcome = outcome
         self._project = project
         self._draft = draft
-        self._has_active_saved_result = has_active_saved_result
         self._candidates = outcome.recommendation.candidate_results
         self._lorentzian_styles_by_candidate = {
             candidate.candidate: self._anchor_lorentzian_styles(candidate)
@@ -395,6 +397,7 @@ class AutoFitCandidateDialog(QDialog):
         self._run_generation = 0
         self._active_run_generation: int | None = None
         self._live_processed_groups: dict[StandardModelCandidate, set[int]] = {}
+        self._save_after_run = False
 
         title = QLabel("AutoFit Candidates")
         title.setObjectName("ezqensDialogTitle")
@@ -595,21 +598,16 @@ class AutoFitCandidateDialog(QDialog):
 
         self.cancel_button = QPushButton("Cancel")
         self.cancel_button.clicked.connect(self._cancel_or_reject)
-        self.use_candidate_button = QPushButton("Apply")
-        self.use_candidate_button.setObjectName("autoFitUseCandidateButton")
-        self.use_candidate_button.setDefault(True)
-        self.use_candidate_button.clicked.connect(
-            lambda: self._request_finalization("apply")
-        )
-        self.save_button = QPushButton("Save")
-        self.save_button.clicked.connect(lambda: self._request_finalization("save"))
+        self.primary_button = QPushButton("Apply")
+        self.primary_button.setObjectName("autoFitPrimaryButton")
+        self.primary_button.setDefault(True)
+        self.primary_button.clicked.connect(self._request_finalization)
         buttons = QHBoxLayout()
         buttons.setContentsMargins(0, 0, 0, 0)
         buttons.setSpacing(6)
         buttons.addStretch(1)
         buttons.addWidget(self.cancel_button)
-        buttons.addWidget(self.use_candidate_button)
-        buttons.addWidget(self.save_button)
+        buttons.addWidget(self.primary_button)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 14, 16, 14)
@@ -816,11 +814,6 @@ class AutoFitCandidateDialog(QDialog):
             )
             item.setSizeHint(row.item_size_hint())
 
-    def set_active_saved_result(self, active: bool) -> None:
-        """Refresh actions after the application changes the active Result."""
-        self._has_active_saved_result = active
-        self._sync_controls()
-
     def _sync_controls(self) -> None:
         checked = self.checked_candidates
         pending = tuple(
@@ -832,18 +825,10 @@ class AutoFitCandidateDialog(QDialog):
         )
         single = len(checked) == 1
         ready = has_execution_context and bool(checked) and not self._running
-        self.use_candidate_button.setVisible(True)
-        self.use_candidate_button.setEnabled(
-            ready and single and self._has_active_saved_result
-        )
-        self.use_candidate_button.setToolTip(
-            "Replace this Q in the active saved Result."
-            if self._has_active_saved_result
-            else "Open a saved Result to Apply one candidate; "
-            "use Save to create new Results."
-        )
-        self.save_button.setVisible(True)
-        self.save_button.setEnabled(ready)
+        self.primary_button.setText("Apply" if single and pending else "Save")
+        self.primary_button.setEnabled(ready)
+        for row, candidate in zip(self._candidate_rows, self._candidates, strict=True):
+            row.checkbox.setEnabled(candidate.success and not self._running)
         executed_checked = sum(
             item.candidate in self._executed_branches for item in checked
         )
@@ -1729,23 +1714,29 @@ class AutoFitCandidateDialog(QDialog):
         figure.subplots_adjust(left=target_left)
         self.preview_canvas.draw_idle()  # type: ignore[no-untyped-call]
 
-    @staticmethod
     def _anchor_lorentzian_styles(
+        self,
         candidate: CandidateFitResult,
     ) -> dict[ComponentIdentity, tuple[str, str]]:
-        fit = candidate.fit
-        if fit is None:
+        if not candidate.success or self._project is None or self._draft is None:
             return {}
-        fitted_model = fit.fitted_model
-        assert fitted_model is not None
+        # Projection only: ask workflow adoption for its ordered working state;
+        # do not number the optimizer's FWHM-canonicalized component list.
+        adoption = adopt_single_q_auto_fit_candidate(
+            self._project, self._draft, self.outcome, candidate
+        )
+        if not adoption.success or adoption.adopted_draft is None:
+            return {}
+        model = adoption.adopted_draft.setup(self.outcome.group_index).model
+        assert model is not None
         return {
-            component.identity: (
-                f"L{index + 1}",
+            identity: (
+                f"L{number}",
                 SCIENTIFIC_LORENTZIAN_COLORS[
-                    min(index, len(SCIENTIFIC_LORENTZIAN_COLORS) - 1)
+                    (number - 1) % len(SCIENTIFIC_LORENTZIAN_COLORS)
                 ],
             )
-            for index, component in enumerate(fitted_model.lorentzians)
+            for identity, number in model.lorentzian_numbers
         }
 
     def _component_style(
@@ -1901,6 +1892,7 @@ class AutoFitCandidateDialog(QDialog):
 
         if not self._running or self._cancel_event is None:
             return False
+        self._save_after_run = False
         self._cancel_event.set()
         self.cancel_button.setText("Cancelling…")
         self.cancel_button.setEnabled(False)
@@ -1956,6 +1948,9 @@ class AutoFitCandidateDialog(QDialog):
 
     @Slot()
     def _execution_thread_finished(self) -> None:
+        cancel_requested = (
+            self._cancel_event is not None and self._cancel_event.is_set()
+        )
         self._running = False
         self._worker = None
         self._worker_thread = None
@@ -1972,10 +1967,19 @@ class AutoFitCandidateDialog(QDialog):
         elif self._run_result is not None:
             self.selection_status_label.setText(
                 "Run cancelled; completed and partial branches were retained."
-                if self._run_result.status is MultiQExecutionStatus.CANCELLED
+                if cancel_requested
+                or self._run_result.status is MultiQExecutionStatus.CANCELLED
                 else "Selected candidates are available across Q."
             )
         self._draw_comparison()
+        save_after_run, self._save_after_run = self._save_after_run, False
+        if (
+            save_after_run
+            and self._run_error is None
+            and self._run_result is not None
+            and self._run_result.status is MultiQExecutionStatus.COMPLETED
+        ):
+            self._save_checked_branches()
 
     def _cancel_or_reject(self) -> None:
         if self._running:
@@ -1983,31 +1987,51 @@ class AutoFitCandidateDialog(QDialog):
         else:
             self.reject()
 
-    def _request_finalization(self, action: str) -> None:
-        button = {
-            "apply": self.use_candidate_button,
-            "save": self.save_button,
-        }[action]
-        if not button.isEnabled() or button.isHidden():
+    def _request_finalization(self) -> None:
+        if not self.primary_button.isEnabled():
             return
-        # Only exact evaluation evidence owns a branch; model labels/codes are
-        # not a scientific correspondence rule.
-        selections = (
-            self.checked_candidates
-            if action == "apply"
-            else tuple(
-                next(
-                    (
-                        branch
-                        for branch in self._executed_branches.values()
-                        if branch.anchor_evidence is candidate
-                    ),
-                    candidate,
-                )
-                for candidate in self.checked_candidates
-            )
+        checked = self.checked_candidates
+        pending = tuple(
+            item for item in checked if item.candidate not in self._executed_branches
         )
-        self.finalization_requested.emit(action, selections)
+        if len(checked) == 1 and pending:
+            self.finalization_requested.emit("apply", checked)
+            return
+        if pending:
+            prompt = QMessageBox(self)
+            prompt.setWindowTitle("Save AutoFit Results")
+            prompt.setText(
+                f"{len(pending)} selected candidates have not been fit to all Q"
+            )
+            run = prompt.addButton("Fit to all Q", QMessageBox.ButtonRole.AcceptRole)
+            discard = prompt.addButton(
+                "Discard them and Save", QMessageBox.ButtonRole.DestructiveRole
+            )
+            prompt.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+            prompt.exec()
+            if prompt.clickedButton() is run:
+                self._save_after_run = True
+                if not self.run_selected_across_q():
+                    self._save_after_run = False
+                return
+            if prompt.clickedButton() is not discard:
+                return
+        self._save_checked_branches()
+
+    def _save_checked_branches(self) -> None:
+        # Only exact evaluation evidence owns a branch, never a display label.
+        branches = tuple(
+            branch
+            for candidate in self.checked_candidates
+            if (branch := self._executed_branches.get(candidate.candidate)) is not None
+            and branch.anchor_evidence is candidate
+        )
+        if not branches:
+            self.selection_status_label.setText(
+                "No selected candidates remain to save."
+            )
+            return
+        self.finalization_requested.emit("save", branches)
 
     def _capture_view_state(self) -> None:
         if self.spectrum_axes is not None:

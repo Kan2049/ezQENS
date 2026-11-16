@@ -54,13 +54,10 @@ from ezqens.fitting import (
     AutoFitRecommendation,
     BackgroundModel,
     CandidateFitResult,
-    ComponentFamily,
-    ComponentIdentity,
     FitResult,
     ManualFitDiagnosticCode,
     ManualFitReadinessDiagnostic,
     ManualParameterIntent,
-    ParameterEstimate,
     ParameterFamily,
     ParameterReference,
     StandardModelCandidate,
@@ -603,298 +600,78 @@ def test_checked_candidates_use_responsive_independent_panels(
     dialog.close()
 
 
-def test_candidate_panels_reuse_function_semantic_colors_and_component_identity(
+def test_candidate_panels_use_adopted_working_numbers_not_fit_order(
     auto_fit_gui_problem: AutoFitGuiProblem,
+    qt_slot_errors: list[BaseException],
 ) -> None:
-    window, _project, _sample, _workflow, _session, outcome, successful = (
+    window, _project, _sample, workflow, session, outcome, successful = (
         auto_fit_gui_problem
     )
-    two_lorentzian = tuple(
-        candidate
-        for candidate in successful
-        if candidate.candidate.lorentzian_count == 2
-        and candidate.candidate.background is not BackgroundModel.NONE
+    selected = tuple(
+        item
+        for item in successful
+        if item.candidate.lorentzian_count == 2
+        and item.candidate.background is not BackgroundModel.NONE
     )
-    assert len(two_lorentzian) >= 2
-    selected = two_lorentzian[:2]
-    dialog = AutoFitCandidateDialog(outcome, window)
+    dialog = AutoFitCandidateDialog(
+        outcome, window, project=workflow, draft=session.draft
+    )
     _select_only(dialog, selected)
-
     for candidate in selected:
-        assert candidate.fit is not None
-        axes = dialog.spectrum_axes_by_candidate[candidate.candidate]
-        colors = {str(line.get_label()): line.get_color() for line in axes.lines}
-        assert colors["Total fit"] == SCIENTIFIC_TOTAL_FIT_COLOR
-        assert colors["Elastic"] == SCIENTIFIC_ELASTIC_COLOR
-        assert colors["L1"] == SCIENTIFIC_LORENTZIAN_COLORS[0]
-        assert colors["L2"] == SCIENTIFIC_LORENTZIAN_COLORS[1]
-        assert colors["Background"] == SCIENTIFIC_BACKGROUND_COLOR
-        residual_axes = dialog.residual_axes_by_candidate[candidate.candidate]
-        residual = next(
-            line for line in residual_axes.lines if line.get_label() == "Std. residual"
+        adoption = adopt_single_q_auto_fit_candidate(
+            workflow, session.draft, outcome, candidate
         )
-        assert residual.get_color() == SCIENTIFIC_RESIDUAL_COLOR
-
-    evidence = selected[0]
-    assert evidence.fit is not None
-    anchor_identities = tuple(
-        component.identity for component in evidence.fit.configuration.lorentzians
-    )
-    identity_a, identity_b = anchor_identities
-    fitted_model = evidence.fit.fitted_model
-    assert fitted_model is not None
-    for index, component in enumerate(fitted_model.lorentzians):
-        assert dialog._component_style(evidence.candidate, component.identity) == (
-            f"L{index + 1}",
-            SCIENTIFIC_LORENTZIAN_COLORS[index],
-        )
-    fitted_by_identity = {
-        component.identity: component for component in fitted_model.lorentzians
-    }
-    narrow_fwhm, wide_fwhm = sorted(
-        (component.fwhm for component in fitted_model.lorentzians),
-        key=lambda configuration: configuration.initial_value,
-    )
-    anchor_a = replace(fitted_by_identity[identity_a], fwhm=wide_fwhm)
-    anchor_b = replace(fitted_by_identity[identity_b], fwhm=narrow_fwhm)
-    target_a = replace(fitted_by_identity[identity_a], fwhm=narrow_fwhm)
-    target_b = replace(fitted_by_identity[identity_b], fwhm=wide_fwhm)
-
-    def parameters_with_fwhm(
-        fit: FitResult,
-        values: dict[ComponentIdentity, float],
-    ) -> tuple[ParameterEstimate, ...]:
-        return tuple(
-            replace(
-                parameter,
-                value=next(
-                    (
-                        value
-                        for identity, value in values.items()
-                        if ParameterReference(identity, ParameterFamily.FWHM)
-                        in parameter.references
-                    ),
-                    parameter.value,
-                ),
-            )
-            for parameter in fit.parameters
-        )
-
-    anchor_fit = replace(
-        evidence.fit,
-        parameters=parameters_with_fwhm(
-            evidence.fit,
-            {
-                identity_a: anchor_a.fwhm.initial_value,
-                identity_b: anchor_b.fwhm.initial_value,
-            },
-        ),
-        fitted_model=replace(fitted_model, lorentzians=(anchor_b, anchor_a)),
-    )
-    target_curves = tuple(
-        sorted(
-            evidence.fit.evaluation.component_curves,
-            key=lambda curve: (
-                curve.component.family is not ComponentFamily.ELASTIC,
-                0
-                if curve.component == identity_b
-                else 1
-                if curve.component == identity_a
-                else 2,
-            ),
-        )
-    )
-    target_fit = replace(
-        evidence.fit,
-        parameters=parameters_with_fwhm(
-            evidence.fit,
-            {
-                identity_a: target_a.fwhm.initial_value,
-                identity_b: target_b.fwhm.initial_value,
-            },
-        ),
-        fitted_model=replace(fitted_model, lorentzians=(target_a, target_b)),
-        evaluation=replace(
-            evidence.fit.evaluation,
-            component_curves=target_curves,
-        ),
-    )
-    anchor_fitted_model = anchor_fit.fitted_model
-    target_fitted_model = target_fit.fitted_model
-    assert anchor_fitted_model is not None
-    assert target_fitted_model is not None
-    assert tuple(
-        component.identity for component in anchor_fit.configuration.lorentzians
-    ) == (identity_a, identity_b)
-    assert tuple(
-        component.identity for component in anchor_fitted_model.lorentzians
-    ) == (identity_b, identity_a)
-    assert tuple(
-        component.identity for component in target_fitted_model.lorentzians
-    ) == (identity_a, identity_b)
-    assert anchor_b.fwhm.initial_value < anchor_a.fwhm.initial_value
-    assert target_a.fwhm.initial_value < target_b.fwhm.initial_value
-
-    branch_evidence = replace(evidence, fit=anchor_fit)
-    candidate_index = dialog._candidates.index(evidence)
-    candidates = list(dialog._candidates)
-    candidates[candidate_index] = branch_evidence
-    dialog._candidates = tuple(candidates)
-    dialog._lorentzian_styles_by_candidate[evidence.candidate] = (
-        dialog._anchor_lorentzian_styles(branch_evidence)
-    )
-    assert dialog._lorentzian_styles_by_candidate[evidence.candidate] == {
-        identity_b: ("L1", SCIENTIFIC_LORENTZIAN_COLORS[0]),
-        identity_a: ("L2", SCIENTIFIC_LORENTZIAN_COLORS[1]),
-    }
-    binding = anchor_fit.context_binding
-    assert binding is not None
-    q_bins = binding.selection.dataset.q_bins
-    assert q_bins is not None
-    outcomes: list[MultiQFitOutcome] = []
-    for group_index in range(10):
-        fit = target_fit if group_index == 1 else anchor_fit
-        if group_index != 0:
-            spectrum = binding.selection.dataset.spectra[group_index]
-            fit = replace(
-                fit,
-                provenance=replace(
-                    fit.provenance,
-                    group_index=group_index,
-                    group_label=spectrum.group_label,
-                    q_value=float(q_bins.q_values[group_index]),
-                ),
-                context_binding=replace(binding, group_index=group_index),
-            )
-        outcomes.append(MultiQFitOutcome(group_index, MultiQFitStatus.SUCCESS, fit))
-    branch = _fixture_branch(
-        branch_evidence,
-        MultiQBranchResult(0, MultiQExecutionStatus.COMPLETED, tuple(outcomes)),
-    )
-    dialog._executed_branches[evidence.candidate] = branch
-    _select_only(dialog, (branch_evidence,))
-
-    def assert_component_styles(group_index: int) -> None:
-        assert dialog.set_current_group(group_index) or dialog.current_group_index == 0
-        axes = dialog.spectrum_axes_by_candidate[evidence.candidate]
-        fit = anchor_fit if group_index == 0 else target_fit
-        curves = {
-            curve.component: curve.values
-            for curve in fit.evaluation.component_curves
-            if curve.component.family is ComponentFamily.LORENTZIAN
+        assert adoption.adopted_draft is not None
+        model = adoption.adopted_draft.setup(outcome.group_index).model
+        assert model is not None
+        expected = {
+            identity: (f"L{number}", SCIENTIFIC_LORENTZIAN_COLORS[number - 1])
+            for identity, number in model.lorentzian_numbers
         }
-        for identity, label, color in (
-            (identity_b, "L1", SCIENTIFIC_LORENTZIAN_COLORS[0]),
-            (identity_a, "L2", SCIENTIFIC_LORENTZIAN_COLORS[1]),
-        ):
+        assert dialog._lorentzian_styles_by_candidate[candidate.candidate] == expected
+        assert candidate.fit is not None
+        dialog._executed_branches[candidate.candidate] = _candidate_branch(
+            candidate, 10
+        )
+        for group in (0, 1, 0):
+            dialog.set_current_group(group)
+            axes = dialog.spectrum_axes_by_candidate[candidate.candidate]
+            for identity, (label, color) in expected.items():
+                line = next(line for line in axes.lines if line.get_label() == label)
+                assert line.get_color() == color
+                np.testing.assert_array_equal(
+                    line.get_ydata(), candidate.fit.evaluation.component_curve(identity)
+                )
+            colors = {str(line.get_label()): line.get_color() for line in axes.lines}
+            assert colors["Total fit"] == SCIENTIFIC_TOTAL_FIT_COLOR
+            assert colors["Elastic"] == SCIENTIFIC_ELASTIC_COLOR
+            assert colors["Background"] == SCIENTIFIC_BACKGROUND_COLOR
+        dialog.fwhm_view_button.setChecked(True)
+        axes = dialog.fwhm_axes_by_candidate[candidate.candidate]
+        for identity, (label, color) in expected.items():
             line = next(line for line in axes.lines if line.get_label() == label)
             assert line.get_color() == color
-            np.testing.assert_array_equal(line.get_ydata(), curves[identity])
-
-    assert_component_styles(0)
-    assert_component_styles(1)
-    assert_component_styles(0)
-
-    dialog.fwhm_view_button.setChecked(True)
-    fwhm_axes = dialog.fwhm_axes_by_candidate[evidence.candidate]
-    l1_line = next(line for line in fwhm_axes.lines if line.get_label() == "L1")
-    l2_line = next(line for line in fwhm_axes.lines if line.get_label() == "L2")
-    assert l1_line.get_color() == SCIENTIFIC_LORENTZIAN_COLORS[0]
-    assert l2_line.get_color() == SCIENTIFIC_LORENTZIAN_COLORS[1]
-    assert np.asarray(l1_line.get_ydata())[:2] == pytest.approx(
-        (anchor_b.fwhm.initial_value, target_b.fwhm.initial_value)
-    )
-    assert np.asarray(l2_line.get_ydata())[:2] == pytest.approx(
-        (anchor_a.fwhm.initial_value, target_a.fwhm.initial_value)
-    )
-
-    one_lorentzian = next(
-        candidate
-        for candidate in successful
-        if candidate.candidate.lorentzian_count == 1
-    )
-    assert one_lorentzian.fit is not None
-    one_identity = one_lorentzian.fit.configuration.lorentzians[0].identity
-    assert dialog._component_style(one_lorentzian.candidate, one_identity) == (
-        "L1",
-        SCIENTIFIC_LORENTZIAN_COLORS[0],
-    )
-
-    other_branch = selected[1]
-    assert other_branch.fit is not None
-    other_identity = other_branch.fit.configuration.lorentzians[0].identity
-    assert dialog._component_style(other_branch.candidate, other_identity) == (
-        "L1",
-        SCIENTIFIC_LORENTZIAN_COLORS[0],
-    )
-    assert (
-        dialog._lorentzian_styles_by_candidate[evidence.candidate]
-        is not dialog._lorentzian_styles_by_candidate[other_branch.candidate]
-    )
-    assert dialog._lorentzian_styles_by_candidate[evidence.candidate] == (
-        dialog._anchor_lorentzian_styles(branch_evidence)
-    )
-    assert dialog._lorentzian_styles_by_candidate[other_branch.candidate] == (
-        dialog._anchor_lorentzian_styles(other_branch)
-    )
+            estimate = candidate.fit.parameter_by_reference(
+                ParameterReference(identity, ParameterFamily.FWHM)
+            )
+            np.testing.assert_array_equal(line.get_ydata(), np.full(10, estimate.value))
     dialog.close()
+    assert not qt_slot_errors
 
 
-def test_two_lorentzian_candidate_families_use_independent_anchor_fitted_order(
+def test_candidate_number_projection_rejects_substituted_evidence(
     auto_fit_gui_problem: AutoFitGuiProblem,
 ) -> None:
-    window, _project, _sample, _workflow, _session, outcome, successful = (
+    window, _project, _sample, workflow, session, outcome, successful = (
         auto_fit_gui_problem
     )
-    dialog = AutoFitCandidateDialog(outcome, window)
-    for background, narrow_configuration_index in (
-        (BackgroundModel.NONE, 1),
-        (BackgroundModel.CONSTANT, 0),
-        (BackgroundModel.LINEAR, 1),
-    ):
-        evidence = next(
-            item
-            for item in successful
-            if item.candidate.lorentzian_count == 2
-            and item.candidate.background is background
-        )
-        fit = evidence.fit
-        assert fit is not None and fit.fitted_model is not None
-        actual_anchor_order = tuple(
-            component.identity for component in fit.fitted_model.lorentzians
-        )
-        assert dialog._lorentzian_styles_by_candidate[evidence.candidate] == {
-            identity: (f"L{index + 1}", SCIENTIFIC_LORENTZIAN_COLORS[index])
-            for index, identity in enumerate(actual_anchor_order)
-        }
-
-        submitted = tuple(
-            component.identity for component in fit.configuration.lorentzians
-        )
-        narrow_identity = submitted[narrow_configuration_index]
-        broad_identity = submitted[1 - narrow_configuration_index]
-        fitted_by_identity = {
-            component.identity: component for component in fit.fitted_model.lorentzians
-        }
-        narrow_fwhm, broad_fwhm = sorted(
-            (component.fwhm for component in fit.fitted_model.lorentzians),
-            key=lambda item: item.initial_value,
-        )
-        synthetic_fitted = replace(
-            fit.fitted_model,
-            lorentzians=(
-                replace(fitted_by_identity[narrow_identity], fwhm=narrow_fwhm),
-                replace(fitted_by_identity[broad_identity], fwhm=broad_fwhm),
-            ),
-        )
-        synthetic_anchor = replace(
-            evidence,
-            fit=replace(fit, fitted_model=synthetic_fitted),
-        )
-        assert dialog._anchor_lorentzian_styles(synthetic_anchor) == {
-            narrow_identity: ("L1", SCIENTIFIC_LORENTZIAN_COLORS[0]),
-            broad_identity: ("L2", SCIENTIFIC_LORENTZIAN_COLORS[1]),
-        }
+    dialog = AutoFitCandidateDialog(
+        outcome, window, project=workflow, draft=session.draft
+    )
+    evidence = next(item for item in successful if item.candidate.lorentzian_count == 2)
+    assert evidence.fit is not None
+    foreign = replace(evidence, fit=replace(evidence.fit))
+    assert dialog._anchor_lorentzian_styles(foreign) == {}
     dialog.close()
 
 
@@ -977,8 +754,8 @@ def test_executed_candidate_panels_consume_derived_api_and_reuse_cached_views(
         draft=session.draft,
     )
     _select_only(dialog, selected)
-    assert not dialog.use_candidate_button.isEnabled()
-    assert dialog.save_button.isEnabled()
+    assert dialog.primary_button.text() == "Save"
+    assert dialog.primary_button.isEnabled()
     assert not dialog.fwhm_axes_by_candidate
     assert not dialog.eisf_axes_by_candidate
     assert dialog.fwhm_view_button.isHidden()
@@ -988,8 +765,8 @@ def test_executed_candidate_panels_consume_derived_api_and_reuse_cached_views(
     dialog._sync_controls()
     dialog._draw_comparison()
 
-    assert dialog.save_button.isEnabled()
-    assert "saved Result" in dialog.use_candidate_button.toolTip()
+    assert dialog.primary_button.isEnabled()
+    assert dialog.primary_button.text() == "Save"
     assert not dialog.fwhm_view_button.isChecked()
     assert not dialog.eisf_view_button.isChecked()
     assert not dialog.fwhm_view_button.isHidden()
@@ -1196,12 +973,12 @@ def test_executed_candidate_panels_consume_derived_api_and_reuse_cached_views(
     active_before_check = dialog.focused_candidate
     assert dialog.set_candidate_checked(unexecuted_row, True)
     assert dialog.focused_candidate is active_before_check
-    assert not dialog.use_candidate_button.isEnabled()
-    assert dialog.save_button.isEnabled()
+    assert dialog.primary_button.text() == "Save"
+    assert dialog.primary_button.isEnabled()
     assert unexecuted.candidate not in dialog.fwhm_axes_by_candidate
     assert unexecuted.candidate not in dialog.eisf_axes_by_candidate
     assert dialog.set_candidate_checked(unexecuted_row, False)
-    assert dialog.save_button.isEnabled()
+    assert dialog.primary_button.isEnabled()
 
     cached_derived = dict(dialog._derived_results)
     dialog.fwhm_view_button.setChecked(False)
@@ -1969,7 +1746,9 @@ def test_nonmonotonic_physical_q_display_preserves_missing_interior_gap(
     derived = derive_qens(branch, q_bins)
     source_order = tuple(point.q_value for point in derived.points)
     assert source_order == (0.5, 1.5, 1.0)
-    dialog = AutoFitCandidateDialog(outcome, window)
+    dialog = AutoFitCandidateDialog(
+        outcome, window, project=_workflow, draft=_session.draft
+    )
     figure = dialog.preview_canvas.figure
     figure.clear()
     fwhm_axes, eisf_axes = figure.subplots(2, 1)
@@ -2590,11 +2369,11 @@ def test_selected_candidates_run_in_background_cache_and_navigate_together(
     assert dialog.progress_label.text() == "Calculated groups: 31 / 40"
     assert "1 not run" in dialog.selection_status_label.text()
     assert dialog.run_selected_button.isEnabled()
-    assert not dialog.use_candidate_button.isEnabled()
+    assert dialog.primary_button.text() == "Save"
     assert dialog.set_candidate_checked(not_run_row, False)
     assert dialog.progress_label.text() == "Calculated groups: 30 / 30"
-    assert dialog.save_button.text() == "Save"
-    assert dialog.save_button.isEnabled()
+    assert dialog.primary_button.text() == "Save"
+    assert dialog.primary_button.isEnabled()
     assert tuple(item.candidate for item in dialog.executed_branches) == expected_order
     dialog.reject()
 
@@ -2691,7 +2470,7 @@ def test_selected_candidate_cancel_uses_core_contract_and_keeps_prefix(
     assert (
         dialog._candidate_rows[partial_row].status_dot.toolTip() == "Partial Q coverage"
     )
-    assert not dialog.use_candidate_button.isEnabled()
+    assert dialog.primary_button.text() == "Save"
     dialog.reject()
 
 
@@ -3109,7 +2888,7 @@ def test_autofit_dialog_preview_and_explicit_adoption_are_group_local(
         project, first, workflow, first_session.draft, outcome
     )
     _select_only(adoption_dialog, (chosen,))
-    adoption_dialog.use_candidate_button.click()
+    adoption_dialog.primary_button.click()
     current_result = first_session.result_workspace.current_result
     assert current_result is not None
     adopted_fit = current_result.point(0).fit_result

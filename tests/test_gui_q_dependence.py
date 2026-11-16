@@ -34,7 +34,6 @@ from ezqens.fitting import (
 )
 from ezqens.gui.q_dependence import ParameterViewer
 from ezqens.gui.result_presentation import (
-    SERIES_ALIAS_NOTE,
     lorentzian_slots,
     series_color,
 )
@@ -286,8 +285,9 @@ def test_swap_uses_workflow_and_updates_all_identity_projections(
     )
     menu = button.menu()
     assert menu is not None
+    assert menu.toolTipsVisible()
     action = next(
-        action for action in menu.actions() if action.text() == "Swap series with L2"
+        action for action in menu.actions() if action.text() == "Swap position with L2"
     )
     assert action.isEnabled()
     assert button.palette().color(QPalette.ColorRole.ButtonText).name() == series_color(
@@ -305,6 +305,7 @@ def test_swap_uses_workflow_and_updates_all_identity_projections(
         before_fit.evaluation.component_curve(first),
         after_fit.evaluation.component_curve(first),
     )
+    assert after_fit is before_fit
     assert lorentzian_slots(current, group_index=1) == view.slots
     for ref, widgets in window.manual_fit_editor._result_rows.items():
         if ref.component in view.slots:
@@ -317,6 +318,13 @@ def test_swap_uses_workflow_and_updates_all_identity_projections(
         label = str(line.get_label())
         if label in {"L1", "L2"}:
             assert line.get_color() == series_color(int(label[1:]) - 1)
+            identity = dict(
+                (number, component)
+                for component, number in (current.point(1).lorentzian_numbers)
+            )[int(label[1:])]
+            np.testing.assert_array_equal(
+                line.get_ydata(), after_fit.evaluation.component_curve(identity)
+            )
     window._revert_saved_result(
         project, sample, session.result_workspace.saved_results[0]
     )
@@ -449,7 +457,7 @@ def test_failed_outcomes_are_gaps_and_unfitted_swap_is_disabled(
         and button.isVisibleTo(window.manual_fit_editor)
         and button.menu() is not None
         for action in button.menu().actions()
-        if "Swap series" in action.text()
+        if "Swap position" in action.text()
     ]
     assert len(actions) == 2 and all(not action.isEnabled() for action in actions)
     assert view.derived is None
@@ -698,10 +706,10 @@ def test_context_menu_scales_and_reset_preserve_other_panel_views(
     assert view.axes["eisf"].get_ylim() == (-0.5, 1.5)
 
 
-def test_marks_warning_ticks_and_alias_are_visible(fitted: Problem) -> None:
+def test_marks_warning_ticks_visible_without_alias_hint(fitted: Problem) -> None:
     window, _project, _sample, session = fitted
     view = _view(fitted)
-    assert view.alias_note.text() == SERIES_ALIAS_NOTE and view.alias_note.isVisible()
+    assert not hasattr(view, "alias_note")
     model = session.draft.setup(1).model
     assert model is not None
     window.dataset_view.set_current_group(1)
@@ -712,17 +720,33 @@ def test_marks_warning_ticks_and_alias_are_visible(fitted: Problem) -> None:
         legend = axes.get_legend()
         assert legend is not None
         labels = [label.get_text() for label in legend.get_texts()]
-        assert "User swap" in labels and "Derived warning" in labels
+        assert "Position swap" in labels and "Derived warning" in labels
         assert "Uncertainty unavailable" in labels
     for button in window.manual_fit_editor.findChildren(QToolButton):
         if button.objectName() == "manualComponentRowLabel":
-            assert button.toolTip() == SERIES_ALIAS_NOTE
+            assert not button.toolTip()
     for ref, widgets in window.manual_fit_editor._result_rows.items():
         if ref.component in view.slots:
-            assert SERIES_ALIAS_NOTE in widgets.name.toolTip()
+            assert "Series labels" not in widgets.name.toolTip()
     ref = ParameterReference(model.lorentzians[0].identity, ParameterFamily.FWHM)
     window._update_manual_parameter(
         ref, ManualParameterEdit(0.5, None, None, False, False)
+    )
+    QApplication.processEvents()
+    visible = [
+        action
+        for button in window.manual_fit_editor.findChildren(QToolButton)
+        if button.objectName() == "manualComponentRowLabel"
+        and button.isVisibleTo(window.manual_fit_editor)
+        and button.menu() is not None
+        for action in button.menu().actions()
+        if action.text().startswith("Swap position")
+    ]
+    assert len(visible) == 2
+    assert all(not action.isEnabled() for action in visible)
+    assert all(
+        action.toolTip() == ("Fit or revert this Q's changes before swapping")
+        for action in visible
     )
     view.canvas.draw()  # type: ignore[no-untyped-call]
     for _panel, axes in view.axes.items():
@@ -829,7 +853,86 @@ def test_adoption_has_no_obsolete_width_pairing_marks(
             text.get_text() for text in legend.get_texts()
         ]
     assert "paired by width" not in view.hits[0][4]
+    model = state.session.draft.setup(0).model
+    assert model is not None
+    core = dict(model.lorentzian_numbers)
+    assert state.window.dataset_view.series_slots == {
+        identity: number - 1 for identity, number in core.items()
+    }
+    for ref, row in state.window.manual_fit_editor.result_parameter_rows.items():
+        if ref.component in core:
+            assert row.name.text().startswith(f"L{core[ref.component]} ")
+            assert row.name.property("lorentzianSeries") == str(core[ref.component] - 1)
     assert not qt_slot_errors
+
+
+def test_delete_compacts_only_this_q_in_all_views_and_parameter_series(
+    fitted: Problem, qt_slot_errors: list[BaseException]
+) -> None:
+    window, _project, _sample, session = fitted
+    original = session.draft.setup(0).model
+    other = session.draft.setup(1).model
+    assert original is not None and other is not None
+    first, second = (component.identity for component in original.lorentzians)
+    view = _view(fitted)
+    window._remove_manual_component(first)
+    model = session.draft.setup(0).model
+    assert model is not None and model.lorentzian_numbers == ((second, 1),)
+    assert session.draft.setup(1).model is other
+    window._run_manual_fit()
+    assert session.display_status(0) is ResultDisplayStatus.FITTED_CURRENT
+    QApplication.processEvents()
+    assert window.dataset_view.series_slots == {second: 0}
+    buttons = [
+        button
+        for button in window.manual_fit_editor.findChildren(QToolButton)
+        if button.objectName() == "manualComponentRowLabel"
+        and button.isVisibleTo(window.manual_fit_editor)
+    ]
+    assert [button.text() for button in buttons] == ["L1"]
+    assert buttons[0].property("lorentzianSeries") == "0"
+    for ref, row in window.manual_fit_editor.result_parameter_rows.items():
+        if ref.component == second:
+            assert row.name.text().startswith("L1 ")
+    assert window.dataset_view.spectrum_axes is not None
+    curve = next(
+        line
+        for line in window.dataset_view.spectrum_axes.lines
+        if line.get_label() == "L1"
+    )
+    fit = window._manual_fit_result
+    assert fit is not None and curve.get_color() == series_color(0)
+    np.testing.assert_array_equal(
+        curve.get_ydata(), fit.evaluation.component_curve(second)
+    )
+    assert view.derived is not None
+    assert view.derived.lorentzian_series(2)[0] is None
+    assert view._parameter_items["L1 Area"][0].component == second
+    assert view._parameter_items["L1 Area"][1].component == first
+    for name, number in (("L1 Area", 1), ("L2 Area", 2)):
+        _add_panel(view, name)
+        assert view.axes[name].yaxis.label.get_color() == series_color(number - 1)
+    window.dataset_view.set_current_group(1)
+    assert window.dataset_view.series_slots == {
+        identity: number - 1 for identity, number in other.lorentzian_numbers
+    }
+    assert not qt_slot_errors
+
+
+def test_parameter_viewer_units_use_dataset_unit_set(
+    fitted: Problem, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    window, _project, sample, _session = fitted
+    # A read-seam regression: no view may pick a representative Spectrum's units.
+    monkeypatch.setattr(
+        ReducedDataset, "intensity_unit", property(lambda _self: "counts")
+    )
+    view = _view(fitted)
+    _add_panel(view, "L1 Area")
+    _add_panel(view, "Background Offset")
+    assert view.axes["L1 Area"].get_ylabel() == "L1 Area (counts·meV)"
+    assert view.axes["Background Offset"].get_ylabel() == "Background Offset (counts)"
+    assert sample.dataset.intensity_unit == "counts"
 
 
 def test_result_without_lorentzians_has_unavailable_ticks_not_values(

@@ -27,7 +27,7 @@ from ezqens.fitting import (
     ParameterFamily,
     ParameterMetadata,
 )
-from ezqens.gui.result_presentation import SERIES_ALIAS_NOTE, series_color
+from ezqens.gui.result_presentation import series_color
 from ezqens.gui.scientific_canvas import (
     SCIENTIFIC_BACKGROUND_COLOR,
     SCIENTIFIC_ELASTIC_COLOR,
@@ -70,20 +70,18 @@ class ParameterViewer(QDialog):
         self.add_button.setMenu(self.add_menu)
         self.controls.addWidget(self.add_button)
         self.controls.addStretch()
-        self.alias_note = QLabel(SERIES_ALIAS_NOTE)
-        self.alias_note.setProperty("secondary", True)
         self.message = QLabel("No Result open")
         self.canvas = ScientificCanvas()
         self._panel_minimum_width = self.canvas.minimumWidth()
         layout = QVBoxLayout(self)
         layout.addLayout(self.controls)
-        layout.addWidget(self.alias_note)
         layout.addWidget(self.message)
         layout.addWidget(self.canvas, 1)
         self.derived: DerivedUnifiedQENSResult | None = None
         self.slots: dict[ComponentIdentity, int] = {}
         self.statuses: tuple[ResultDisplayStatus | None, ...] = ()
         self.current_group = 0
+        self.energy_unit = "meV"
         self.axes: dict[str, Axes] = {}
         self.markers: dict[str, Line2D] = {}
         self.hits: list[tuple[Axes, int, float, float, str]] = []
@@ -109,33 +107,25 @@ class ParameterViewer(QDialog):
     def _panels_changed(self) -> None:
         self._draw()
 
-    def _component_name(
-        self, identity: ComponentIdentity, group: int | None = None
-    ) -> str:
+    def _component_name(self, identity: ComponentIdentity, group: int) -> str:
         if identity == ELASTIC_COMPONENT:
             return "δ"
         if identity == BACKGROUND_COMPONENT:
             return "Background"
         return f"L{self._component_number(identity, group)}"
 
-    def _component_number(
-        self, identity: ComponentIdentity, group: int | None = None
-    ) -> int:
-        if self.derived is not None:
-            points = self.derived.source_result.points
-            candidates = points if group is None else (points[group],)
-            for point in candidates:
-                for component, number in point.lorentzian_numbers:
-                    if component == identity:
-                        return number
-        return self.slots[identity] + 1
+    def _component_number(self, identity: ComponentIdentity, group: int) -> int:
+        assert self.derived is not None
+        return dict(self.derived.source_result.point(group).lorentzian_numbers)[
+            identity
+        ]
 
-    def _parameter_color(self, metadata: ParameterMetadata) -> str:
+    def _parameter_color(self, metadata: ParameterMetadata, group: int) -> str:
         if metadata.component == ELASTIC_COMPONENT:
             return SCIENTIFIC_ELASTIC_COLOR
         if metadata.component == BACKGROUND_COMPONENT:
             return SCIENTIFIC_BACKGROUND_COLOR
-        return series_color(self._component_number(metadata.component) - 1)
+        return series_color(self._component_number(metadata.component, group) - 1)
 
     def _populate_add_menu(self) -> None:
         self.add_menu.clear()
@@ -190,8 +180,11 @@ class ParameterViewer(QDialog):
         group: int,
         title: str,
         parameter_metadata: tuple[tuple[ParameterMetadata, ...], ...] = (),
+        *,
+        energy_unit: str = "meV",
     ) -> None:
         self.derived, self.slots, self.statuses = derived, slots, statuses
+        self.energy_unit = energy_unit
         self.current_group = group
         self.set_title(title)
         self._parameter_items = {}
@@ -283,20 +276,29 @@ class ParameterViewer(QDialog):
                 if panel in self._parameter_items
                 else None
             )
+            parameter_group = (
+                next(iter(self._parameter_items[panel])) if metadata is not None else 0
+            )
             axes.set_ylabel(
                 f"{panel} ({metadata.unit})"
                 if metadata is not None
-                else {"fwhm": "FWHM (meV)", "tau": "τ (ps)", "eisf": "EISF"}[panel]
+                else {
+                    "fwhm": f"FWHM ({self.energy_unit})",
+                    "tau": "τ (ps)",
+                    "eisf": "EISF",
+                }[panel]
             )
             if metadata is not None:
-                axes.yaxis.label.set_color(self._parameter_color(metadata))
+                axes.yaxis.label.set_color(
+                    self._parameter_color(metadata, parameter_group)
+                )
             axes.set_yscale(self.scales[panel])
             if index + columns >= len(panels):
                 axes.set_xlabel("Q (Å⁻¹)")
             else:
                 axes.tick_params(labelbottom=False)
             entries = (
-                [(None, panel, self._parameter_color(metadata))]
+                [(None, panel, self._parameter_color(metadata, parameter_group))]
                 if metadata is not None
                 else [(None, "EISF", SCIENTIFIC_ELASTIC_COLOR)]
                 if panel == "eisf"
@@ -411,7 +413,7 @@ class ParameterViewer(QDialog):
                     marker = "o"
                     if NumberingMark.POSITION_SWAP in marks:
                         marker = "^"
-                        explanations["User swap"] = marker
+                        explanations["Position swap"] = marker
                     text = f"{label}: {value:.6g}" + (
                         f" ± {error:.6g}"
                         if error is not None

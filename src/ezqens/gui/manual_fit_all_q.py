@@ -63,11 +63,7 @@ def _component_slot(model: ManualModelState, identity: ComponentIdentity) -> str
         return "Elastic"
     if identity == BACKGROUND_COMPONENT:
         return "Background"
-    return next(
-        f"L{index}"
-        for index, component in enumerate(model.lorentzians, start=1)
-        if component.identity == identity
-    )
+    return f"L{model.lorentzian_number(identity)}"
 
 
 def semantic_parameter_slot(
