@@ -801,8 +801,7 @@ class MainWindow(QMainWindow):
 
         analysis_menu = menu_bar.addMenu("&Analysis")
         assert analysis_menu is not None
-        analysis_menu.addAction(self.q_rebin_action)
-        analysis_menu.addSeparator()
+        # Q Rebin is hidden for v1.0; re-enable with the resolution energy cut in v1.1.
         analysis_menu.addAction(self.edit_mask_action)
         analysis_menu.addAction(self.auto_fit_action)
         analysis_menu.addAction(self.manual_fit_action)
