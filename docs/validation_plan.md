@@ -10,9 +10,7 @@ never be altered merely to make tests pass.
 This plan covers the v1.0 reduced-data path through scientific export,
 lightweight reproducibility, the guided GUI, and macOS/Windows packaging. Raw
 detector reduction, automatic molecular/structure-driven inference, and other
-v1.0 non-goals are excluded. Validation for a selected temporal or spatial
-dynamics model becomes active only if the owner promotes that concrete model;
-no catalogue is assumed.
+v1.0 non-goals are excluded. Temporal and spatial dynamics models are outside v1.0.
 
 ## 2. Validation principles
 
@@ -510,8 +508,8 @@ Fit`. Test analogous Method Save versus Save as New Method behavior.
 
 ## 8. Later dynamics-model validation — provisional
 
-The owner may schedule a concrete temporal or spatial dynamics model before or
-after v1.0. Its numerical validation is blocked until the scientific owner
+The owner may schedule a concrete temporal or spatial dynamics model after
+v1.0. Its numerical validation is blocked until the scientific owner
 approves its equations, parameter definitions, applicability, diagnostics, and
 independent reference cases. Tests must cover analytic limits, recovery,
 parameter validity, uncertainty, residual structure, and cautious
@@ -535,9 +533,11 @@ For that later structure-driven workflow:
 
 ## 9. Lightweight reproducibility and future persistence
 
-Before v1.0 release, verify that exported reproducibility information identifies
-inputs, selections and masks, model and fit settings, results, warnings, and
-software version without requiring a complex container.
+v1.0 has no project save or reopen. Verify that its durable data and parameter
+exports carry a short metadata header with software version, export time, input
+file names, Result name, units, and per-Q Q value, fit status, and warnings.
+Verify the fitting mask in the data export's used-in-fit column and confirm
+that Methods and fit settings (bounds, Fixed state, ties) are not exported.
 
 The remaining validation is provisional post-v1.0 and begins only if a
 project-container design is approved. Its format and extension are unresolved;
@@ -668,15 +668,15 @@ active-context-bound anchor `FitResult` enters the executor.
 
 ### Gate E: ezQENS v1.0 public release
 
-Gates A–D plus guided GUI delegation to the core, useful export, lightweight
-reproducibility, user/scientific documentation, representative external-user
-validation, and supported macOS/Windows packages.
+Gates A–D plus guided GUI delegation to the core, durable data and parameter
+exports meeting §9, user/scientific documentation, representative external-user
+validation, and supported macOS/Windows packages. Project save/reopen and
+dynamics models are not v1.0 gates.
 
 ### Gate F: later capabilities — provisional
 
-Any selected dynamics analysis requires approved equations and independent
-references and gates v1.0 only if explicitly promoted into release scope. Any
-later project container requires an approved format plus safe
+Any post-v1.0 dynamics analysis requires approved equations and independent
+references. Any later project container requires an approved format plus safe
 round-trip, migration where necessary, privacy, integrity, and security tests.
 
 ## 13. Assumptions and explicit non-goals

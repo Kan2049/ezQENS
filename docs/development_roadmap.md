@@ -48,11 +48,10 @@ level, work progresses through four overlapping phases:
    becomes trustworthy.
 2. **Phase II — Complete QENS analysis:** validated FWHM, relaxation time, EISF,
    component-Q outputs, selected temporal/spatial dynamics models, diagnostics,
-   visualization, and scientific output. Individual Phase-II dynamics models
-   may be scheduled before or after the first public release by later owner
-   decision; no large catalogue is implied.
+   visualization, and scientific output. Dynamics models are post-v1.0 work;
+   no large catalogue is implied.
 3. **Phase III — ezQENS application and v1.0 readiness:** progressively guided
-   and advanced GUI workflows, reusable Methods, persistent Results, usability,
+   and advanced GUI workflows, reusable Methods, in-memory Results, usability,
    export, lightweight reproducibility, documentation, and macOS/Windows
    packaging. This culminates in the special v1.0 public-release gate.
 4. **Phase IV — Expansion:** additional formats/instruments, richer output,
@@ -194,6 +193,9 @@ requires compatible contributing energy coordinates, keeps targets within
 current source coverage, and does not refine contributing source bins. It does
 not interpolate, extrapolate, repair Q by nearest neighbor, or silently
 reconstruct missing coverage.
+
+The core workflow remains validated and tested. The v1.0 desktop GUI does not
+expose Q rebinning; it returns in v1.1 with the Resolution energy cut.
 
 Other Q transformations of final reduced `S(Q,E)` spectra may require
 information that is no longer available, such as:
@@ -656,26 +658,34 @@ family requires that abstraction.
 
 ---
 
-## 9. Milestone 6 — Multi-Q free fitting and derived QENS quantities (active)
+## 9. Milestone 6 — Multi-Q free fitting and derived QENS quantities ✅ (completed and frozen)
 
 ### Goal
 
 Apply the validated single-Q free fit independently across Q.
 
-Validated capabilities to date include:
+The frozen milestone provides:
 
 * anchor-outward independent Single-Q fits in physical-Q order, with separate
   lower/higher nearest-success seed chains and explicit per-Q outcomes;
-* reusable Method application and in-memory Current/Saved Result lifecycle;
+* reusable Method application and a unified per-Q Result with in-memory Current,
+  Saved, and working-copy state;
 * continuation of caller-selected AutoFit candidates as independent Q branches;
-* component-resolved FWHM, relaxation time, and EISF derived from existing
-  fitted Results, with uncertainty availability and failed/excluded states;
+* FWHM and relaxation time as per-Lorentzian series linked across Q by per-Q
+  position;
+* EISF as one value per Q, computed from the fitted elastic area and all
+  fitted Lorentzian areas, with uncertainty availability and failed/excluded
+  states retained for derived quantities;
+* validated position swaps that change Lorentzian series membership without
+  refitting;
 * GUI comparison of selected AutoFit branches and derived QENS outputs;
 * Manual Fit to all Q from a retained successful Current Single-Q anchor,
   selectively transferring Bounds, Fixed state, and center-Tie topology without
   silently refitting that anchor;
 * terminal per-Q progress and target-start observation seams for Multi-Q runs;
-* constrained Q-grid assignment and fractional-coverage Q rebinning workflows.
+* constrained Q-grid assignment and validated, tested fractional-coverage
+  Q rebinning in the core. The v1.0 desktop GUI does not expose Q rebinning;
+  it returns in v1.1 with the Resolution energy cut.
 
 Batch fitting in this milestone remains a sequence of **independent free fits**
 rather than an implicit global fit.
@@ -686,24 +696,14 @@ fitting through their own core-owned model relationships. Such global fitting
 is a separate later capability and must not be simulated by GUI-side parameter
 ties or by silently changing the semantics of Milestone-6 batch fitting.
 
-These capabilities use in-memory workflow state. Durable project persistence
-and further analysis-level presentation remain open M6/application work.
+In-memory workflow state is final for v1.0. Durable project save and reopen are
+post-v1.0 work (§13).
 
 ### Scientific visualization
 
-Add analysis-level views such as:
-
-* Q-by-Q fit navigation;
-* fit-quality overview;
-* FWHM(Q);
-* relaxation-time trends;
-* EISF(Q);
-* residual overview;
-* included/excluded Q states.
-
-A later GUI slice will provide a separate post-Result cross-Q parameter explorer
-for selecting an existing fitted component and parameter, such as L1 Area(Q).
-This is distinct from AutoFit candidate comparison through FWHM(Q) and EISF(Q).
+Validated GUI views include Q-by-Q fit and residual inspection, fit status,
+AutoFit branch comparison, and the Parameter Viewer for fitted parameters and
+derived FWHM(Q), relaxation time, and EISF(Q).
 
 After Milestone 6, the desktop GUI may become the primary interactive workflow
 while Python/Jupyter usage remains fully supported.
@@ -721,22 +721,20 @@ Required release capabilities are:
 
 * a guided, responsive desktop GUI that delegates all science to the same
   GUI-independent Python core;
-* useful scientific export;
-* lightweight reproducibility information identifying inputs, selections and
-  masks, Methods/model and fit settings, Results, warnings, and software
-  version;
+* data and parameter export as the durable output; v1.0 has no project save or
+  reopen. Files carry a short metadata header with software version, export
+  time, input file names, Result name, units, and per-Q Q value, fit status,
+  and warnings. The data export records the fitting mask in a used-in-fit
+  column. Methods and fit settings (bounds, Fixed state, ties) are not exported;
 * clear user and scientific documentation;
 * validated macOS and Windows packages; and
 * real-workflow validation centered on DAVE- and Mantid-preprocessed data,
   including representative PSI FOCUS and ILL IN5/IN16 workflows where
   available, without instrument-specific core assumptions.
 
-Detailed GUI, export, reproducibility, Method/Result persistence, and packaging
-milestones are defined through rolling refinement when they become active. A
-complex project archive, raw-data reduction, automatic molecular
-interpretation, and a large mandatory dynamics-model catalogue do not gate
-v1.0. A selected dynamics model gates the release only if the owner explicitly
-promotes it into release scope.
+Detailed GUI, export, and packaging work is refined as it becomes active.
+Project persistence, raw-data reduction, automatic molecular interpretation,
+and dynamics models are outside v1.0.
 
 ---
 
@@ -744,8 +742,8 @@ promotes it into release scope.
 
 The following directions are expected but intentionally not fully specified.
 
-Their order relative to the first public release may change according to
-scientific need and explicit owner decisions.
+Their order after the first public release depends on scientific need and
+explicit owner decisions.
 
 ### Selected QENS dynamics analysis
 
@@ -862,11 +860,15 @@ raw-data capabilities.
 
 ## 13. Post-v1.0 application capabilities — provisional
 
+Planned for v1.1: restore the Q-rebin GUI and add one energy cut per Resolution,
+shared by its Samples. Resuming cut work requires per-Q starting bounds when
+the uncut kernel fails QC.
+
 Possible later product work includes:
 
 * richer scientific plotting;
 * publication-oriented export;
-* richer project save/reload beyond v1.0 lightweight reproducibility;
+* durable project save and reopen;
 * independent Method creation/editing without loaded data;
 * reusable Method libraries;
 * richer Method-application workflows across Groups and related datasets;

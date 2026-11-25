@@ -83,11 +83,12 @@ A user must be able to:
 11. Calculate relaxation times.
 12. Calculate experimental EISF.
 13. Inspect diagnostics, warnings, residuals, and failure states.
-14. Export useful scientific results.
-15. Retain lightweight reproducibility information for the analysis.
+14. Export data and parameters as the durable scientific output. v1.0 does not
+    save or reopen projects.
+15. Inspect the export metadata and the data export's used-in-fit column.
 
-Each stage must preserve sufficient provenance to explain inputs, settings,
-transformations, exclusions, warnings, and results.
+Within the open session, each stage must preserve sufficient provenance to
+explain inputs, settings, transformations, exclusions, warnings, and results.
 
 ## 4. Supported inputs
 
@@ -424,19 +425,19 @@ uncertainty propagation are also part of progressive basic analysis.
 Scientifically approved dynamics analysis may later fit the Q dependence of
 these outputs to diffusion/jump-diffusion, characteristic/residence-time,
 rotational/reorientational, EISF-geometry, confined/localized-motion, or other
-validated QENS models. The owner may schedule selected models before or after
-the first public release; this document does not create a mandatory catalogue.
+validated QENS models. These are post-v1.0 capabilities, not a mandatory
+catalogue.
 Automatic molecular structure interpretation, XYZ-driven model selection, and
 the currently unresolved C2/C4/isotropic candidate workflow remain outside
-v1.0 unless explicitly promoted.
+v1.0.
 
 ## 9. Reproducibility, export, visualization, and GUI requirements
 
-Version 1.0 retains enough lightweight reproducibility information to identify
-inputs, selections and masks, model configuration, fit settings, results,
-warnings, and software version. This does not require a complex archive or
-database, UUIDs everywhere, hash-addressed arrays, migration frameworks,
-append-only histories, or attachment infrastructure.
+Version 1.0 has no project save or reopen. Data and parameter exports are its
+durable output. Both carry a short metadata header with software version,
+export time, input file names, Result name, units, and per-Q Q value, fit status,
+and warnings. The data export records the fitting mask in a used-in-fit column.
+Methods and fit settings (bounds, Fixed state, ties) are not exported in v1.0.
 
 Reusable Methods are logically independent from the concrete data on which they
 execute. Model definition/topology is mandatory when a Method is applied; other
@@ -590,10 +591,9 @@ work is actually designed. Heavy persistence, migration, security, and archive
 architecture are provisional post-v1.0 work and must not delay scientific or
 release validation.
 
-Scientific export is a first-class evolving boundary. It may progressively
-include processed spectra, fitted curves and components, residuals, parameters,
-uncertainties, FWHM(Q), relaxation time, EISF(Q), later dynamics results, and
-the configuration needed for lightweight reproducibility.
+Scientific export is a first-class evolving boundary. v1.0 exports data, fit
+curves and residuals, fitted parameters, and experimental derived quantities.
+Dynamics models are outside v1.0.
 
 Visualization likewise consumes prepared scientific results and may grow from
 spectra/resolution/fit inspection to derived-Q and later dynamics views,
@@ -685,8 +685,8 @@ Version 1.0 is acceptable when:
 * linewidth/EISF conventions are explicit in UI, tables, plots,
   reproducibility records, and exports;
 * sequential batch fits remain independent per Q;
-* lightweight reproducibility information identifies inputs, selections,
-  settings, results, warnings, and software version;
+* data and parameter exports preserve the metadata and used-in-fit information
+  specified in §9 without project save/reopen or export of Methods and fit settings;
 * private-data rules are enforced by design and test;
 * the scientific validation plan passes on macOS Apple Silicon and supported
   Windows targets; and

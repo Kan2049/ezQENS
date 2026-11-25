@@ -13,10 +13,9 @@ mutable state, and passes explicit immutable or validated values between
 layers.
 
 Milestones 1–6 implement only minimal typed in-memory domain objects needed for
-import through derived QENS results. Version 1.0 adds only the lightweight
-reproducibility information needed to identify inputs, selections, settings,
-results, warnings, and software version. The final project-container format and
-extension are unresolved; the former `.qensfit` proposal is not a contract.
+import through derived QENS results. Version 1.0 uses export as its durable output
+(§7). The final project-container format and extension are unresolved; the
+former `.qensfit` proposal is not a contract.
 
 ## 2. Architectural principles
 
@@ -168,10 +167,10 @@ Exporters consume result/report models; they do not recompute fits. Every
 scientific export includes units, FWHM labels, exclusions, warnings, software
 version, and sufficient analysis/result context for traceability.
 
-Export and visualization are first-class evolving boundaries. Export may grow
-to cover processed spectra, curves/components, residuals, parameters,
-uncertainties, basic QENS quantities, later dynamics results, and lightweight
-reproducibility configuration. Visualization consumes scientific results and
+Export and visualization are first-class evolving boundaries. v1.0 exports
+measured data, fit curves and residuals, fitted parameters, and experimental
+derived quantities (FWHM, relaxation time, and EISF). Post-v1.0 export may grow
+to include dynamics results. Visualization consumes scientific results and
 never independently recomputes EISF, relaxation time, or other formulas.
 
 ### 3.3 Preprocessing and resolution
@@ -496,10 +495,11 @@ requirements.
 
 ## 7. Reproducibility and future project-file format
 
-Version 1.0 records enough lightweight information to identify inputs,
-selections and masks, configurations, results, warnings, and software version.
-It does not require container, archive, migration, attachment, hash-registry,
-or database infrastructure.
+Version 1.0 has no project save or reopen. Data and parameter files are the
+durable output. Their short metadata header records software version, export
+time, input file names, Result name, units, and per-Q Q value, fit status and
+warnings. A used-in-fit column in the data export records the fitting mask.
+Methods and fit settings (bounds, Fixed state, ties) are not exported.
 
 Any later project-file design begins from stable scientific contracts and must
 choose its format and extension explicitly. The former `.qensfit` proposal is
